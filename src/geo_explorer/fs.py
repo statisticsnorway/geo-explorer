@@ -1,10 +1,10 @@
 import datetime
 import glob
+import io
 import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
-import io
 
 from fsspec.spec import AbstractFileSystem
 

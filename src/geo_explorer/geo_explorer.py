@@ -354,7 +354,7 @@ class GeoExplorer:
                                         ),
                                     ]
                                 ),
-                                dbc.Row(id="column-value-colors"),
+                                dbc.Row(id="colorpicker-container"),
                                 dbc.Row(
                                     html.Div(id="remove-buttons"),
                                 ),
@@ -445,10 +445,14 @@ class GeoExplorer:
                         ),
                         dbc.Col(
                             html.Div(id="feature-table-container"),
-                            style={"width": "100%", "height": "100vh"},
+                            style={"width": "100%", "height": "auto"},
                             width=11,
                         ),
                     ],
+                    style={
+                        "height": "auto",
+                        "overflow": "visible",
+                    },
                 ),
                 dbc.Row(
                     [
@@ -496,12 +500,6 @@ class GeoExplorer:
             ],
             fluid=True,
         )
-
-        def get_keys(x) -> list[str]:
-            if isinstance(x, dict):
-                return list(x)
-            else:
-                return [str(x)]
 
         error_mess = "'data' must be a list of file paths or a dict of GeoDataFrames."
         bounds_series_dict = {}
@@ -611,7 +609,6 @@ class GeoExplorer:
             )
 
         @callback(
-            # Output("path-display", "value"),
             Output("file-list", "children"),
             Input("current-path", "data"),
         )
@@ -703,7 +700,7 @@ class GeoExplorer:
         )
         def delete_item(n_clicks_list):
             triggered_id = ctx.triggered_id
-            print("delete_item")
+            print("--delete_item")
             if triggered_id and triggered_id["type"] == "delete-btn":
                 print(n_clicks_list)  # [0]
                 # print(index)  # [None]
@@ -735,6 +732,7 @@ class GeoExplorer:
             prevent_initial_call=True,
         )
         def append_path(load_parquet, ids):
+            print("--append_path")
             triggered = dash.callback_context.triggered_id
             if not any(load_parquet) or not triggered:
                 return dash.no_update, dash.no_update
@@ -770,7 +768,7 @@ class GeoExplorer:
             # prevent_initial_call=True,
         )
         def get_files_in_bounds(bounds, file_added, file_removed):
-            print("get_files_in_bounds", bounds)
+            print("--get_files_in_bounds", bounds)
             box = shapely.box(*self.nested_bounds_to_bounds(bounds))
             files_in_bounds = sg.sfilter(self.bounds_series, box)
             currently_in_bounds = set(files_in_bounds.index)
@@ -787,7 +785,7 @@ class GeoExplorer:
             prevent_initial_call=True,
         )
         def uncheck(is_checked):
-            print("is_checked")
+            print("--is_checked")
             print(is_checked)
             stopp
             return is_checked
@@ -799,6 +797,7 @@ class GeoExplorer:
             prevent_initial_call=True,
         )
         def update_column_dropdown(currently_in_bounds):
+            print("--update_column_dropdown")
             columns = set(
                 itertools.chain.from_iterable(
                     set(
@@ -809,9 +808,7 @@ class GeoExplorer:
                     for path in currently_in_bounds
                 )
             )
-            return [
-                {"label": col, "value": col} for i, col in enumerate(sorted(columns))
-            ]
+            return [{"label": col, "value": col} for col in sorted(columns)]
 
         @callback(
             Output("column-value-color-dict", "children"),
@@ -841,15 +838,16 @@ class GeoExplorer:
             colorpicker_values_list,
             bins,
         ):
-            print("get_column_value_color_dict")
+            print("--get_column_value_color_dict")
             print(column_value_color_dict)
-            print(colorpicker_values_list)
+            print(colorpicker_values_list, self.selected_data)
             triggered = dash.callback_context.triggered_id
+            print(triggered)
             # if triggered in ["column-dropdown"]:
             #     column_value_color_dict = None
             #     colorpicker_values_list = None
 
-            if (column is None and triggered in ["column-dropdown"]) or not any(
+            if column is None or not any(
                 column in df for df in self.loaded_data.values()
             ):
                 return (
@@ -992,16 +990,20 @@ class GeoExplorer:
             )
 
         @callback(
-            Output("column-value-colors", "children"),
+            Output("colorpicker-container", "children"),
             Input("column-value-color-dict", "children"),
             Input("file-removed", "children"),
             State("is-numeric", "children"),
+            State("currently-in-bounds2", "children"),
             prevent_initial_call=True,
         )
-        def update_column_dropdown(column_value_color_dict, file_removed, is_numeric):
-            print("update_column_dropdown")
-            print(column_value_color_dict)
-            if column_value_color_dict is None:
+        def update_column_dropdown(
+            column_value_color_dict, file_removed, is_numeric, currently_in_bounds
+        ):
+            print("--update_column_dropdown", column_value_color_dict)
+            if not currently_in_bounds:
+                return None
+            if not column_value_color_dict:  # is None:
                 return html.Div(
                     [
                         dbc.Row(
@@ -1131,8 +1133,9 @@ class GeoExplorer:
             bins,
             clicked_ids,
         ):
-            print("add_data")
-            print(colorpicker_values_list)
+            print("--add_data")
+            print("add_data: colorpicker_values_list", colorpicker_values_list)
+            print("add_data: column_value_color_dict", column_value_color_dict)
             triggered = dash.callback_context.triggered_id
             if (
                 isinstance(triggered, dict)
@@ -1158,6 +1161,8 @@ class GeoExplorer:
                 column_value_color_dict = {
                     i: x[1] for i, x in enumerate(column_value_color_dict)
                 }
+
+            print("column_value_color_dict2", column_value_color_dict)
 
             ns = Namespace("onEachFeatureToggleHighlight", "default")
 
@@ -1304,7 +1309,7 @@ class GeoExplorer:
         def display_feature_attributes(
             clicked_ids, clear_table, n_clicks, features, filenames, clicked_features
         ):
-            print("display_feature_attributes", n_clicks)
+            print("--display_feature_attributes", n_clicks)
             triggered = dash.callback_context.triggered_id
             print(clicked_ids)
             if triggered == "clear-table":
@@ -1366,6 +1371,7 @@ class GeoExplorer:
             State("column-dropdown", "options"),
         )
         def update_table(data, column_dropdown):
+            print("--update_table")
             if not data:
                 return "No features clicked."
             all_columns = {x["label"] for x in column_dropdown}
