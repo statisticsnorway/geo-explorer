@@ -1,16 +1,35 @@
-# \<repo-navn>
-Beskriv hva repoet inneholder.
+# geo-explorer
 
-## Hvorfor er ikke dette repoet public?
-Denne overskriften og tilhørende avsnitt slettes hvis repoet er public. (Husk at for public repoer finnes det [krav](https://github.com/statisticsnorway/adr/blob/main/docs/0006-aapen-kildekode-i-ssb.md#kriterier-for-%C3%A5pen-kildekode) som må oppfylles.)
+Explore geodata interactively.
 
-I følge [Retningslinjer for åpen kildekode i SSB](https://github.com/statisticsnorway/adr/blob/main/docs/0006-aapen-kildekode-i-ssb.md)
-gjelder følgende:
+Opprettet av:
+ort <ort@ssb.no>
 
-> "All kode i SSB skal som standard være allment tilgjengelig (åpen kildekode). Det
-gjøres unntak for kode som beskriver SSB spesifikke infrastrukturdetaljer,
-konfigurasjon av applikasjoner og annen kode som teamet vurderer til å ikke være åpen
-grunnet sikkerhetsmessige risikoer. ... Kodelagre som vurderes til ikke å være åpne
-skal ha et avsnitt i README hvor beslutningen begrunnes så konkret som mulig."
+---
 
-\<Begrunnelse for hvorfor dette repoet ikke er public>
+## GeoExplorer
+
+
+```python
+from geo_explorer import GeoExplorer
+from geo_explorer import LocalFileSystem
+explorer = GeoExplorer(
+    start_dir="C:/users/ort/OneDrive - Statistisk sentralbyrå/data",
+    file_system=LocalFileSystem(),
+    port=8055,
+)
+explorer.run(debug=True)
+```
+
+Run locally:
+
+```python
+from geo_explorer import GeoExplorer
+from geo_explorer import LocalFileSystem
+explorer = GeoExplorer(
+    start_dir="C:/users/user/data",
+    file_system=LocalFileSystem(),
+    port=None,
+)
+explorer.run()
+```
