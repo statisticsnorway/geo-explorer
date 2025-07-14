@@ -1,3 +1,4 @@
+import inspect
 import itertools
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -19,7 +20,6 @@ from dash import Input
 from dash import Output
 from dash import State
 from dash import callback
-from dash import ctx
 from dash import dash_table
 from dash import dcc
 from dash import html
@@ -98,20 +98,24 @@ def get_colorpicker_container(color_dict: dict[str, str]) -> html.Div:
                 },
             )
             for value, color in color_dict.items()
-        ]
+        ],
     )
 
 
-def read_files(exp, paths):
-    read_func = partial(sg.read_geopandas, file_system=exp.file_system)
+def read_files(explorer, paths):
+    read_func = partial(sg.read_geopandas, file_system=explorer.file_system)
     with ThreadPoolExecutor() as executor:
         more_data = list(executor.map(read_func, paths))
     for path, df in zip(paths, more_data, strict=True):
-        exp.loaded_data[path] = df.to_crs(4326).assign(
+        explorer.loaded_data[path] = df.to_crs(4326).assign(
             _unique_id=lambda df: [
-                f"{len(exp.loaded_data)}_{j}" for j in range(len(df))
+                f"{len(explorer.loaded_data)}_{j}" for j in range(len(df))
             ]
         )
+        if explorer.splitted:
+            explorer.loaded_data[path]["split_index"] = [
+                f"{get_name(path)} {i}" for i in range(len(df))
+            ]
 
 
 def _standardize_path(path: str | PurePosixPath) -> str:
@@ -308,7 +312,7 @@ class GeoExplorer:
                                                     "color": "black",
                                                 },
                                                 id="splitter",
-                                                n_clicks=0,
+                                                n_clicks=1 if self.splitted else 0,
                                             ),
                                         ),
                                         dbc.Col(
@@ -530,15 +534,13 @@ class GeoExplorer:
                         ),
                     ]
                 ),
-                dcc.Store(id="js_init_store", data=False),
-                dcc.Store(id="js_init_store2", data=False),
+                dcc.Store(id="is_splitted", data=False),
                 html.Div(id="currently-in-bounds", style={"display": "none"}),
                 html.Div(id="currently-in-bounds2", style={"display": "none"}),
                 html.Div(id="file-removed", style={"display": "none"}),
                 html.Div(id="dummy-output", style={"display": "none"}),
                 html.Div(id="bins", style={"display": "none"}),
                 html.Div(False, id="is-numeric", style={"display": "none"}),
-                # html.Div(False, id="cmap-has-been-set", style={"display": "none"}),
                 dcc.Store(id="clicked-features", data=clicked_features),
                 dcc.Store(id="clicked-ids", data=self.selected_features),
             ],
@@ -667,6 +669,14 @@ class GeoExplorer:
                     return f"'{x}'"
                 return x
 
+            defaults = {
+                arg: default
+                for arg, default in zip(
+                    inspect.getfullargspec(self.__class__).args[1:],
+                    inspect.getfullargspec(self.__class__).defaults,
+                    strict=True,
+                )
+            }
             data = {
                 k: v
                 for k, v in self.__dict__.items()
@@ -681,34 +691,34 @@ class GeoExplorer:
                     "bounds",
                     "zoom",
                 ]
+                and not (k in defaults and v == defaults[k])
             } | {"zoom": zoom, "center": center, "color_dict": color_dict}
             if self.selected_data:
                 data["data"] = data.pop("selected_data")
             else:
                 data.pop("selected_data")
-            txt = ", ".join([f"{k}={to_string(v)}" for k, v in data.items()])
+
+            content = [
+                html.Span(f"from geo_explorer import {self.__class__.__name__}"),
+                html.Br(),
+            ]
             if self.file_system.__module__ == "geo_explorer.fs":
-                file_system_span = [
+                content.append(
                     html.Span(
                         f"from geo_explorer import {self.file_system.__class__.__name__}"
-                    ),
-                    html.Br(),
-                ]
-            else:
-                file_system_span = []
-            return (
-                html.Div(
-                    [
-                        html.Span(
-                            f"from geo_explorer import {self.__class__.__name__}"
-                        ),
-                        html.Br(),
-                        *file_system_span,
-                        html.Span(f"{self.__class__.__name__}({txt}).run()"),
-                    ]
-                ),
-                True,
-            )
+                    )
+                )
+                content.append(html.Br())
+
+            content.append(html.Span(f"{self.__class__.__name__}("))
+            content.append(html.Br())
+            for k, v in data.items():
+                content.append(
+                    html.Span(f"{k}={to_string(v)},", style={"padding-left": "4ch"})
+                )
+                content.append(html.Br())
+            content.append(html.Span(").run()"))
+            return (html.Div(content), True)
 
         @callback(
             Output("file-list", "children"),
@@ -772,7 +782,7 @@ class GeoExplorer:
                             "❌",
                             id={
                                 "type": "delete-btn",
-                                "index": f"{i} -- {path}",
+                                "index": path,  # f"{i} -- {path}",
                             },
                             n_clicks=0,
                             style={
@@ -796,27 +806,43 @@ class GeoExplorer:
         @callback(
             Output("file-removed", "children"),
             Input({"type": "delete-btn", "index": dash.ALL}, "n_clicks"),
-            # State({"type": "delete-btn", "index": dash.ALL}, "index"),
+            State({"type": "delete-btn", "index": dash.ALL}, "id"),
             # State("items-store", "data"),
             prevent_initial_call=True,
         )
-        def delete_item(n_clicks_list):
-            triggered_id = ctx.triggered_id
-            print("--delete_item")
-            if triggered_id and triggered_id["type"] == "delete-btn":
-                print(n_clicks_list)  # [0]
-                # print(index)  # [None]
-                i, path_to_remove = triggered_id["index"].split("--")
-                i = int(i.strip())
-                path_to_remove = path_to_remove.strip()
-                print(i, path_to_remove)
-                n_clicks = n_clicks_list[i]
-                if not n_clicks:
-                    return dash.no_update
-                # n_clicks = n_clicks_list[triggered_id["index"]]
-                print(n_clicks)
-                # path_to_remove = triggered_id["index"]
+        def delete_item(n_clicks_list, delete_ids):
+            if not any(n_clicks_list):
+                return dash.no_update
+            print("\n\n--delete_item")
+            triggered = dash.callback_context.triggered_id
+            if triggered and triggered["type"] == "delete-btn":
+                print(delete_ids)
+                triggered_index = triggered["index"]
+                print(triggered_index)
+                index = next(
+                    iter(
+                        i
+                        for i, id_ in enumerate(delete_ids)
+                        if id_["index"] == triggered_index
+                    )
+                )
+                path_to_remove = delete_ids[index]["index"]
                 print(path_to_remove)
+                # print(n_clicks_list)  # [0]
+                # print(delete_ids)  # [0]
+                # print(triggered)  # [0]
+                # triggered["index"]
+                # # print(index)  # [None]
+                # i, path_to_remove = triggered["index"].split("--")
+                # i = int(i.strip())
+                # i = delete_ids["index"]
+                # path_to_remove = path_to_remove.strip()
+                # print(i, path_to_remove)
+                # n_clicks = n_clicks_list[i]
+                # # n_clicks = n_clicks_list[triggered["index"]]
+                # print(n_clicks)
+                # # path_to_remove = triggered["index"]
+                print(self.selected_data)
                 self.selected_data.pop(self.selected_data.index(path_to_remove))
                 for path in list(self.loaded_data):
                     if path_to_remove in path:
@@ -827,25 +853,50 @@ class GeoExplorer:
             return 1
 
         @callback(
+            Output("splitter", "n_clicks"),
+            Output("is_splitted", "data"),
+            Output("column-dropdown", "value"),
+            Input("splitter", "n_clicks"),
+            Input("column-dropdown", "value"),
+        )
+        def is_splitted(n_clicks: int, column):
+            triggered = dash.callback_context.triggered_id
+            print(triggered, n_clicks, column)
+            is_splitted: bool = n_clicks % 2 == 1 and not (
+                triggered == "column-dropdown" and column == None
+            )
+            # self.splitted = is_splitted
+            if is_splitted:
+                column = "split_index"
+            elif column == "split_index":
+                column = None
+            else:
+                column = dash.no_update
+            print("\n--is_splitted")
+            print(triggered, is_splitted, column)
+            n_clicks = 1 if is_splitted else 0
+            return n_clicks, is_splitted, column
+
+        @callback(
             Output("new-file-added", "children"),
             Output("new-file-added", "style"),
             Input({"type": "load-parquet", "index": dash.ALL}, "n_clicks"),
-            Input("splitter", "n_clicks"),
+            Input("is_splitted", "data"),
             State({"type": "file-item", "index": dash.ALL}, "id"),
             prevent_initial_call=True,
         )
         def append_path(load_parquet, splitter, ids):
             print("--append_path")
             triggered = dash.callback_context.triggered_id
+            if triggered == "is_splitted":
+                self.splitted = True
+                for key, df in self.loaded_data.items():
+                    self.loaded_data[key]["split_index"] = [
+                        f"{get_name(key)} {i}" for i in range(len(df))
+                    ]
+                return 1, {"display": "none"}
             if not any(load_parquet) or not triggered:
                 return dash.no_update, dash.no_update
-            if triggered == "splitter":
-                self.splitted_data = {}
-                for key, df in self.loaded_data.items():
-                    self.splitted_data |= {
-                        f"{key}_{i}": df.iloc[[i]] for i in range(len(df))
-                    }
-                return 1, {"display": "none"}
             selected_path = triggered["index"]
             selected_path = _standardize_path(selected_path)
             try:
@@ -925,6 +976,7 @@ class GeoExplorer:
             State({"type": "colorpicker", "column_value": dash.ALL}, "value"),
             State({"type": "colorpicker", "column_value": dash.ALL}, "id"),
             State("bins", "children"),
+            State("is_splitted", "data"),
             prevent_initial_call=True,
         )
         def get_column_value_color_dict(
@@ -938,9 +990,15 @@ class GeoExplorer:
             colorpicker_values_list,
             colorpicker_ids,
             bins,
+            is_splitted,
         ):
-            print("--get_column_value_color_dict")
+            print("--get_column_value_color_dict", column)
             triggered = dash.callback_context.triggered_id
+
+            if not is_splitted and self.splitted:
+                colorpicker_ids, colorpicker_values_list = [], []
+                self.splitted = is_splitted
+
             column_values = [x["column_value"] for x in colorpicker_ids]
             default_colors = list(sg.maps.map._CATEGORICAL_CMAP.values())
 
@@ -954,6 +1012,13 @@ class GeoExplorer:
 
                 if self.color_dict:
                     color_dict |= self.color_dict
+
+                if not is_splitted:
+                    color_dict = {
+                        key: color
+                        for key, color in color_dict.items()
+                        if key in self.selected_data
+                    }
 
                 new_values = [
                     get_name(value)
@@ -970,7 +1035,12 @@ class GeoExplorer:
                     random_color() for _ in range(len(new_values) - len(default_colors))
                 ]
 
-                color_dict = color_dict | dict(zip(new_values, new_colors, strict=True))
+                try:
+                    color_dict = color_dict | dict(
+                        zip(new_values, new_colors, strict=True)
+                    )
+                except ValueError as e:
+                    raise ValueError(f"{e}: {new_values} - {new_colors}") from e
 
                 return (
                     get_colorpicker_container(color_dict),
@@ -1132,13 +1202,17 @@ class GeoExplorer:
             colorpicker_ids,
         ):
             print("--add_data")
-            print("add_data: colorpicker_values_list", colorpicker_values_list)
+            print("add_data: colorpicker_values_list")
             print(is_checked)
             assert any(is_checked) or not len(is_checked), is_checked
             triggered = dash.callback_context.triggered_id
 
             column_values = [x["column_value"] for x in colorpicker_ids]
+            print(colorpicker_values_list)
+            print(column_values)
             color_dict = dict(zip(column_values, colorpicker_values_list, strict=True))
+            for key, value in color_dict.items():
+                print(key, value)
 
             box = shapely.box(*self._nested_bounds_to_bounds(bounds))
             box = buffer_box(box)
