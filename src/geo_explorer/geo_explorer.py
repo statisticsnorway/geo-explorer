@@ -219,6 +219,7 @@ def list_dir(path, file_system):
 
 
 class GeoExplorer:
+    """Class for exploring geodata interactively."""
 
     def __init__(
         self,
@@ -236,6 +237,7 @@ class GeoExplorer:
         color_dict: dict | None = None,
         file_system=LocalFileSystem(),
     ):
+        """Initialiser."""
         self.start_dir = start_dir
         self.port = port
         if bounds is not None and center is not None:
@@ -629,12 +631,13 @@ class GeoExplorer:
                 feature = next(iter(features))
                 clicked_features.append(feature["properties"])
 
-        self.register_callbacks()
+        self._register_callbacks()
 
     def run(self, debug=False):
+        """Run the dash app."""
         self.app.run(debug=debug, port=self.port)
 
-    def register_callbacks(self):
+    def _register_callbacks(self):
 
         @callback(
             Output("export-text", "children"),
@@ -669,7 +672,7 @@ class GeoExplorer:
                 print()
                 print(k)
                 print(v)
-            centroid = shapely.box(*self.nested_bounds_to_bounds(bounds)).centroid
+            centroid = shapely.box(*self._nested_bounds_to_bounds(bounds)).centroid
             center = (centroid.y, centroid.x)
 
             column_values = [x["column_value"] for x in colorpicker_ids]
@@ -884,7 +887,7 @@ class GeoExplorer:
         )
         def get_files_in_bounds(bounds, file_added, file_removed):
             print("--get_files_in_bounds", bounds)
-            box = shapely.box(*self.nested_bounds_to_bounds(bounds))
+            box = shapely.box(*self._nested_bounds_to_bounds(bounds))
             box = buffer_box(box)
             files_in_bounds = sg.sfilter(self.bounds_series, box)
             currently_in_bounds = set(files_in_bounds.index)
@@ -914,7 +917,7 @@ class GeoExplorer:
         )
         def update_column_dropdown_options(currently_in_bounds):
             print("--update_column_dropdown_options")
-            return self.get_column_dropdown_options(currently_in_bounds)
+            return self._get_column_dropdown_options(currently_in_bounds)
 
         @callback(
             Output("colorpicker-container", "children"),
@@ -987,7 +990,7 @@ class GeoExplorer:
                     currently_in_bounds,
                 )
 
-            box = shapely.box(*self.nested_bounds_to_bounds(bounds))
+            box = shapely.box(*self._nested_bounds_to_bounds(bounds))
             box = buffer_box(box)
             values = pd.concat(
                 [
@@ -1143,7 +1146,7 @@ class GeoExplorer:
             column_values = [x["column_value"] for x in colorpicker_ids]
             color_dict = dict(zip(column_values, colorpicker_values_list, strict=True))
 
-            box = shapely.box(*self.nested_bounds_to_bounds(bounds))
+            box = shapely.box(*self._nested_bounds_to_bounds(bounds))
             box = buffer_box(box)
             data = []
             filenames = []
@@ -1366,7 +1369,7 @@ class GeoExplorer:
             if not data:
                 return "No features clicked."
             if column_dropdown is None:
-                column_dropdown = self.get_column_dropdown_options(
+                column_dropdown = self._get_column_dropdown_options(
                     list(self.loaded_data)
                 )
             all_columns = {x["label"] for x in column_dropdown}
@@ -1502,7 +1505,7 @@ class GeoExplorer:
         #     Input("grid_button_container_end", "children"),
         # )
 
-    def get_column_dropdown_options(self, currently_in_bounds):
+    def _get_column_dropdown_options(self, currently_in_bounds):
         columns = set(
             itertools.chain.from_iterable(
                 set(
@@ -1515,7 +1518,7 @@ class GeoExplorer:
         )
         return [{"label": col, "value": col} for col in sorted(columns)]
 
-    def nested_bounds_to_bounds(
+    def _nested_bounds_to_bounds(
         self,
         bounds: list[list[float]],
     ) -> tuple[float, float, float, float]:
@@ -1533,6 +1536,8 @@ class GeoExplorer:
         return minx, miny, maxx, maxy
 
     def __str__(self) -> str:
+        """String representation."""
+
         def to_string(x):
             if isinstance(x, str):
                 return f"'{x}'"
