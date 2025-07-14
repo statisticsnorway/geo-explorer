@@ -229,45 +229,29 @@ class GeoExplorer:
         selected_features: list[str] | None = None,
         column: str | None = None,
         wms=None,
-        center=None,
-        bounds=None,
+        center: tuple[float, float] | None = None,
         zoom: int = 10,
         nan_color: str = "#969696",
         nan_label: str = "Missing",
         color_dict: dict | None = None,
         file_system=LocalFileSystem(),
-    ):
+        splitted: bool = False,
+    ) -> None:
         """Initialiser."""
         self.start_dir = start_dir
         self.port = port
-        if bounds is not None and center is not None:
-            raise TypeError("Specify either bounds or center, not both")
-        elif bounds is not None:
-            self.center = None
-            self.zoom = None
-            if len(bounds) == 4:
-                self.bounds = bounds_to_nested_bounds(bounds)
-            elif len(bounds) != 2 and all(len(x) == 2 for x in bounds):
-                raise ValueError(
-                    "bounds must be an iterable of minx, miny, maxx, maxy or an iterable of iterables ([[miny, minx], [maxy, maxx]])"
-                )
-            else:
-                self.bounds = list(bounds)
-        elif center is not None:
+        if center is not None:
             self.center = center
-            self.bounds = None
-            self.zoom = zoom
         else:
             self.center = (59.91740845, 10.71394444)
-            self.bounds = None
-            self.zoom = zoom
-
+        self.zoom = zoom
         self.column = column
         self.color_dict = color_dict or {}
         self.wms = wms
         self.file_system = file_system
         self.nan_color = nan_color
         self.nan_label = nan_label
+        self.splitted = splitted
         self.file_system = file_system
         self.selected_features: list[str] = selected_features
         self.currently_in_bounds: set[str] = set()
@@ -297,7 +281,6 @@ class GeoExplorer:
                             [
                                 dl.Map(
                                     center=self.center,
-                                    bounds=self.bounds,
                                     zoom=self.zoom,
                                     children=[
                                         dl.LayersControl(BASE_LAYERS, id="lc"),
@@ -324,8 +307,9 @@ class GeoExplorer:
                                                     "fillColor": "white",
                                                     "color": "black",
                                                 },
+                                                id="splitter",
+                                                n_clicks=0,
                                             ),
-                                            id="splitter",
                                         ),
                                         dbc.Col(
                                             html.Div(
@@ -633,11 +617,11 @@ class GeoExplorer:
 
         self._register_callbacks()
 
-    def run(self, debug=False):
-        """Run the dash app."""
+    def run(self, debug: bool = False) -> None:
+        """Run the app."""
         self.app.run(debug=debug, port=self.port)
 
-    def _register_callbacks(self):
+    def _register_callbacks(self) -> None:
 
         @callback(
             Output("export-text", "children"),
@@ -846,14 +830,22 @@ class GeoExplorer:
             Output("new-file-added", "children"),
             Output("new-file-added", "style"),
             Input({"type": "load-parquet", "index": dash.ALL}, "n_clicks"),
+            Input("splitter", "n_clicks"),
             State({"type": "file-item", "index": dash.ALL}, "id"),
             prevent_initial_call=True,
         )
-        def append_path(load_parquet, ids):
+        def append_path(load_parquet, splitter, ids):
             print("--append_path")
             triggered = dash.callback_context.triggered_id
             if not any(load_parquet) or not triggered:
                 return dash.no_update, dash.no_update
+            if triggered == "splitter":
+                self.splitted_data = {}
+                for key, df in self.loaded_data.items():
+                    self.splitted_data |= {
+                        f"{key}_{i}": df.iloc[[i]] for i in range(len(df))
+                    }
+                return 1, {"display": "none"}
             selected_path = triggered["index"]
             selected_path = _standardize_path(selected_path)
             try:
@@ -899,20 +891,18 @@ class GeoExplorer:
             return list(currently_in_bounds)
 
         @callback(
-            Output({"type": "geojson", "filename": dash.ALL}, "checked"),
-            Input({"type": "geojson", "filename": dash.ALL}, "checked"),
-            prevent_initial_call=True,
+            Output({"type": "geojson-overlay", "filename": dash.ALL}, "checked"),
+            Input({"type": "geojson-overlay", "filename": dash.ALL}, "checked"),
+            # prevent_initial_call=True,
         )
         def uncheck(is_checked):
             print("--is_checked")
             print(is_checked)
-            stopp
             return is_checked
 
         @callback(
             Output("column-dropdown", "options"),
             Input("currently-in-bounds", "children"),
-            # Input("file-removed", "children"),
             prevent_initial_call=True,
         )
         def update_column_dropdown_options(currently_in_bounds):
@@ -1119,7 +1109,8 @@ class GeoExplorer:
             Input("file-removed", "children"),
             Input("clear-table", "n_clicks"),
             State("map", "bounds"),
-            State({"type": "geojson", "filename": dash.ALL}, "checked"),
+            State("map", "zoom"),
+            State({"type": "geojson-overlay", "filename": dash.ALL}, "checked"),
             State("column-dropdown", "value"),
             State("bins", "children"),
             State("clicked-ids", "data"),
@@ -1133,6 +1124,7 @@ class GeoExplorer:
             file_removed,
             clear_table,
             bounds,
+            zoom,
             is_checked,
             column,
             bins,
@@ -1141,6 +1133,8 @@ class GeoExplorer:
         ):
             print("--add_data")
             print("add_data: colorpicker_values_list", colorpicker_values_list)
+            print(is_checked)
+            assert any(is_checked) or not len(is_checked), is_checked
             triggered = dash.callback_context.triggered_id
 
             column_values = [x["column_value"] for x in colorpicker_ids]
@@ -1166,6 +1160,15 @@ class GeoExplorer:
                     )
 
                 df = sg.sfilter(df, box)
+                if zoom <= 13 and len(df) > 1000:
+                    df.geometry = shapely.simplify(df.geometry.values, 50)
+                elif zoom <= 12 and len(df) > 10_000:
+                    df.geometry = shapely.simplify(df.geometry.values, 150)
+                elif zoom <= 11 and len(df) > 100_000:
+                    df.geometry = shapely.simplify(df.geometry.values, 1000)
+                elif zoom <= 8 and len(df) > 250_000:
+                    df.geometry = shapely.simplify(df.geometry.values, 3000)
+
                 if column is not None and column in df and not is_numeric:
                     df["_color"] = df[column].map(color_dict)
                 elif column is not None and column in df:
@@ -1188,6 +1191,7 @@ class GeoExplorer:
                             dl.GeoJSON(id={"type": "geojson", "filename": path}),
                             name=get_name(path),
                             checked=True,
+                            id={"type": "geojson-overlay", "filename": path},
                         )
                     )
                     continue
@@ -1214,6 +1218,7 @@ class GeoExplorer:
                             ),
                             name=get_name(path),
                             checked=True,
+                            id={"type": "geojson-overlay", "filename": path},
                         )
                     )
                 elif column:
@@ -1273,6 +1278,7 @@ class GeoExplorer:
                             ),
                             name=get_name(path),
                             checked=True,
+                            id={"type": "geojson-overlay", "filename": path},
                         )
                     )
                 else:
@@ -1300,6 +1306,7 @@ class GeoExplorer:
                             ),
                             name=get_name(path),
                             checked=True,
+                            id={"type": "geojson-overlay", "filename": path},
                         )
                     )
 
@@ -1325,7 +1332,6 @@ class GeoExplorer:
             feature_ids,
             clicked_features,
         ):
-            print("--display_feature_attributes", n_clicks)
             triggered = dash.callback_context.triggered_id
             if triggered == "clear-table":
                 return [], []
@@ -1365,7 +1371,6 @@ class GeoExplorer:
             State("currently-in-bounds", "children"),
         )
         def update_table(data, column_dropdown, currently_in_bounds):
-            print("--update_table")
             if not data:
                 return "No features clicked."
             if column_dropdown is None:
@@ -1376,7 +1381,6 @@ class GeoExplorer:
             columns = [{"name": k, "id": k} for k in data[0].keys() if k in all_columns]
             return html.Div(
                 [
-                    # html.Div(f"Table view on {path}"),
                     dash_table.DataTable(
                         columns=columns,
                         data=data,
@@ -1412,98 +1416,6 @@ class GeoExplorer:
             Output("dummy-output", "children"),
             Input("clicked-ids", "data"),
         )
-
-        # self.app.clientside_callback(
-        #     """function(_, feature, hideout){
-        #     let selected = hideout.selected;
-        #     const name = feature.properties.name;
-        #     if(selected.includes(name)){selected = selected.filter((item) => (item !== name))}
-        #     else{selected.push(name);}
-        #     return {selected: selected};
-        # }""",
-        #     Output("geojson", "hideout"),
-        #     Input({"type": "geojson", "filename": dash.ALL}, "n_clicks"),
-        #     State({"type": "geojson", "filename": dash.ALL}, "clickData"),
-        #     State({"type": "geojson", "filename": dash.ALL}, "hideout"),
-        #     prevent_initial_call=True,
-        # )
-
-        # app.clientside_callback(
-        #     ClientsideFunction(namespace="clientside", function_name="make_draggable"),
-        #     Output(
-        #         "custom-popup", "className"
-        #     ),  # the attribute here will not be updated, it is just used as a dummy
-        #     [Input("custom-popup", "id")],
-        # )
-
-        # app.clientside_callback(
-        #     """
-        #     function(trigger) {
-        #         if (window.gridInteractionInitialized) {
-        #             return true;
-        #         }
-
-        #         const gridConfigs = [
-        #             {
-        #                 id: "grid_button_container",
-        #                 cellClass: "grid-cell",
-        #                 rowAttr: "data-row",
-        #                 colAttr: "data-col"
-        #             },
-        #             {
-        #                 id: "grid_button_container_end",
-        #                 cellClass: "grid-cell-end",
-        #                 rowAttr: "data-row",
-        #                 colAttr: "data-col"
-        #             }
-        #         ];
-
-        #         let isMouseDown = false;
-        #         let visited = new Set();
-
-        #         document.addEventListener("mousedown", () => {
-        #             isMouseDown = true;
-        #             visited.clear();
-        #         });
-
-        #         document.addEventListener("mouseup", () => {
-        #             isMouseDown = false;
-        #             visited.clear();
-        #         });
-
-        #         gridConfigs.forEach(cfg => {
-        #             const grid = document.getElementById(cfg.id);
-        #             if (!grid) return;
-
-        #             grid.addEventListener("mouseover", function(e) {
-        #                 if (!isMouseDown) return;
-
-        #                 const cell = e.target.closest(`.${cfg.cellClass}`);
-        #                 if (!cell) return;
-
-        #                 const row = cell.getAttribute(cfg.rowAttr);
-        #                 const col = cell.getAttribute(cfg.colAttr);
-        #                 const cellId = `${cfg.id}:${row},${col}`;
-
-        #                 const currentColor = getComputedStyle(cell).backgroundColor;
-        #                 if (currentColor === "rgb(14, 42, 48)") return;
-
-        #                 if (!visited.has(cellId)) {
-        #                     visited.add(cellId);
-        #                     cell.click();
-        #                 }
-        #             });
-        #         });
-
-        #         console.log("✅ Grid interaction initialized.");
-        #         window.gridInteractionInitialized = true;
-        #         return true;
-        #     }
-        #     """,
-        #     Output("js_init_store", "data"),
-        #     Input("grid_button_container", "children"),
-        #     Input("grid_button_container_end", "children"),
-        # )
 
     def _get_column_dropdown_options(self, currently_in_bounds):
         columns = set(

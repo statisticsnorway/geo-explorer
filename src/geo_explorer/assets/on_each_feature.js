@@ -15,7 +15,7 @@ window.onEachFeatureToggleHighlight = Object.assign({}, window.dashExtensions, {
 
             // Always check if feature is selected and apply highlight
             if (window.selectedFeatureIds.includes(featureId)) {
-                if (geomType === "LineString" || geomType === "MultiLineString") {
+                if (geomType === "LineString" || geomType === "MultiLineString" || geomType === "LinearRing") {
                     layer.setStyle({
                         fillColor: "#ffff00",
                         color: "#ffff00",
@@ -36,7 +36,7 @@ window.onEachFeatureToggleHighlight = Object.assign({}, window.dashExtensions, {
                 const idx = window.selectedFeatureIds.indexOf(featureId);
                 if (idx === -1) {
                     window.selectedFeatureIds.push(featureId);
-                    if (geomType === "LineString" || geomType === "MultiLineString") {
+                    if (geomType === "LineString" || geomType === "MultiLineString" || geomType === "LinearRing") {
                         layer.setStyle({
                             fillColor: "#ffff00",
                             color: "#ffff00",
