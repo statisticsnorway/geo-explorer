@@ -28,6 +28,7 @@ from geopandas import GeoDataFrame
 from geopandas import GeoSeries
 from jenkspy import jenks_breaks
 from shapely.errors import GEOSException
+from shapely.geometry import Polygon
 
 from .fs import LocalFileSystem
 
@@ -61,7 +62,7 @@ BASE_LAYERS = [
 ]
 
 
-def buffer_box(box):
+def _buffer_box(box: Polygon) -> Polygon:
     try:
         return sg.to_gdf(box, 4326).to_crs(3035).buffer(100).to_crs(4326).union_all()
     except GEOSException:
@@ -102,7 +103,7 @@ def get_colorpicker_container(color_dict: dict[str, str]) -> html.Div:
     )
 
 
-def read_files(explorer, paths):
+def _read_files(explorer, paths: list[str]) -> None:
     read_func = partial(sg.read_geopandas, file_system=explorer.file_system)
     with ThreadPoolExecutor() as executor:
         more_data = list(executor.map(read_func, paths))
@@ -114,7 +115,7 @@ def read_files(explorer, paths):
         )
         if explorer.splitted:
             explorer.loaded_data[path]["split_index"] = [
-                f"{get_name(path)} {i}" for i in range(len(df))
+                f"{_get_name(path)} {i}" for i in range(len(df))
             ]
 
 
@@ -125,26 +126,12 @@ def _standardize_path(path: str | PurePosixPath) -> str:
     )
 
 
-def bounds_to_nested_bounds(
-    bounds: tuple[float, float, float, float],
-) -> list[list[float]]:
-    minx, miny, maxx, maxy = bounds
-    return [[miny, minx], [maxy, maxx]]
-
-
-def dict_to_geopandas(dict_):
-    geometry = dict_.pop("geometry")
-    crs = dict_.pop("crs")
-    geometry = GeoSeries.from_wkt(geometry, crs=crs)
-    return GeoDataFrame(dict_, geometry=geometry, crs=crs)
-
-
-def random_color():
+def _random_color() -> str:
     r, g, b = np.random.choice(range(256), size=3)
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
-def get_name(path):
+def _get_name(path):
     return Path(path).stem
 
 
@@ -176,7 +163,7 @@ def _get_bounds_series(path, file_system):
     return sg.get_bounds_series(paths, file_system=file_system).to_crs(4326)
 
 
-def list_dir(path, file_system):
+def _list_dir(path, file_system):
     items = list(file_system.ls(path))
     items = [
         x
@@ -238,7 +225,7 @@ class GeoExplorer:
         nan_color: str = "#969696",
         nan_label: str = "Missing",
         color_dict: dict | None = None,
-        file_system=LocalFileSystem(),
+        file_system=None,
         splitted: bool = False,
     ) -> None:
         """Initialiser."""
@@ -252,7 +239,7 @@ class GeoExplorer:
         self.column = column
         self.color_dict = color_dict or {}
         self.wms = wms
-        self.file_system = file_system
+        self.file_system = file_system or LocalFileSystem()
         self.nan_color = nan_color
         self.nan_label = nan_label
         self.splitted = splitted
@@ -580,7 +567,7 @@ class GeoExplorer:
                     ).to_crs(4326),
                 ]
             )
-            read_files(
+            _read_files(
                 self,
                 [x for x in self.selected_data if x not in bounds_series_dict],
             )
@@ -725,7 +712,7 @@ class GeoExplorer:
             Input("current-path", "data"),
         )
         def update_file_list(path):
-            return list_dir(path, self.file_system)
+            return _list_dir(path, self.file_system)
 
         @callback(
             Output("current-path", "data"),
@@ -807,18 +794,14 @@ class GeoExplorer:
             Output("file-removed", "children"),
             Input({"type": "delete-btn", "index": dash.ALL}, "n_clicks"),
             State({"type": "delete-btn", "index": dash.ALL}, "id"),
-            # State("items-store", "data"),
             prevent_initial_call=True,
         )
         def delete_item(n_clicks_list, delete_ids):
             if not any(n_clicks_list):
                 return dash.no_update
-            print("\n\n--delete_item")
             triggered = dash.callback_context.triggered_id
             if triggered and triggered["type"] == "delete-btn":
-                print(delete_ids)
                 triggered_index = triggered["index"]
-                print(triggered_index)
                 index = next(
                     iter(
                         i
@@ -827,22 +810,6 @@ class GeoExplorer:
                     )
                 )
                 path_to_remove = delete_ids[index]["index"]
-                print(path_to_remove)
-                # print(n_clicks_list)  # [0]
-                # print(delete_ids)  # [0]
-                # print(triggered)  # [0]
-                # triggered["index"]
-                # # print(index)  # [None]
-                # i, path_to_remove = triggered["index"].split("--")
-                # i = int(i.strip())
-                # i = delete_ids["index"]
-                # path_to_remove = path_to_remove.strip()
-                # print(i, path_to_remove)
-                # n_clicks = n_clicks_list[i]
-                # # n_clicks = n_clicks_list[triggered["index"]]
-                # print(n_clicks)
-                # # path_to_remove = triggered["index"]
-                print(self.selected_data)
                 self.selected_data.pop(self.selected_data.index(path_to_remove))
                 for path in list(self.loaded_data):
                     if path_to_remove in path:
@@ -863,7 +830,7 @@ class GeoExplorer:
             triggered = dash.callback_context.triggered_id
             print(triggered, n_clicks, column)
             is_splitted: bool = n_clicks % 2 == 1 and not (
-                triggered == "column-dropdown" and column == None
+                triggered == "column-dropdown" and column is None
             )
             # self.splitted = is_splitted
             if is_splitted:
@@ -892,7 +859,7 @@ class GeoExplorer:
                 self.splitted = True
                 for key, df in self.loaded_data.items():
                     self.loaded_data[key]["split_index"] = [
-                        f"{get_name(key)} {i}" for i in range(len(df))
+                        f"{_get_name(key)} {i}" for i in range(len(df))
                     ]
                 return 1, {"display": "none"}
             if not any(load_parquet) or not triggered:
@@ -931,14 +898,14 @@ class GeoExplorer:
         def get_files_in_bounds(bounds, file_added, file_removed):
             print("--get_files_in_bounds", bounds)
             box = shapely.box(*self._nested_bounds_to_bounds(bounds))
-            box = buffer_box(box)
+            box = _buffer_box(box)
             files_in_bounds = sg.sfilter(self.bounds_series, box)
             currently_in_bounds = set(files_in_bounds.index)
             missing = list(
                 {path for path in files_in_bounds.index if path not in self.loaded_data}
             )
             if missing:
-                read_files(self, missing)
+                _read_files(self, missing)
             return list(currently_in_bounds)
 
         @callback(
@@ -1021,9 +988,9 @@ class GeoExplorer:
                     }
 
                 new_values = [
-                    get_name(value)
+                    _get_name(value)
                     for value in self.selected_data
-                    if get_name(value) not in color_dict
+                    if _get_name(value) not in color_dict
                 ]
                 if len(color_dict) < len(default_colors):
                     default_colors = default_colors[
@@ -1032,7 +999,8 @@ class GeoExplorer:
                         )
                     ]
                 new_colors = default_colors + [
-                    random_color() for _ in range(len(new_values) - len(default_colors))
+                    _random_color()
+                    for _ in range(len(new_values) - len(default_colors))
                 ]
 
                 try:
@@ -1051,7 +1019,7 @@ class GeoExplorer:
                 )
 
             box = shapely.box(*self._nested_bounds_to_bounds(bounds))
-            box = buffer_box(box)
+            box = _buffer_box(box)
             values = pd.concat(
                 [
                     sg.sfilter(df[[column, df.geometry.name]], box)[column]
@@ -1140,7 +1108,7 @@ class GeoExplorer:
                     len(existing_values) : min(len(unique_values), len(default_colors))
                 ]
                 colors = colors + [
-                    random_color() for _ in range(len(new_values) - len(colors))
+                    _random_color() for _ in range(len(new_values) - len(colors))
                 ]
                 color_dict = color_dict | dict(
                     zip(
@@ -1215,7 +1183,7 @@ class GeoExplorer:
                 print(key, value)
 
             box = shapely.box(*self._nested_bounds_to_bounds(bounds))
-            box = buffer_box(box)
+            box = _buffer_box(box)
             data = []
             filenames = []
             choices = np.arange(len(bins)) if bins is not None else None
@@ -1263,7 +1231,7 @@ class GeoExplorer:
                     data.append(
                         dl.Overlay(
                             dl.GeoJSON(id={"type": "geojson", "filename": path}),
-                            name=get_name(path),
+                            name=_get_name(path),
                             checked=True,
                             id={"type": "geojson-overlay", "filename": path},
                         )
@@ -1290,7 +1258,7 @@ class GeoExplorer:
                                 ),
                                 id={"type": "geojson", "filename": path},
                             ),
-                            name=get_name(path),
+                            name=_get_name(path),
                             checked=True,
                             id={"type": "geojson-overlay", "filename": path},
                         )
@@ -1350,7 +1318,7 @@ class GeoExplorer:
                                     )
                                 ]
                             ),
-                            name=get_name(path),
+                            name=_get_name(path),
                             checked=True,
                             id={"type": "geojson-overlay", "filename": path},
                         )
@@ -1358,7 +1326,7 @@ class GeoExplorer:
                 else:
                     # no column
                     filenames.append(path)
-                    color = color_dict[get_name(path)]
+                    color = color_dict[_get_name(path)]
                     data.append(
                         dl.Overlay(
                             dl.GeoJSON(
@@ -1378,7 +1346,7 @@ class GeoExplorer:
                                 ),
                                 id={"type": "geojson", "filename": path},
                             ),
-                            name=get_name(path),
+                            name=_get_name(path),
                             checked=True,
                             id={"type": "geojson-overlay", "filename": path},
                         )

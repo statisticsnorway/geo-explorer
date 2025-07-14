@@ -43,11 +43,8 @@ class LocalFileSystem(AbstractFileSystem):
     def open(path: str, *args, **kwargs) -> io.TextIOWrapper:
         return open(path, *args, **kwargs)
 
-    @staticmethod
-    def makedirs(path: str, exist_ok: bool = False) -> None:
-        return os.makedirs(path, exist_ok=exist_ok)
-
     def __str__(self) -> str:
+        """String representation."""
         return f"{self.__class__.__name__}()"
 
 
