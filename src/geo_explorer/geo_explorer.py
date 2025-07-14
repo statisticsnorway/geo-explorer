@@ -27,6 +27,7 @@ from dash_extensions.javascript import Namespace
 from geopandas import GeoDataFrame
 from geopandas import GeoSeries
 from jenkspy import jenks_breaks
+from shapely.errors import GEOSException
 
 from .fs import LocalFileSystem
 
@@ -58,6 +59,47 @@ BASE_LAYERS = [
         checked=False,
     ),
 ]
+
+
+def buffer_box(box):
+    try:
+        return sg.to_gdf(box, 4326).to_crs(3035).buffer(100).to_crs(4326).union_all()
+    except GEOSException:
+        return box
+
+
+def get_colorpicker_container(color_dict: dict[str, str]) -> html.Div:
+    return html.Div(
+        [
+            dbc.Row(
+                [
+                    dbc.Col(
+                        dbc.Input(
+                            type="color",
+                            id={
+                                "type": "colorpicker",
+                                "column_value": value,
+                            },
+                            value=color,
+                            style={"width": 50, "height": 50},
+                        ),
+                        width="auto",
+                    ),
+                    dbc.Col(
+                        dbc.Label([value]),
+                        width="auto",
+                    ),
+                ],
+                style={
+                    "display": "flex",
+                    "justifyContent": "flex-start",
+                    "alignItems": "center",
+                    "marginBottom": "5px",
+                },
+            )
+            for value, color in color_dict.items()
+        ]
+    )
 
 
 def read_files(exp, paths):
@@ -186,23 +228,40 @@ class GeoExplorer:
         selected_features: list[str] | None = None,
         column: str | None = None,
         wms=None,
-        # bounds=(
-        #     9.858855440173372,
-        #     59.62124229424823,
-        #     11.563109590563998,
-        #     60.207757877310925,
-        # ),
-        center=(59.91740845, 10.71394444),
+        center=None,
+        bounds=None,
         zoom: int = 10,
         nan_color: str = "#969696",
         nan_label: str = "Missing",
+        color_dict: dict | None = None,
         file_system=LocalFileSystem(),
     ):
         self.start_dir = start_dir
         self.port = port
-        self.center = center
-        self.zoom = zoom
+        if bounds is not None and center is not None:
+            raise TypeError("Specify either bounds or center, not both")
+        elif bounds is not None:
+            self.center = None
+            self.zoom = None
+            if len(bounds) == 4:
+                self.bounds = bounds_to_nested_bounds(bounds)
+            elif len(bounds) != 2 and all(len(x) == 2 for x in bounds):
+                raise ValueError(
+                    "bounds must be an iterable of minx, miny, maxx, maxy or an iterable of iterables ([[miny, minx], [maxy, maxx]])"
+                )
+            else:
+                self.bounds = list(bounds)
+        elif center is not None:
+            self.center = center
+            self.bounds = None
+            self.zoom = zoom
+        else:
+            self.center = (59.91740845, 10.71394444)
+            self.bounds = None
+            self.zoom = zoom
+
         self.column = column
+        self.color_dict = color_dict or {}
         self.wms = wms
         self.file_system = file_system
         self.nan_color = nan_color
@@ -223,6 +282,8 @@ class GeoExplorer:
             assets_folder="assets",
         )
 
+        clicked_features = []
+
         self.app.layout = dbc.Container(
             [
                 dbc.Row(
@@ -234,12 +295,8 @@ class GeoExplorer:
                             [
                                 dl.Map(
                                     center=self.center,
+                                    bounds=self.bounds,
                                     zoom=self.zoom,
-                                    # bounds=(
-                                    #     bounds_to_nested_bounds(self.bounds)
-                                    #     if len(self.bounds) == 4
-                                    #     else self.bounds
-                                    # ),
                                     children=[
                                         dl.LayersControl(BASE_LAYERS, id="lc"),
                                         dl.ScaleControl(position="bottomleft"),
@@ -250,8 +307,6 @@ class GeoExplorer:
                                     ],
                                     id="map",
                                     style={"width": "100%", "height": "90vh"},
-                                    # eventHandlers=Namespace("dash_extensions_js_loaded")("")
-                                    # eventHandlers={"click"},
                                 ),
                             ],
                             width=8,
@@ -259,14 +314,57 @@ class GeoExplorer:
                         dbc.Col(
                             [
                                 dbc.Row(
-                                    html.Button(
-                                        "Split",
-                                        style={
-                                            "fillColor": "white",
-                                            "color": "black",
-                                        },
-                                    ),
-                                    id="splitter",
+                                    [
+                                        dbc.Col(
+                                            html.Button(
+                                                "Split",
+                                                style={
+                                                    "fillColor": "white",
+                                                    "color": "black",
+                                                },
+                                            ),
+                                            id="splitter",
+                                        ),
+                                        dbc.Col(
+                                            html.Div(
+                                                [
+                                                    html.Button(
+                                                        "Export",
+                                                        id="export",
+                                                        style={
+                                                            "color": "blue",
+                                                            # "border": "none",
+                                                            # "background": "none",
+                                                            # "cursor": "pointer",
+                                                        },
+                                                    ),
+                                                    dbc.Modal(
+                                                        [
+                                                            dbc.ModalHeader(
+                                                                dbc.ModalTitle(
+                                                                    "Code to reproduce explore view."
+                                                                ),
+                                                                close_button=False,
+                                                            ),
+                                                            dbc.ModalBody(
+                                                                id="export-text"
+                                                            ),
+                                                            dbc.ModalFooter(
+                                                                dbc.Button(
+                                                                    "Copy code",
+                                                                    id="copy-export",
+                                                                    className="ms-auto",
+                                                                    n_clicks=0,
+                                                                )
+                                                            ),
+                                                        ],
+                                                        id="export-view",
+                                                        is_open=False,
+                                                    ),
+                                                ]
+                                            )
+                                        ),
+                                    ]
                                 ),
                                 dbc.Row(
                                     [
@@ -354,10 +452,6 @@ class GeoExplorer:
                                         ),
                                     ]
                                 ),
-                                dbc.Row(id="colorpicker-container"),
-                                dbc.Row(
-                                    html.Div(id="remove-buttons"),
-                                ),
                                 dbc.Row(
                                     dbc.Col(
                                         dcc.Dropdown(
@@ -367,6 +461,7 @@ class GeoExplorer:
                                                 for x in ["Norge i bilder"]
                                             ],
                                             value=None,
+                                            placeholder="Wms...",
                                             style={
                                                 "font-size": 22,
                                                 "width": "100%",
@@ -378,55 +473,20 @@ class GeoExplorer:
                                     )
                                 ),
                                 dbc.Row(
-                                    [
-                                        dbc.Col(
-                                            html.Div(
-                                                [
-                                                    html.Button(
-                                                        "Export",
-                                                        id="export",
-                                                        style={
-                                                            "color": "blue",
-                                                            # "border": "none",
-                                                            # "background": "none",
-                                                            # "cursor": "pointer",
-                                                        },
-                                                    ),
-                                                    dbc.Modal(
-                                                        [
-                                                            dbc.ModalHeader(
-                                                                dbc.ModalTitle(
-                                                                    "Code to reproduce explore view."
-                                                                ),
-                                                                close_button=True,
-                                                            ),
-                                                            dbc.ModalBody(
-                                                                id="export-text"
-                                                            ),
-                                                            dbc.ModalFooter(
-                                                                dbc.Button(
-                                                                    "Close",
-                                                                    id="close-export",
-                                                                    className="ms-auto",
-                                                                    n_clicks=0,
-                                                                )
-                                                            ),
-                                                        ],
-                                                        id="export-view",
-                                                        is_open=False,
-                                                    ),
-                                                ]
-                                            )
-                                        ),
-                                    ]
+                                    html.Div(id="remove-buttons"),
                                 ),
+                                dbc.Row(id="colorpicker-container"),
                             ],
+                            style={
+                                "height": "90vh",
+                                "overflow": "scroll",
+                            },
                         ),
                     ],
-                    style={
-                        "height": "90vh",
-                        "overflow": "visible",
-                    },
+                    # style={
+                    #     "height": "90vh",
+                    #     "overflow": "scroll",
+                    # },
                 ),
                 dbc.Row(
                     [
@@ -484,18 +544,16 @@ class GeoExplorer:
                         ),
                     ]
                 ),
-                dcc.Store(id="filenames", data=None),
                 dcc.Store(id="js_init_store", data=False),
                 dcc.Store(id="js_init_store2", data=False),
                 html.Div(id="currently-in-bounds", style={"display": "none"}),
                 html.Div(id="currently-in-bounds2", style={"display": "none"}),
                 html.Div(id="file-removed", style={"display": "none"}),
-                html.Div(id="column-value-color-dict", style={"display": "none"}),
                 html.Div(id="dummy-output", style={"display": "none"}),
                 html.Div(id="bins", style={"display": "none"}),
                 html.Div(False, id="is-numeric", style={"display": "none"}),
                 # html.Div(False, id="cmap-has-been-set", style={"display": "none"}),
-                dcc.Store(id="clicked-features", data=[]),
+                dcc.Store(id="clicked-features", data=clicked_features),
                 dcc.Store(id="clicked-ids", data=self.selected_features),
             ],
             fluid=True,
@@ -509,11 +567,7 @@ class GeoExplorer:
                     if not isinstance(value, GeoDataFrame):
                         raise ValueError(error_mess)
                     key = _standardize_path(key)
-                    self.loaded_data[key] = value.to_crs(4326).assign(
-                        _unique_id=lambda df: [
-                            f"{len(self.loaded_data)}_{j}" for j in range(len(df))
-                        ]
-                    )
+                    self.loaded_data[key] = value.to_crs(4326)
                     self.selected_data.append(key)
                     bounds_series_dict[key] = shapely.box(
                         *self.loaded_data[key].total_bounds
@@ -526,7 +580,10 @@ class GeoExplorer:
         self.bounds_series = GeoSeries(bounds_series_dict)
 
         if self.selected_data:
-            child_paths = _get_child_paths(self.selected_data, self.file_system)
+            child_paths = _get_child_paths(
+                [x for x in self.selected_data if x not in bounds_series_dict],
+                self.file_system,
+            )
             self.bounds_series = pd.concat(
                 [
                     self.bounds_series,
@@ -535,7 +592,42 @@ class GeoExplorer:
                     ).to_crs(4326),
                 ]
             )
-            read_files(self, self.selected_data)
+            read_files(
+                self,
+                [x for x in self.selected_data if x not in bounds_series_dict],
+            )
+
+            # dataframe dicts as input data will now be sorted first because they were added to loaded_data first.
+            # now to get back original order
+            loaded_data_sorted = {}
+            for x in data:
+                if isinstance(x, dict):
+                    for key in x:
+                        key = _standardize_path(key)
+                        loaded_data_sorted[key] = self.loaded_data[key].assign(
+                            _unique_id=lambda df: [
+                                f"{len(loaded_data_sorted)}_{j}" for j in range(len(df))
+                            ]
+                        )
+                else:
+                    x = _standardize_path(x)
+                    loaded_data_sorted[x] = self.loaded_data[x].assign(
+                        _unique_id=lambda df: [
+                            f"{len(loaded_data_sorted)}_{j}" for j in range(len(df))
+                        ]
+                    )
+
+            self.loaded_data = loaded_data_sorted
+
+            for idx in self.selected_features:
+                i = int(idx[0])
+                df = list(self.loaded_data.values())[i]
+                row = df[lambda x: x["_unique_id"] == idx]
+                assert len(row) == 1, (len(row), df)
+                features = row.__geo_interface__["features"]
+                assert len(features) == 1
+                feature = next(iter(features))
+                clicked_features.append(feature["properties"])
 
         self.register_callbacks()
 
@@ -549,19 +641,21 @@ class GeoExplorer:
             Output("export-view", "is_open"),
             Input("export", "n_clicks"),
             Input("file-removed", "children"),
-            Input("close-export", "n_clicks"),
+            # Input("close-export", "n_clicks"),
             State("map", "bounds"),
             State("map", "zoom"),
-            Input({"type": "colorpicker", "column_value": dash.ALL}, "value"),
+            State({"type": "colorpicker", "column_value": dash.ALL}, "value"),
+            State({"type": "colorpicker", "column_value": dash.ALL}, "id"),
             prevent_initial_call=True,
         )
         def export(
             export_clicks,
             remove,
-            close_exort_clicks,
+            # close_exort_clicks,
             bounds,
             zoom,
             colorpicker_values_list,
+            colorpicker_ids,
         ):
             triggered = dash.callback_context.triggered_id
             if triggered in ["file-removed", "close-export"] or not export_clicks:
@@ -575,7 +669,11 @@ class GeoExplorer:
                 print()
                 print(k)
                 print(v)
-            bounds = self.nested_bounds_to_bounds(bounds)
+            centroid = shapely.box(*self.nested_bounds_to_bounds(bounds)).centroid
+            center = (centroid.y, centroid.x)
+
+            column_values = [x["column_value"] for x in colorpicker_ids]
+            color_dict = dict(zip(column_values, colorpicker_values_list, strict=True))
 
             def to_string(x):
                 if isinstance(x, str):
@@ -591,20 +689,37 @@ class GeoExplorer:
                     "app",
                     "currently_in_bounds",
                     "bounds_series",
-                    "data",
+                    "loaded_data",
+                    "center",
+                    "bounds",
+                    "zoom",
                 ]
-            } | {"zoom": zoom, "bounds": bounds}
-            txt = ", ".join([f"{k}={to_string(v)}" for k, v in data.items()])
-            if self.file_system.__module__ == "__main__":
-                file_system_text = (
-                    f"from geo_explorer import {self.file_system.__class__.__name__}\n"
-                )
+            } | {"zoom": zoom, "center": center, "color_dict": color_dict}
+            if self.selected_data:
+                data["data"] = data.pop("selected_data")
             else:
-                file_system_text = ""
+                data.pop("selected_data")
+            txt = ", ".join([f"{k}={to_string(v)}" for k, v in data.items()])
+            if self.file_system.__module__ == "geo_explorer.fs":
+                file_system_span = [
+                    html.Span(
+                        f"from geo_explorer import {self.file_system.__class__.__name__}"
+                    ),
+                    html.Br(),
+                ]
+            else:
+                file_system_span = []
             return (
-                f"from geo_explorer import {self.__class__.__name__}\n"
-                + file_system_text
-                + f"{self.__class__.__name__}({txt}).run()",
+                html.Div(
+                    [
+                        html.Span(
+                            f"from geo_explorer import {self.__class__.__name__}"
+                        ),
+                        html.Br(),
+                        *file_system_span,
+                        html.Span(f"{self.__class__.__name__}({txt}).run()"),
+                    ]
+                ),
                 True,
             )
 
@@ -659,7 +774,7 @@ class GeoExplorer:
 
         @callback(
             Output("remove-buttons", "children"),
-            Input("new-file-added", "n_clicks"),
+            Input("new-file-added", "children"),
             Input("file-removed", "children"),
         )
         def render_items(new_file_added, file_removed):
@@ -680,7 +795,7 @@ class GeoExplorer:
                                 "cursor": "pointer",
                             },
                         ),
-                        html.Span(path, style={"marginRight": "10px"}),
+                        html.Span(path),  # , style={"marginRight": "10px"}),
                     ],
                     style={
                         "display": "flex",
@@ -770,6 +885,7 @@ class GeoExplorer:
         def get_files_in_bounds(bounds, file_added, file_removed):
             print("--get_files_in_bounds", bounds)
             box = shapely.box(*self.nested_bounds_to_bounds(bounds))
+            box = buffer_box(box)
             files_in_bounds = sg.sfilter(self.bounds_series, box)
             currently_in_bounds = set(files_in_bounds.index)
             missing = list(
@@ -796,22 +912,12 @@ class GeoExplorer:
             # Input("file-removed", "children"),
             prevent_initial_call=True,
         )
-        def update_column_dropdown(currently_in_bounds):
-            print("--update_column_dropdown")
-            columns = set(
-                itertools.chain.from_iterable(
-                    set(
-                        self.loaded_data[path].columns.difference(
-                            {self.loaded_data[path].geometry.name, "_unique_id"}
-                        )
-                    )
-                    for path in currently_in_bounds
-                )
-            )
-            return [{"label": col, "value": col} for col in sorted(columns)]
+        def update_column_dropdown_options(currently_in_bounds):
+            print("--update_column_dropdown_options")
+            return self.get_column_dropdown_options(currently_in_bounds)
 
         @callback(
-            Output("column-value-color-dict", "children"),
+            Output("colorpicker-container", "children"),
             Output("bins", "children"),
             Output("is-numeric", "children"),
             Output("force-categorical", "children"),
@@ -821,9 +927,10 @@ class GeoExplorer:
             Input("k", "value"),
             Input("force-categorical", "n_clicks"),
             Input("currently-in-bounds", "children"),
+            Input("file-removed", "children"),
             State("map", "bounds"),
-            State("column-value-color-dict", "children"),
             State({"type": "colorpicker", "column_value": dash.ALL}, "value"),
+            State({"type": "colorpicker", "column_value": dash.ALL}, "id"),
             State("bins", "children"),
             prevent_initial_call=True,
         )
@@ -833,31 +940,47 @@ class GeoExplorer:
             k: int,
             force_categorical_clicks: int,
             currently_in_bounds,
+            file_removed,
             bounds,
-            column_value_color_dict,
             colorpicker_values_list,
+            colorpicker_ids,
             bins,
         ):
             print("--get_column_value_color_dict")
-            print(column_value_color_dict)
-            print(colorpicker_values_list, self.selected_data)
             triggered = dash.callback_context.triggered_id
-            print(triggered)
-            # if triggered in ["column-dropdown"]:
-            #     column_value_color_dict = None
-            #     colorpicker_values_list = None
+            column_values = [x["column_value"] for x in colorpicker_ids]
+            default_colors = list(sg.maps.map._CATEGORICAL_CMAP.values())
 
             if column is None or not any(
                 column in df for df in self.loaded_data.values()
             ):
-                return (
-                    list(
-                        zip(
-                            self.selected_data,
-                            colorpicker_values_list,  # sg.maps.map._CATEGORICAL_CMAP.values(),
-                            strict=False,
+                color_dict = dict(
+                    zip(column_values, colorpicker_values_list, strict=True)
+                )
+                print(color_dict, self.selected_data)
+
+                if self.color_dict:
+                    color_dict |= self.color_dict
+
+                new_values = [
+                    get_name(value)
+                    for value in self.selected_data
+                    if get_name(value) not in color_dict
+                ]
+                if len(color_dict) < len(default_colors):
+                    default_colors = default_colors[
+                        len(color_dict) : min(
+                            len(self.selected_data), len(default_colors)
                         )
-                    ),
+                    ]
+                new_colors = default_colors + [
+                    random_color() for _ in range(len(new_values) - len(default_colors))
+                ]
+
+                color_dict = color_dict | dict(zip(new_values, new_colors, strict=True))
+
+                return (
+                    get_colorpicker_container(color_dict),
                     None,
                     False,
                     dash.no_update,
@@ -865,6 +988,7 @@ class GeoExplorer:
                 )
 
             box = shapely.box(*self.nested_bounds_to_bounds(bounds))
+            box = buffer_box(box)
             values = pd.concat(
                 [
                     sg.sfilter(df[[column, df.geometry.name]], box)[column]
@@ -907,82 +1031,77 @@ class GeoExplorer:
                 ).dropna()
                 bins = jenks_breaks(series, n_classes=k)
 
-                # make sure the existing color scheme is not altered if the bounds is changed
-                if column_value_color_dict is not None and triggered == "map":
-                    print("\n\ncolumn_value_color_dict")
-                    print(column_value_color_dict, triggered)
-                    column_value_color_dict = {
-                        x[0]: color_
-                        for x, color_ in zip(
-                            column_value_color_dict,
-                            colorpicker_values_list,
-                            strict=False,
-                        )
-                    }
-                    print(column_value_color_dict)
-                    column_value_color_dict = [
-                        (k, v) for k, v in column_value_color_dict.items()
-                    ]
+                print("\n\nheiiiiiii")
+                print(column_values)
+                print(triggered)
+                if column_values is not None and triggered in [
+                    "map",
+                    "currently-in-bounds",
+                ]:
+                    color_dict = dict(
+                        zip(column_values, colorpicker_values_list, strict=True)
+                    )
                 else:
                     cmap_ = matplotlib.colormaps.get_cmap(cmap)
                     colors_ = [
                         matplotlib.colors.to_hex(cmap_(int(i)))
                         for i in np.linspace(0, 255, num=k)
                     ]
-                    column_value_color_dict = (
-                        [(f"{round(min(series), 1)} - {bins[0]}", colors_[0])]
-                        + [
-                            (f"{start} - {stop}", colors_[i + 1])
+                    rounded_bins = [round(x, 1) for x in bins]
+                    color_dict = {
+                        f"{round(min(series), 1)} - {rounded_bins[0]}": colors_[0],
+                        **{
+                            f"{start} - {stop}": colors_[i + 1]
                             for i, (start, stop) in enumerate(
-                                itertools.pairwise(bins[1:-1])
+                                itertools.pairwise(rounded_bins[1:-1])
                             )
-                        ]
-                        + [(f"{bins[-1]} - {round(max(series), 1)}", colors_[-1])]
-                    )
+                        },
+                        f"{rounded_bins[-1]} - {round(max(series), 1)}": colors_[-1],
+                    }
             else:
                 # make sure the existing color scheme is not altered
-                if column_value_color_dict is not None:
-                    column_value_color_dict = {
-                        x[0]: color_
-                        for x, color_ in zip(
-                            column_value_color_dict,
-                            colorpicker_values_list,
-                            strict=False,
-                        )
-                    }
-                column_value_color_dict = (
-                    dict(column_value_color_dict) if column_value_color_dict else {}
-                )
+                if column_values is not None and triggered not in ["column-dropdown"]:
+                    color_dict = dict(
+                        zip(column_values, colorpicker_values_list, strict=True)
+                    )
+                else:
+                    color_dict = {}
                 unique_values = values.unique()
                 new_values = [
-                    value
-                    for value in unique_values
-                    if value not in column_value_color_dict
+                    value for value in unique_values if value not in column_values
                 ]
                 existing_values = [
-                    value for value in unique_values if value in column_value_color_dict
+                    value for value in unique_values if value in column_values
                 ]
-                default_colors = list(sg.maps.map._CATEGORICAL_CMAP.values())
                 colors = default_colors[
                     len(existing_values) : min(len(unique_values), len(default_colors))
                 ]
                 colors = colors + [
                     random_color() for _ in range(len(new_values) - len(colors))
                 ]
-                column_value_color_dict = column_value_color_dict | dict(
+                color_dict = color_dict | dict(
                     zip(
                         new_values,
                         colors,
                         strict=True,
                     )
                 )
-                column_value_color_dict = [
-                    (k, v) for k, v in column_value_color_dict.items()
-                ]
                 bins = None
 
+            if color_dict.get(self.nan_label, self.nan_color) != self.nan_color:
+                self.nan_color = color_dict[self.nan_label]
+
+            elif self.nan_label not in color_dict and (
+                values.isna().any()
+                or any(column not in df for df in self.loaded_data.values())
+            ):
+                color_dict[self.nan_label] = self.nan_color
+
+            if self.color_dict:
+                color_dict |= self.color_dict
+
             return (
-                column_value_color_dict,
+                get_colorpicker_container(color_dict),
                 bins,
                 is_numeric,
                 force_categorical_button,
@@ -990,123 +1109,7 @@ class GeoExplorer:
             )
 
         @callback(
-            Output("colorpicker-container", "children"),
-            Input("column-value-color-dict", "children"),
-            Input("file-removed", "children"),
-            State("is-numeric", "children"),
-            State("currently-in-bounds2", "children"),
-            prevent_initial_call=True,
-        )
-        def update_column_dropdown(
-            column_value_color_dict, file_removed, is_numeric, currently_in_bounds
-        ):
-            print("--update_column_dropdown", column_value_color_dict)
-            if not currently_in_bounds:
-                return None
-            if not column_value_color_dict:  # is None:
-                return html.Div(
-                    [
-                        dbc.Row(
-                            [
-                                dbc.Col(
-                                    dbc.Input(
-                                        type="color",
-                                        id={
-                                            "type": "colorpicker",
-                                            "column_value": get_name(path),
-                                        },
-                                        value=color,
-                                        style={"width": 50, "height": 50},
-                                    ),
-                                    width="auto",
-                                ),
-                                dbc.Col(
-                                    dbc.Label([get_name(path)]),
-                                    width="auto",
-                                ),
-                            ],
-                            style={
-                                "display": "flex",
-                                "justifyContent": "flex-start",
-                                "alignItems": "center",
-                                "marginBottom": "5px",
-                            },
-                        )
-                        for path, color in zip(
-                            self.selected_data,
-                            sg.maps.map._CATEGORICAL_CMAP.values(),
-                            strict=False,
-                        )
-                    ]
-                )
-            if is_numeric:
-                column_value_color_dict = dict(column_value_color_dict)
-            else:
-                column_value_color_dict = dict(column_value_color_dict)
-            return html.Div(
-                [
-                    dbc.Row(
-                        [
-                            dbc.Col(
-                                dbc.Input(
-                                    type="color",
-                                    id={"type": "colorpicker", "column_value": value},
-                                    value=color,
-                                    style={"width": 50, "height": 50},
-                                ),
-                                width="auto",
-                            ),
-                            dbc.Col(
-                                dbc.Label([value]),
-                                width="auto",
-                            ),
-                        ],
-                        style={
-                            "display": "flex",
-                            "justifyContent": "flex-start",
-                            "alignItems": "center",
-                            "marginBottom": "5px",
-                        },
-                    )
-                    for value, color in column_value_color_dict.items()
-                ]
-                + [
-                    dbc.Row(
-                        [
-                            dbc.Col(
-                                dbc.Input(
-                                    type="color",
-                                    id={
-                                        "type": "colorpicker",
-                                        "column_value": self.nan_label,
-                                    },
-                                    value=self.nan_color,
-                                    style={"width": 50, "height": 50},
-                                ),
-                                width="auto",
-                            ),
-                            dbc.Col(
-                                dbc.Label([self.nan_label]),
-                                width="auto",
-                            ),
-                        ],
-                        style={
-                            "display": "flex",
-                            "justifyContent": "flex-start",
-                            "alignItems": "center",
-                            "marginBottom": "5px",
-                        },
-                    )
-                ],
-                style={
-                    "height": "50vh",
-                    "overflow": "scroll",
-                },
-            )
-
-        @callback(
             Output("lc", "children"),
-            Output("filenames", "data"),
             Input("currently-in-bounds2", "children"),
             Input({"type": "colorpicker", "column_value": dash.ALL}, "value"),
             Input("is-numeric", "children"),
@@ -1115,9 +1118,9 @@ class GeoExplorer:
             State("map", "bounds"),
             State({"type": "geojson", "filename": dash.ALL}, "checked"),
             State("column-dropdown", "value"),
-            State("column-value-color-dict", "children"),
             State("bins", "children"),
             State("clicked-ids", "data"),
+            State({"type": "colorpicker", "column_value": dash.ALL}, "id"),
             prevent_initial_call=True,
         )
         def add_data(
@@ -1129,44 +1132,29 @@ class GeoExplorer:
             bounds,
             is_checked,
             column,
-            column_value_color_dict,
             bins,
             clicked_ids,
+            colorpicker_ids,
         ):
             print("--add_data")
             print("add_data: colorpicker_values_list", colorpicker_values_list)
-            print("add_data: column_value_color_dict", column_value_color_dict)
             triggered = dash.callback_context.triggered_id
-            if (
-                isinstance(triggered, dict)
-                and triggered.get("column_value") == self.nan_label
-            ):
-                self.nan_color = colorpicker_values_list[-1]  # triggered[""]
+
+            column_values = [x["column_value"] for x in colorpicker_ids]
+            color_dict = dict(zip(column_values, colorpicker_values_list, strict=True))
+
             box = shapely.box(*self.nested_bounds_to_bounds(bounds))
+            box = buffer_box(box)
             data = []
             filenames = []
             choices = np.arange(len(bins)) if bins is not None else None
 
-            if (
-                not is_numeric
-                and column_value_color_dict is not None
-                and colorpicker_values_list is not None
-            ):
-                column_value_color_dict = dict(column_value_color_dict)
-            elif (
-                column_value_color_dict is not None
-                and colorpicker_values_list is not None
-            ):
-                # column_value_color_dict = dict(column_value_color_dict)
-                column_value_color_dict = {
-                    i: x[1] for i, x in enumerate(column_value_color_dict)
-                }
-
-            print("column_value_color_dict2", column_value_color_dict)
-
             ns = Namespace("onEachFeatureToggleHighlight", "default")
 
-            for i, path in enumerate(self.selected_data):
+            if is_numeric:
+                color_dict = {i: color for i, color in enumerate(color_dict.values())}
+
+            for path in self.selected_data:
                 if path in self.loaded_data:
                     df = self.loaded_data[path]
                 else:
@@ -1176,7 +1164,7 @@ class GeoExplorer:
 
                 df = sg.sfilter(df, box)
                 if column is not None and column in df and not is_numeric:
-                    df["_color"] = df[column].map(column_value_color_dict)
+                    df["_color"] = df[column].map(color_dict)
                 elif column is not None and column in df:
                     conditions = [
                         df[column] < bins[0],
@@ -1187,8 +1175,7 @@ class GeoExplorer:
                         df[column] >= bins[-1],
                     ]
                     df["_color"] = [
-                        column_value_color_dict[x]
-                        for x in np.select(conditions, choices)
+                        color_dict[x] for x in np.select(conditions, choices)
                     ]
 
                 if not any(path in x for x in currently_in_bounds):
@@ -1213,9 +1200,14 @@ class GeoExplorer:
                                     "weight": 2,
                                     "fillOpacity": 0.7,
                                 },
-                                onEachFeature=ns("popup"),
+                                onEachFeature=ns("yellowIfHighlighted"),
+                                pointToLayer=ns("pointToLayerCircle"),
+                                hideout=dict(
+                                    circleOptions=dict(
+                                        fillOpacity=1, stroke=False, radius=5
+                                    ),
+                                ),
                                 id={"type": "geojson", "filename": path},
-                                hideout=dict(selected=[]),
                             ),
                             name=get_name(path),
                             checked=True,
@@ -1239,12 +1231,17 @@ class GeoExplorer:
                                             "weight": 2,
                                             "fillOpacity": 0.7,
                                         },
-                                        onEachFeature=ns("popup"),
+                                        onEachFeature=ns("yellowIfHighlighted"),
+                                        pointToLayer=ns("pointToLayerCircle"),
                                         id={
                                             "type": "geojson",
                                             "filename": path + color_,
                                         },
-                                        hideout=dict(selected=[]),
+                                        hideout=dict(
+                                            circleOptions=dict(
+                                                fillOpacity=1, stroke=False, radius=5
+                                            ),
+                                        ),
                                     )
                                     for color_ in df["_color"].unique()
                                 ]
@@ -1261,8 +1258,13 @@ class GeoExplorer:
                                             "type": "geojson",
                                             "filename": path + "_nan",
                                         },
-                                        onEachFeature=ns("popup"),
-                                        hideout=dict(selected=[]),
+                                        onEachFeature=ns("yellowIfHighlighted"),
+                                        pointToLayer=ns("pointToLayerCircle"),
+                                        hideout=dict(
+                                            circleOptions=dict(
+                                                fillOpacity=1, stroke=False, radius=5
+                                            ),
+                                        ),
                                     )
                                 ]
                             ),
@@ -1273,7 +1275,7 @@ class GeoExplorer:
                 else:
                     # no column
                     filenames.append(path)
-                    color = colorpicker_values_list[i]
+                    color = color_dict[get_name(path)]
                     data.append(
                         dl.Overlay(
                             dl.GeoJSON(
@@ -1284,7 +1286,13 @@ class GeoExplorer:
                                     "weight": 2,
                                     "fillOpacity": 0.7,
                                 },
-                                onEachFeature=ns("popup"),
+                                onEachFeature=ns("yellowIfHighlighted"),
+                                pointToLayer=ns("pointToLayerCircle"),
+                                hideout=dict(
+                                    circleOptions=dict(
+                                        fillOpacity=1, stroke=False, radius=5
+                                    ),
+                                ),
                                 id={"type": "geojson", "filename": path},
                             ),
                             name=get_name(path),
@@ -1292,7 +1300,7 @@ class GeoExplorer:
                         )
                     )
 
-            return BASE_LAYERS + data, filenames
+            return BASE_LAYERS + data
 
         @callback(
             Output("clicked-features", "data"),
@@ -1301,52 +1309,35 @@ class GeoExplorer:
             Input("clear-table", "n_clicks"),
             Input({"type": "geojson", "filename": dash.ALL}, "n_clicks"),
             State({"type": "geojson", "filename": dash.ALL}, "clickData"),
-            State("filenames", "data"),
+            State({"type": "geojson", "filename": dash.ALL}, "id"),
             # State({"type": "geojson", "filename": dash.ALL}, "hideout"),
             State("clicked-features", "data"),
             prevent_initial_call=True,
         )
         def display_feature_attributes(
-            clicked_ids, clear_table, n_clicks, features, filenames, clicked_features
+            clicked_ids,
+            clear_table,
+            n_clicks,
+            features,
+            feature_ids,
+            clicked_features,
         ):
             print("--display_feature_attributes", n_clicks)
             triggered = dash.callback_context.triggered_id
-            print(clicked_ids)
             if triggered == "clear-table":
                 return [], []
-            if triggered == "clicked-ids" and clicked_ids:
-                return [
-                    list(self.loaded_data.values())[i][
-                        lambda x: x["_unique_id"] == id_
-                    ].__geo_interface__
-                    for i, id_ in zip(
-                        [x[0] for x in clicked_ids], clicked_ids, strict=False
-                    )
-                ]
-
             if not features or not any(features):
                 return dash.no_update, dash.no_update
-            # features = [x for x in features if x is not None]
-            # indexes = [i for i, x in enumerate(features) if x is not None]
-            # if not features:
-            #     return dash.no_update
-            # assert len(features) == 1, features
-            # feature = next(iter(features))
-            # index = next(iter(indexes))
-            print(filenames)
+
             filename_id = triggered["filename"]
-            index = filenames.index(filename_id)
-            # path = next(iter(x for x in self.paths if x in filename_id))
-            # index = self.paths.index(path)
-            # print("hei", n_clicks[index], n_clicks, len(features))
-            # if n_clicks[index] > 0 and n_clicks[index] % 2 == 0:
-            #     clicked_features.pop(index)
-            #     return clicked_features
-            # print(index)
+            index = next(
+                iter(
+                    i
+                    for i, id_ in enumerate(feature_ids)
+                    if id_["filename"] == filename_id
+                )
+            )
             feature = features[index]
-            print(type(feature))
-            # if feature is None:
-            #     return dash.no_update
             props = feature["properties"]
             clicked_ids = [x["_unique_id"] for x in clicked_features]
             if props["_unique_id"] not in clicked_ids:
@@ -1362,18 +1353,22 @@ class GeoExplorer:
                 )
                 clicked_features.pop(pop_index)
                 clicked_ids.pop(pop_index)
-            print("clicked_ids", clicked_ids)
             return clicked_features, clicked_ids
 
         @callback(
             Output("feature-table-container", "children"),
             Input("clicked-features", "data"),
             State("column-dropdown", "options"),
+            State("currently-in-bounds", "children"),
         )
-        def update_table(data, column_dropdown):
+        def update_table(data, column_dropdown, currently_in_bounds):
             print("--update_table")
             if not data:
                 return "No features clicked."
+            if column_dropdown is None:
+                column_dropdown = self.get_column_dropdown_options(
+                    list(self.loaded_data)
+                )
             all_columns = {x["label"] for x in column_dropdown}
             columns = [{"name": k, "id": k} for k in data[0].keys() if k in all_columns]
             return html.Div(
@@ -1396,16 +1391,24 @@ class GeoExplorer:
                 ]
             )
 
-        # self.app.clientside_callback(
-        #     """
-        #     function(ids) {
-        #         window.selectedFeatureIds = ids;
-        #         return null;
-        #     }
-        #     """,
-        #     Output("dummy-output", "children"),
-        #     Input("clicked-ids", "data"),
-        # )
+        self.app.clientside_callback(
+            """
+            function(ids) {
+                window.selectedFeatureIds = ids || [];
+                // Reset all highlighted features if list is empty
+                if (window.selectedFeatureIds.length === 0 && window.leafletMap) {
+                    window.leafletMap.eachLayer(function(layer) {
+                        if (layer.setStyle && layer._originalStyle) {
+                            layer.setStyle(layer._originalStyle);
+                        }
+                    });
+                }
+                return null;
+            }
+            """,
+            Output("dummy-output", "children"),
+            Input("clicked-ids", "data"),
+        )
 
         # self.app.clientside_callback(
         #     """function(_, feature, hideout){
@@ -1499,6 +1502,19 @@ class GeoExplorer:
         #     Input("grid_button_container_end", "children"),
         # )
 
+    def get_column_dropdown_options(self, currently_in_bounds):
+        columns = set(
+            itertools.chain.from_iterable(
+                set(
+                    self.loaded_data[path].columns.difference(
+                        {self.loaded_data[path].geometry.name, "_unique_id"}
+                    )
+                )
+                for path in currently_in_bounds
+            )
+        )
+        return [{"label": col, "value": col} for col in sorted(columns)]
+
     def nested_bounds_to_bounds(
         self,
         bounds: list[list[float]],
@@ -1507,7 +1523,7 @@ class GeoExplorer:
             return (
                 sg.to_gdf(reversed(self.center), 4326)
                 .to_crs(3035)
-                .buffer(100_000 / (self.zoom**1.5))
+                .buffer(165_000 / (self.zoom**1.5))
                 .to_crs(4326)
                 .total_bounds
             )
