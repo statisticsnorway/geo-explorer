@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 import sgis as sg
 import shapely
+from dash import ctx
 from dash import Dash
 from dash import Input
 from dash import Output
@@ -738,24 +739,6 @@ class GeoExplorer:
             selected_path = _standardize_path(selected_path)
             return selected_path, selected_path
 
-        # @callback(
-        #     Output("custom-popup", "style"),
-        #     Input("save_and_check_pixels", "n_clicks"),
-        #     Input("close-popup", "n_clicks"),
-        #     State("custom-popup", "style"),
-        # )
-        # def toggle_popup(open_clicks, close_clicks, style):
-        #     print("toggle_popup")
-        #     ctx = dash.callback_context
-        #     if not style:
-        #         style = {}
-        #     style = style.copy()
-        #     if ctx.triggered_id == "save_and_check_pixels":
-        #         style["display"] = "block"
-        #     elif ctx.triggered_id == "close-popup":
-        #         style["display"] = "none"
-        #     return style
-
         @callback(
             Output("remove-buttons", "children"),
             Input("new-file-added", "children"),
@@ -769,7 +752,7 @@ class GeoExplorer:
                             "❌",
                             id={
                                 "type": "delete-btn",
-                                "index": path,  # f"{i} -- {path}",
+                                "index": path,
                             },
                             n_clicks=0,
                             style={
@@ -787,7 +770,7 @@ class GeoExplorer:
                         "marginBottom": "5px",
                     },
                 )
-                for i, path in enumerate(self.selected_data)
+                for path in self.selected_data
             ]
 
         @callback(
