@@ -164,48 +164,78 @@ def _get_bounds_series(path, file_system):
     return sg.get_bounds_series(paths, file_system=file_system).to_crs(4326)
 
 
+def _get_button(item, isdir: bool, file_system):
+    size = 15
+    is_loadable = not file_system.isdir(item) or (
+        item.endswith(".parquet")
+        or all(x.endswith(".parquet") for x in file_system.ls(item))
+    )
+    if is_loadable:
+        button = html.Button(
+            "Load",
+            id={
+                "type": "load-parquet",
+                "index": item,
+            },
+            n_clicks=0,
+            # style={"marginLeft": f"{size}px"},
+        )
+    else:
+        button = html.Button(
+            "Load",
+            id={
+                "type": "load-parquet",
+                "index": item,
+            },
+            n_clicks=0,
+            style={
+                # "marginLeft": f"{size}px",
+                "color": "rgba(0, 0, 0, 0)",
+                "fillColor": "rgba(0, 0, 0, 0)",
+                "backgroundColor": "rgba(0, 0, 0, 0)",
+            },
+            disabled=True,
+        )
+    txt_type = html.U if isdir else str
+    return html.Div(
+        [
+            button,
+            html.Button(
+                txt_type(f"[DIR] {Path(item).name}" if isdir else Path(item).name),
+                id={"type": "file-item", "index": item},
+                className="path-button",
+                style={
+                    "padding-left": f"{int(size/5)}px",
+                    "backgroundColor": "rgba(0, 0, 0, 0)",
+                    "fillColor": "rgba(0, 0, 0, 0)",
+                    "width": "70vh",
+                }
+                | ({"color": "#d3d3d3"} if not isdir else {"color": "#78b3e7"}),
+                n_clicks=0,
+                disabled=False if isdir else True,
+            ),
+        ],
+        style={"height": f"{int(size*2)}px"},
+    )
+
+
 def _list_dir(path, file_system):
-    items = list(file_system.ls(path))
-    items = [
+    paths = list(file_system.ls(path))
+    paths = [
         x
-        for x in items
+        for x in paths
         if file_system.isdir(x) or any(x.endswith(txt) for txt in [".parquet"])
     ]
-    items.sort()
+    paths.sort()
+    isdir_list = [file_system.isdir(x) for x in paths]
     return html.Ul(
         [
             html.Li(
                 [
-                    (
-                        html.Button(
-                            "Load",
-                            id={
-                                "type": "load-parquet",
-                                "index": item,
-                            },
-                            n_clicks=0,
-                            style={"marginLeft": "10px"},
-                        )
-                        if not file_system.isdir(item)
-                        or (
-                            item.endswith(".parquet")
-                            or all(x.endswith(".parquet") for x in file_system.ls(item))
-                        )
-                        else None
-                    ),
-                    html.A(
-                        (
-                            f"[DIR] {Path(item).name}"
-                            if file_system.isdir(item)
-                            else Path(item).name
-                        ),
-                        href=("#" if file_system.isdir(item) else None),
-                        id={"type": "file-item", "index": item},
-                        n_clicks=0,
-                    ),
+                    _get_button(item, isdir, file_system)
+                    for item, isdir in zip(paths, isdir_list, strict=True)
                 ]
             )
-            for item in items
         ]
     )
 
@@ -497,16 +527,29 @@ class GeoExplorer:
                         dbc.Col(
                             html.Div(
                                 [
+                                    html.Br(),
                                     html.H2("File Browser"),
-                                    html.Button("⬆️ Go Up", id="up-button"),
-                                    dcc.Store(id="current-path", data=self.start_dir),
-                                    dcc.Input(
-                                        self.start_dir,
-                                        id="path-display",
-                                        style={
-                                            "width": "70%",
-                                        },
+                                    dbc.Row(
+                                        [
+                                            dbc.Col(
+                                                html.Button(
+                                                    "⬆️ Go Up",
+                                                    id="up-button",
+                                                    style={"width": "10vh"},
+                                                )
+                                            ),
+                                            dbc.Col(
+                                                dcc.Input(
+                                                    self.start_dir,
+                                                    id="path-display",
+                                                    style={
+                                                        "width": "70vh",
+                                                    },
+                                                )
+                                            ),
+                                        ]
                                     ),
+                                    html.Br(),
                                     html.Div(
                                         id="file-list",
                                         style={
@@ -520,7 +563,8 @@ class GeoExplorer:
                             ),
                             # width=4,
                         ),
-                    ]
+                    ],
+                    style={"width": "90vh"},
                 ),
                 dcc.Store(id="is_splitted", data=False),
                 html.Div(id="currently-in-bounds", style={"display": "none"}),
@@ -531,6 +575,7 @@ class GeoExplorer:
                 html.Div(False, id="is-numeric", style={"display": "none"}),
                 dcc.Store(id="clicked-features", data=clicked_features),
                 dcc.Store(id="clicked-ids", data=self.selected_features),
+                dcc.Store(id="current-path", data=self.start_dir),
             ],
             fluid=True,
         )
@@ -849,6 +894,8 @@ class GeoExplorer:
                 return dash.no_update, dash.no_update
             selected_path = triggered["index"]
             selected_path = _standardize_path(selected_path)
+            if selected_path in self.selected_data:
+                return dash.no_update
             try:
                 more_bounds = _get_bounds_series(
                     selected_path, file_system=self.file_system
@@ -856,7 +903,7 @@ class GeoExplorer:
             except Exception as e:
                 return (
                     dbc.Alert(
-                        f"{type(e)}: {e}. {selected_path}",
+                        f"Couldn't read {selected_path}. {type(e)}: {e}",
                         color="warning",
                         dismissable=True,
                     ),
