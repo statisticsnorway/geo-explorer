@@ -61,7 +61,7 @@ def not_test_geo_explorer_locally():
 
 def not_test_geo_explorer_dapla():
     explorer = GeoExplorer(
-        start_dir="/buckets/",
+        start_dir="/buckets",
         data=[
             "/buckets/delt-kart/analyse_data/klargjorte-data/2025/FKB_arealbruk_flate_p2025_v1.parquet",
             "/buckets/delt-kart/analyse_data/klargjorte-data/2025/FKB_anlegg_flate_p2025_v1.parquet",

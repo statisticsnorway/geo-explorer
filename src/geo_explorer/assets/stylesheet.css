@@ -1,3 +1,22 @@
 .path-button {
     text-align: left;
+    display: inline-block;
+    margin: 0;
+    padding: 0;
+    border: 1px solid #5b5b5b;
+    color: "rgba(0, 0, 0, 0)"; 
+    text-decoration: none;
+    font-size: 16;
+}
+
+.button-container {
+    font-size: 0; /* This removes the space between inline-block elements */
+}
+
+.path-button {
+    font-size: 15px; /* Reset the font size for the buttons */
+}
+
+.load-button {
+    font-size: 15px; /* Reset the font size for the buttons */
 }

@@ -33,9 +33,7 @@ from shapely.geometry import Polygon
 from .fs import LocalFileSystem
 
 PORT: int = 8055
-BASE_DIR = "/buckets/produkt"
-BASE_DIR = "/buckets/produkt/strandsone/klargjorte-data/2024/strandsone_kode_p2024_v1.parquet/komm_nr=0301"
-BASE_DIR = "/buckets/delt-kart/analyse_data/klargjorte-data/2025"
+BASE_DIR = "/buckets"
 
 BASE_LAYERS = [
     dl.BaseLayer(
@@ -176,6 +174,7 @@ def _get_button(item, isdir: bool, file_system):
                 "type": "load-parquet",
                 "index": item,
             },
+            className="load-button",
             n_clicks=0,
             # style={"marginLeft": f"{size}px"},
         )
@@ -186,6 +185,7 @@ def _get_button(item, isdir: bool, file_system):
                 "type": "load-parquet",
                 "index": item,
             },
+            className="load-button",
             n_clicks=0,
             style={
                 # "marginLeft": f"{size}px",
@@ -214,7 +214,8 @@ def _get_button(item, isdir: bool, file_system):
                 disabled=False if isdir else True,
             ),
         ],
-        style={"height": f"{int(size*2)}px"},
+        # style={"height": f"{int(size*2)}px"},
+        className="button-container",
     )
 
 
@@ -1201,9 +1202,12 @@ class GeoExplorer:
                 if path in self.loaded_data:
                     df = self.loaded_data[path]
                 else:
-                    df = pd.concat(
-                        [df for key, df in self.loaded_data.items() if path in key]
-                    )
+                    matches = [
+                        df for key, df in self.loaded_data.items() if path in key
+                    ]
+                    if not matches:
+                        continue
+                    df = pd.concat(matches)
 
                 df = sg.sfilter(df, box)
                 # if zoom <= 15:
