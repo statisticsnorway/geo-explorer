@@ -9,10 +9,11 @@ on:
 jobs:
   release:
     name: Release
-    environment: pypi
     runs-on: ubuntu-latest
     permissions:
       id-token: write
+      contents: write
+      pull-requests: read
     steps:
       - name: Check out the repository
         uses: actions/checkout@v4
@@ -48,20 +49,13 @@ jobs:
           version-command: |
             bash -o pipefail -c "poetry version | cut -f 2 -d' '"
 
-      - name: Bump version for developmental release
-        if: (!steps.check-version.outputs.tag)
-        run: |
-          poetry version patch &&
-          version=$(poetry version | awk '{ print $2 }') &&
-          poetry version $version.dev.$(date +%s)
-
       - name: Build package
         run: |
           poetry build --ansi
 
-      - name: Publish package distributions to PyPI
+      - name: Publish package on PyPI
         if: steps.check-version.outputs.tag
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@v1.10.2
 
       - name: Publish the release notes
         uses: release-drafter/release-drafter@v6.0.0
