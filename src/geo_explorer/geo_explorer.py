@@ -871,7 +871,9 @@ class GeoExplorer:
         )
         def append_path(load_parquet, is_splitted, ids):
             triggered = dash.callback_context.triggered_id
-            if triggered == "is_splitted" and is_splitted:
+            if triggered == "is_splitted":
+                if not is_splitted:
+                    return dash.no_update, dash.no_update
                 self.splitted = True
                 for key, df in self.loaded_data.items():
                     self.loaded_data[key]["split_index"] = [
@@ -880,7 +882,10 @@ class GeoExplorer:
                 return 1, {"display": "none"}
             if not any(load_parquet) or not triggered:
                 return dash.no_update, dash.no_update
-            selected_path = triggered["index"]
+            try:
+                selected_path = triggered["index"]
+            except Exception as e:
+                raise type(e)(f"{e}: {triggered}")
             selected_path = _standardize_path(selected_path)
             if selected_path in self.selected_data:
                 return dash.no_update
