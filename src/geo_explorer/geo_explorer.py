@@ -15,7 +15,6 @@ import numpy as np
 import pandas as pd
 import sgis as sg
 import shapely
-from dash import ctx
 from dash import Dash
 from dash import Input
 from dash import Output
@@ -275,7 +274,9 @@ class GeoExplorer:
         self.nan_label = nan_label
         self.splitted = splitted
         self.file_system = file_system
-        self.selected_features: list[str] = selected_features
+        self.selected_features: list[str] = (
+            selected_features if selected_features is not None else []
+        )
         self.currently_in_bounds: set[str] = set()
         self.bounds_series = GeoSeries()
         self.loaded_data: dict[str, GeoDataFrame] = {}
@@ -582,7 +583,7 @@ class GeoExplorer:
 
         error_mess = "'data' must be a list of file paths or a dict of GeoDataFrames."
         bounds_series_dict = {}
-        for x in data:
+        for x in data or []:
             if isinstance(x, dict):
                 for key, value in x.items():
                     if not isinstance(value, GeoDataFrame):
@@ -652,9 +653,9 @@ class GeoExplorer:
 
         self._register_callbacks()
 
-    def run(self, debug: bool = False) -> None:
+    def run(self, debug: bool = False, jupyter_mode: str = "external") -> None:
         """Run the app."""
-        self.app.run(debug=debug, port=self.port)
+        self.app.run(debug=debug, port=self.port, jupyter_mode=jupyter_mode)
 
     def _register_callbacks(self) -> None:
 
@@ -1090,7 +1091,12 @@ class GeoExplorer:
                         if any(x in path for x in self.selected_data) and column in df
                     ]
                 ).dropna()
-                bins = jenks_breaks(series, n_classes=k)
+                if len(series.dropna().unique()) <= k:
+                    bins = list(series.dropna().unique())
+                else:
+                    bins = jenks_breaks(series, n_classes=k)
+                # bins[0] = bins[0] - 0.0001
+                # bins[-1] = bins[-1] + 0.0001
 
                 print("\n\nheiiiiiii")
                 print(column_values)
@@ -1099,10 +1105,12 @@ class GeoExplorer:
                     "map",
                     "currently-in-bounds",
                 ]:
+                    print("hei++++++")
                     color_dict = dict(
                         zip(column_values, colorpicker_values_list, strict=True)
                     )
                 else:
+                    print("hei---------")
                     cmap_ = matplotlib.colormaps.get_cmap(cmap)
                     colors_ = [
                         matplotlib.colors.to_hex(cmap_(int(i)))
@@ -1121,7 +1129,10 @@ class GeoExplorer:
                     }
             else:
                 # make sure the existing color scheme is not altered
-                if column_values is not None and triggered not in ["column-dropdown"]:
+                if column_values is not None and triggered not in [
+                    "column-dropdown",
+                    "force-categorical",
+                ]:
                     color_dict = dict(
                         zip(column_values, colorpicker_values_list, strict=True)
                     )
@@ -1161,6 +1172,10 @@ class GeoExplorer:
             if self.color_dict:
                 color_dict |= self.color_dict
 
+            for k, v in dict(locals()).items():
+                print()
+                print(k)
+                print(v)
             return (
                 get_colorpicker_container(color_dict),
                 bins,
@@ -1216,7 +1231,6 @@ class GeoExplorer:
             box = _buffer_box(box)
             data = []
             filenames = []
-            choices = np.arange(len(bins)) if bins is not None else None
 
             ns = Namespace("onEachFeatureToggleHighlight", "default")
 
@@ -1232,30 +1246,43 @@ class GeoExplorer:
                     )
 
                 df = sg.sfilter(df, box)
-                if zoom <= 13 and len(df) > 1000:
-                    df.geometry = shapely.simplify(df.geometry.values, 50)
-                elif zoom <= 12 and len(df) > 10_000:
-                    df.geometry = shapely.simplify(df.geometry.values, 150)
-                elif zoom <= 11 and len(df) > 100_000:
-                    df.geometry = shapely.simplify(df.geometry.values, 1000)
-                elif zoom <= 8 and len(df) > 250_000:
-                    df.geometry = shapely.simplify(df.geometry.values, 3000)
+                if zoom <= 15:
+                    if len(df) > 1000:
+                        df.geometry = shapely.simplify(df.geometry.values, 50)
+                    elif len(df) > 10_000:
+                        df.geometry = shapely.simplify(df.geometry.values, 150)
+                    elif len(df) > 100_000:
+                        df.geometry = shapely.simplify(df.geometry.values, 1000)
+                    elif len(df) > 250_000:
+                        df.geometry = shapely.simplify(df.geometry.values, 3000)
 
                 if column is not None and column in df and not is_numeric:
                     df["_color"] = df[column].map(color_dict)
                 elif column is not None and column in df:
+                    notnas = df[df[column].notna()]
                     conditions = [
-                        df[column] < bins[0],
+                        (notnas[column] < bins[1]) & (notnas[column].notna()),
                         *[
-                            (df[column] >= bins[i]) & (df[column] < bins[i + 1])
-                            for i in np.arange(1, len(bins) - 1)
+                            (notnas[column] >= bins[i])
+                            & (notnas[column] < bins[i + 1])
+                            & (notnas[column].notna())
+                            for i in np.arange(2, len(bins) - 1)
                         ],
-                        df[column] >= bins[-1],
+                        (notnas[column] >= bins[-1]) & (notnas[column].notna()),
                     ]
-                    df["_color"] = [
-                        color_dict[x] for x in np.select(conditions, choices)
-                    ]
-
+                    assert len(conditions) == len(color_dict), (
+                        (conditions),
+                        (color_dict),
+                        (bins),
+                    )
+                    choices = np.arange(len(conditions)) if bins is not None else None
+                    try:
+                        notnas["_color"] = [
+                            color_dict[x] for x in np.select(conditions, choices)
+                        ]
+                    except KeyError as e:
+                        raise KeyError(e, color_dict, conditions, choices, bins) from e
+                    df = pd.concat([notnas, df[df[column].isna()]])
                 if not any(path in x for x in currently_in_bounds):
                     filenames.append(path)
                     data.append(
@@ -1267,7 +1294,7 @@ class GeoExplorer:
                         )
                     )
                     continue
-                if column and column not in df:
+                if column is not None and column not in df:
                     filenames.append(path)
                     data.append(
                         dl.Overlay(
@@ -1293,8 +1320,8 @@ class GeoExplorer:
                             id={"type": "geojson-overlay", "filename": path},
                         )
                     )
-                elif column:
-                    for color_ in df["_color"].unique():
+                elif column is not None:
+                    for color_ in df["_color"].dropna().unique():
                         filenames.append(path + color_)
                     filenames.append(path + "_nan")
                     data.append(
@@ -1324,6 +1351,7 @@ class GeoExplorer:
                                         ),
                                     )
                                     for color_ in df["_color"].unique()
+                                    if pd.notna(color_)
                                 ]
                                 + [
                                     dl.GeoJSON(

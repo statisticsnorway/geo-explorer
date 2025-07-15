@@ -30,6 +30,7 @@ def test_geo_explorer():
 
 
 def not_test_geo_explorer_locally():
+
     explorer = GeoExplorer(
         start_dir="C:/users/ort/OneDrive - Statistisk sentralbyrå/data",
         data=[
