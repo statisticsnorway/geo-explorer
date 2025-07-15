@@ -112,6 +112,9 @@ docs/_build/
 # PyBuilder
 target/
 
+# cache
+.poetry
+
 # Jupyter Notebook
 .ipynb_checkpoints
 
