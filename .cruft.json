@@ -1,0 +1,16 @@
+{
+  "template": "https://github.com/statisticsnorway/ssb-project-template-stat",
+  "commit": "68d17c290773001faa81d2955521dd8b8164b64f",
+  "checkout": "1.1.0",
+  "context": {
+    "cookiecutter": {
+      "full_name": "ort",
+      "email": "ort@ssb.no",
+      "project_name": "geo-explorer",
+      "description": "Explore geodata interactively",
+      "license_year": "2023",
+      "_template": "https://github.com/statisticsnorway/ssb-project-template-stat"
+    }
+  },
+  "directory": null
+}
