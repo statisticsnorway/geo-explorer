@@ -684,14 +684,6 @@ class GeoExplorer:
             if triggered in ["file-removed", "close-export"] or not export_clicks:
                 return None, False
 
-            for k, v in self.__dict__.items():
-                print()
-                print(k)
-                print(v)
-            for k, v in dict(locals()).items():
-                print()
-                print(k)
-                print(v)
             centroid = shapely.box(*self._nested_bounds_to_bounds(bounds)).centroid
             center = (centroid.y, centroid.x)
 
@@ -857,19 +849,15 @@ class GeoExplorer:
         )
         def is_splitted(n_clicks: int, column):
             triggered = dash.callback_context.triggered_id
-            print(triggered, n_clicks, column)
             is_splitted: bool = n_clicks % 2 == 1 and not (
                 triggered == "column-dropdown" and column is None
             )
-            # self.splitted = is_splitted
             if is_splitted:
                 column = "split_index"
             elif column == "split_index":
                 column = None
             else:
                 column = dash.no_update
-            print("\n--is_splitted")
-            print(triggered, is_splitted, column)
             n_clicks = 1 if is_splitted else 0
             return n_clicks, is_splitted, column
 
@@ -881,10 +869,9 @@ class GeoExplorer:
             State({"type": "file-item", "index": dash.ALL}, "id"),
             prevent_initial_call=True,
         )
-        def append_path(load_parquet, splitter, ids):
-            print("--append_path")
+        def append_path(load_parquet, is_splitted, ids):
             triggered = dash.callback_context.triggered_id
-            if triggered == "is_splitted":
+            if triggered == "is_splitted" and is_splitted:
                 self.splitted = True
                 for key, df in self.loaded_data.items():
                     self.loaded_data[key]["split_index"] = [
@@ -927,7 +914,6 @@ class GeoExplorer:
             # prevent_initial_call=True,
         )
         def get_files_in_bounds(bounds, file_added, file_removed):
-            print("--get_files_in_bounds", bounds)
             box = shapely.box(*self._nested_bounds_to_bounds(bounds))
             box = _buffer_box(box)
             files_in_bounds = sg.sfilter(self.bounds_series, box)
@@ -940,22 +926,11 @@ class GeoExplorer:
             return list(currently_in_bounds)
 
         @callback(
-            Output({"type": "geojson-overlay", "filename": dash.ALL}, "checked"),
-            Input({"type": "geojson-overlay", "filename": dash.ALL}, "checked"),
-            # prevent_initial_call=True,
-        )
-        def uncheck(is_checked):
-            print("--is_checked")
-            print(is_checked)
-            return is_checked
-
-        @callback(
             Output("column-dropdown", "options"),
             Input("currently-in-bounds", "children"),
             prevent_initial_call=True,
         )
         def update_column_dropdown_options(currently_in_bounds):
-            print("--update_column_dropdown_options")
             return self._get_column_dropdown_options(currently_in_bounds)
 
         @callback(
@@ -990,7 +965,6 @@ class GeoExplorer:
             bins,
             is_splitted,
         ):
-            print("--get_column_value_color_dict", column)
             triggered = dash.callback_context.triggered_id
 
             if not is_splitted and self.splitted:
@@ -1006,7 +980,6 @@ class GeoExplorer:
                 color_dict = dict(
                     zip(column_values, colorpicker_values_list, strict=True)
                 )
-                print(color_dict, self.selected_data)
 
                 if self.color_dict:
                     color_dict |= self.color_dict
@@ -1095,22 +1068,15 @@ class GeoExplorer:
                     bins = list(series.dropna().unique())
                 else:
                     bins = jenks_breaks(series, n_classes=k)
-                # bins[0] = bins[0] - 0.0001
-                # bins[-1] = bins[-1] + 0.0001
 
-                print("\n\nheiiiiiii")
-                print(column_values)
-                print(triggered)
                 if column_values is not None and triggered in [
                     "map",
                     "currently-in-bounds",
                 ]:
-                    print("hei++++++")
                     color_dict = dict(
                         zip(column_values, colorpicker_values_list, strict=True)
                     )
                 else:
-                    print("hei---------")
                     cmap_ = matplotlib.colormaps.get_cmap(cmap)
                     colors_ = [
                         matplotlib.colors.to_hex(cmap_(int(i)))
@@ -1172,10 +1138,6 @@ class GeoExplorer:
             if self.color_dict:
                 color_dict |= self.color_dict
 
-            for k, v in dict(locals()).items():
-                print()
-                print(k)
-                print(v)
             return (
                 get_colorpicker_container(color_dict),
                 bins,
@@ -1214,18 +1176,11 @@ class GeoExplorer:
             clicked_ids,
             colorpicker_ids,
         ):
-            print("--add_data")
-            print("add_data: colorpicker_values_list")
-            print(is_checked)
             assert any(is_checked) or not len(is_checked), is_checked
             triggered = dash.callback_context.triggered_id
 
             column_values = [x["column_value"] for x in colorpicker_ids]
-            print(colorpicker_values_list)
-            print(column_values)
             color_dict = dict(zip(column_values, colorpicker_values_list, strict=True))
-            for key, value in color_dict.items():
-                print(key, value)
 
             box = shapely.box(*self._nested_bounds_to_bounds(bounds))
             box = _buffer_box(box)
@@ -1246,15 +1201,15 @@ class GeoExplorer:
                     )
 
                 df = sg.sfilter(df, box)
-                if zoom <= 15:
-                    if len(df) > 1000:
-                        df.geometry = shapely.simplify(df.geometry.values, 50)
-                    elif len(df) > 10_000:
-                        df.geometry = shapely.simplify(df.geometry.values, 150)
-                    elif len(df) > 100_000:
-                        df.geometry = shapely.simplify(df.geometry.values, 1000)
-                    elif len(df) > 250_000:
-                        df.geometry = shapely.simplify(df.geometry.values, 3000)
+                # if zoom <= 15:
+                #     if len(df) > 1000:
+                #         df.geometry = shapely.simplify(df.geometry.values, 50)
+                #     elif len(df) > 10_000:
+                #         df.geometry = shapely.simplify(df.geometry.values, 150)
+                #     elif len(df) > 100_000:
+                #         df.geometry = shapely.simplify(df.geometry.values, 1000)
+                #     elif len(df) > 250_000:
+                #         df.geometry = shapely.simplify(df.geometry.values, 3000)
 
                 if column is not None and column in df and not is_numeric:
                     df["_color"] = df[column].map(color_dict)
@@ -1478,6 +1433,8 @@ class GeoExplorer:
                     list(self.loaded_data)
                 )
             all_columns = {x["label"] for x in column_dropdown}
+            if not self.splitted:
+                all_columns = all_columns.difference({"split_index"})
             columns = [{"name": k, "id": k} for k in data[0].keys() if k in all_columns]
             return html.Div(
                 [
