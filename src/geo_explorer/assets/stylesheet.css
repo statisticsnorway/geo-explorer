@@ -20,3 +20,7 @@
 .load-button {
     font-size: 15px; /* Reset the font size for the buttons */
 }
+
+.x-button {
+    text-align: left;
+}

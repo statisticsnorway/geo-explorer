@@ -1,11 +1,13 @@
 import inspect
 import itertools
 import os
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
 from pathlib import PurePath
 from pathlib import PurePosixPath
+from typing import ClassVar
 
 import dash
 import dash_bootstrap_components as dbc
@@ -32,36 +34,7 @@ from shapely.geometry import Polygon
 
 from .fs import LocalFileSystem
 
-PORT: int = 8055
-BASE_DIR = "/buckets"
-
-WMS_CONSTRUCTORS = {
-    "Norge i bilder": sg.NorgeIBilderWms,
-}
-
-BASE_LAYERS = [
-    dl.BaseLayer(
-        dl.TileLayer("OpenStreetMap"),
-        name="OpenStreetMap",
-        checked=True,
-    ),
-    dl.BaseLayer(
-        dl.TileLayer(
-            url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
-            attribution='&copy; <a href="https://carto.com/">CARTO</a>',
-        ),
-        name="CartoDB Dark Matter",
-        checked=False,
-    ),
-    dl.BaseLayer(
-        dl.TileLayer(
-            url="https://opencache.statkart.no/gatekeeper/gk/gk.open_nib_web_mercator_wmts_v2?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=Nibcache_web_mercator_v2&STYLE=default&FORMAT=image/jpgpng&tileMatrixSet=default028mm&tileMatrix={z}&tileRow={y}&tileCol={x}",
-            attribution="© Geovekst",
-        ),
-        name="Norge i bilder",
-        checked=False,
-    ),
-]
+OFFWHITE = "#ebebeb"
 
 
 def _buffer_box(box: Polygon) -> Polygon:
@@ -182,7 +155,6 @@ def _get_button(item, isdir: bool, file_system):
             },
             className="load-button",
             n_clicks=0,
-            # style={"marginLeft": f"{size}px"},
         )
     else:
         button = html.Button(
@@ -194,7 +166,6 @@ def _get_button(item, isdir: bool, file_system):
             className="load-button",
             n_clicks=0,
             style={
-                # "marginLeft": f"{size}px",
                 "color": "rgba(0, 0, 0, 0)",
                 "fillColor": "rgba(0, 0, 0, 0)",
                 "backgroundColor": "rgba(0, 0, 0, 0)",
@@ -215,7 +186,7 @@ def _get_button(item, isdir: bool, file_system):
                     "fillColor": "rgba(0, 0, 0, 0)",
                     "width": "70vh",
                 }
-                | ({"color": "#d3d3d3"} if not isdir else {"color": "#78b3e7"}),
+                | ({"color": OFFWHITE} if not isdir else {"color": "#78b3e7"}),
                 n_clicks=0,
                 disabled=False if isdir else True,
             ),
@@ -246,12 +217,49 @@ def _list_dir(path, file_system):
     )
 
 
+sg.NorgeIBilderWms._url = "https://wms.geonorge.no/skwms1/wms.nib-prosjekter"
+
+
 class GeoExplorer:
     """Class for exploring geodata interactively."""
 
+    _wms_constructors: ClassVar[dict[str, Callable]] = {
+        "Norge i bilder": sg.NorgeIBilderWms,
+    }
+    _base_layers: ClassVar[list[dl.BaseLayer]] = [
+        dl.BaseLayer(
+            dl.TileLayer("OpenStreetMap"),
+            name="OpenStreetMap",
+            checked=True,
+        ),
+        dl.BaseLayer(
+            dl.TileLayer(
+                url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+                attribution='&copy; <a href="https://carto.com/">CARTO</a>',
+            ),
+            name="CartoDB Dark Matter",
+            checked=False,
+        ),
+        dl.BaseLayer(
+            dl.TileLayer(
+                url="https://opencache.statkart.no/gatekeeper/gk/gk.open_nib_web_mercator_wmts_v2?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=Nibcache_web_mercator_v2&STYLE=default&FORMAT=image/jpgpng&tileMatrixSet=default028mm&tileMatrix={z}&tileRow={y}&tileCol={x}",
+                attribution="© Geovekst",
+            ),
+            name="Norge i bilder",
+            checked=False,
+        ),
+    ]
+    _map_children = [
+        dl.ScaleControl(position="bottomleft"),
+        dl.MeasureControl(
+            position="bottomright",
+            primaryLengthUnit="meters",
+        ),
+    ]
+
     def __init__(
         self,
-        start_dir: str = BASE_DIR,
+        start_dir: str = "/buckets",
         port=8055,
         data: list[str] | None = None,
         selected_features: list[str] | None = None,
@@ -287,7 +295,7 @@ class GeoExplorer:
         self.currently_in_bounds: set[str] = set()
         self.bounds_series = GeoSeries()
         self.loaded_data: dict[str, GeoDataFrame] = {}
-        self.selected_data: list[str] = []
+        self.selected_data: dict[str, int] = {}
 
         self.app = Dash(
             __name__,
@@ -318,13 +326,9 @@ class GeoExplorer:
                                 dl.Map(
                                     center=self.center,
                                     zoom=self.zoom,
-                                    children=[
-                                        dl.LayersControl(BASE_LAYERS, id="lc"),
-                                        dl.ScaleControl(position="bottomleft"),
-                                        dl.MeasureControl(
-                                            position="bottomright",
-                                            primaryLengthUnit="meters",
-                                        ),
+                                    children=self._map_children
+                                    + [
+                                        dl.LayersControl(self._base_layers, id="lc"),
                                     ],
                                     id="map",
                                     style={"width": "100%", "height": "90vh"},
@@ -460,29 +464,23 @@ class GeoExplorer:
                                                         ]
                                                     ],
                                                     value="viridis",
-                                                    # style={
-                                                    #     "font-size": 22,
-                                                    #     "width": "100%",
-                                                    #     # "overflow": "scroll",
-                                                    # },
                                                     maxHeight=200,
                                                     clearable=False,
                                                 ),
-                                                # dbc.Input(value="viridis", id="cmap"),
-                                                # id="cmap-placeholder",
                                             )
                                         ),
                                     ]
                                 ),
                                 dbc.Row(
                                     [
-                                        dbc.Col(
+                                        dbc.Row(
                                             [
-                                                html.Div("Wms"),
-                                                html.Button(
-                                                    "Hide/show wms options",
-                                                    id="hide-wms-button",
-                                                    n_clicks=0,
+                                                dbc.Col(
+                                                    html.Button(
+                                                        "Hide/show wms options",
+                                                        id="hide-wms-button",
+                                                        n_clicks=0,
+                                                    ),
                                                 ),
                                             ]
                                         ),
@@ -493,19 +491,6 @@ class GeoExplorer:
                                                         options=["Norge i bilder"],
                                                         value=[],
                                                         id="wms-checklist",
-                                                        # options=[
-                                                        #     {"label": f"wms={x}", "value": x}
-                                                        #     for x in ["Norge i bilder"]
-                                                        # ],
-                                                        # value=None,
-                                                        # placeholder="Wms...",
-                                                        # style={
-                                                        #     "font-size": 22,
-                                                        #     "width": "100%",
-                                                        #     "overflow": "visible",
-                                                        # },
-                                                        # maxHeight=300,
-                                                        # clearable=True,
                                                     ),
                                                 ),
                                                 html.Div(id="wms-items"),
@@ -525,10 +510,6 @@ class GeoExplorer:
                             },
                         ),
                     ],
-                    # style={
-                    #     "height": "90vh",
-                    #     "overflow": "scroll",
-                    # },
                 ),
                 dbc.Row(
                     [
@@ -623,12 +604,12 @@ class GeoExplorer:
                         raise ValueError(error_mess)
                     key = _standardize_path(key)
                     self.loaded_data[key] = value.to_crs(4326)
-                    self.selected_data.append(key)
+                    self.selected_data[key] = 0
                     bounds_series_dict[key] = shapely.box(
                         *self.loaded_data[key].total_bounds
                     )
             elif isinstance(x, (str | os.PathLike | PurePath)):
-                self.selected_data.append(_standardize_path(x))
+                self.selected_data[_standardize_path(x)] = 0
             else:
                 raise ValueError(error_mess)
 
@@ -812,13 +793,30 @@ class GeoExplorer:
 
         @callback(
             Output("remove-buttons", "children"),
-            Input("new-file-added", "children"),
+            # Input("new-file-added", "children"),
+            Input("alert", "children"),
             Input("file-removed", "children"),
         )
         def render_items(new_file_added, file_removed):
             return [
                 html.Div(
                     [
+                        html.Button(
+                            "✓",
+                            id={
+                                "type": "checked-btn",
+                                "index": path,
+                            },
+                            n_clicks=n_clicks,
+                            style={
+                                "color": "rgba(0, 0, 0, 0)",
+                                # "fillColor": ("blue" if n_clicks % 2 == 0 else "white"),
+                                "background": (
+                                    "#5ca3ff" if n_clicks % 2 == 0 else OFFWHITE
+                                ),
+                                # "cursor": "pointer",
+                            },
+                        ),
                         html.Button(
                             "❌",
                             id={
@@ -832,6 +830,7 @@ class GeoExplorer:
                                 "background": "none",
                                 "cursor": "pointer",
                             },
+                            className="x-button",
                         ),
                         html.Span(path),
                     ],
@@ -841,7 +840,7 @@ class GeoExplorer:
                         "marginBottom": "5px",
                     },
                 )
-                for path in self.selected_data
+                for path, n_clicks in self.selected_data.items()
             ]
 
         @callback(
@@ -864,7 +863,7 @@ class GeoExplorer:
                     )
                 )
                 path_to_remove = delete_ids[index]["index"]
-                self.selected_data.pop(self.selected_data.index(path_to_remove))
+                self.selected_data.pop(path_to_remove)
                 for path in list(self.loaded_data):
                     if path_to_remove in path:
                         del self.loaded_data[path]
@@ -935,7 +934,7 @@ class GeoExplorer:
                     ),
                     None,
                 )
-            self.selected_data.append(selected_path)
+            self.selected_data[selected_path] = 0
             self.bounds_series = pd.concat(
                 [
                     self.bounds_series,
@@ -987,72 +986,92 @@ class GeoExplorer:
             State("wms-items", "children"),
             prevent_initial_call=True,
         )
-        def add_wms_panel(checklist_items, items):
-            items = items or []
-            print(items)
-            print(checklist_items)
-            print(checklist_items)
-            print(checklist_items)
-            items = [
-                item for item in items if any(x in item.id for x in checklist_items)
-            ]
+        def add_wms_panel(
+            checklist_items,
+            items,
+        ):
+            items = []
+            if not checklist_items:
+                return items
             for wms_name in checklist_items:
-                print("wms_name", wms_name)
                 assert isinstance(wms_name, str), type(wms_name)
                 defaults = {
                     arg: default
                     for arg, default in zip(
-                        inspect.getfullargspec(WMS_CONSTRUCTORS[wms_name]).args[1:],
-                        inspect.getfullargspec(WMS_CONSTRUCTORS[wms_name]).defaults,
+                        inspect.getfullargspec(self._wms_constructors[wms_name]).args[
+                            1:
+                        ],
+                        inspect.getfullargspec(
+                            self._wms_constructors[wms_name]
+                        ).defaults,
                         strict=True,
                     )
                 }
-                from_year = list(defaults["years"])[0]
-                to_year = list(defaults["years"])[-1]
+                from_year = int(list(defaults["years"])[0])
+                to_year = int(list(defaults["years"])[-1])
 
-                items.append(
-                    html.Div(
-                        [
-                            dcc.Input(
-                                value=from_year,
-                                id={"type": "from-year", "index": wms_name},
-                                type="number",
-                                placeholder="From year",
-                            ),
-                            dcc.Input(
-                                value=to_year,
-                                id={"type": "to-year", "index": wms_name},
-                                type="number",
-                                placeholder="To year",
-                            ),
-                            dcc.Input(
-                                id={"type": "wms-not-contains", "index": wms_name},
-                                type="text",
-                                placeholder="Not contains",
-                            ),
-                            dcc.Checklist(
-                                options=["show"],
-                                value=[],
-                                id={"type": "wms-checked", "index": wms_name},
-                            ),
-                        ],
-                        style={
-                            "display": "flex",
-                            "flexDirection": "column",
-                            "border": "1px solid #ccc",
-                            "borderRadius": "5px",
-                            "padding": "20px",
-                            "backgroundColor": "white",
-                            "gap": "10px",
-                            "width": "300px",
-                        },
-                        id=f"wms-item-{wms_name}",
-                    )
-                )
-                self.wms[wms_name] = WMS_CONSTRUCTORS[wms_name](
+                self.wms[wms_name] = self._wms_constructors[wms_name](
                     years=np.arange(int(from_year), int(to_year)),
                 )
                 self.wms[wms_name].checked = False
+
+                items.append(
+                    dbc.Row(
+                        [
+                            dbc.Col(
+                                [
+                                    dbc.Row(
+                                        dcc.Input(
+                                            value=from_year,
+                                            id={"type": "from-year", "index": wms_name},
+                                            type="number",
+                                            placeholder="From year",
+                                        )
+                                    ),
+                                    dbc.Row(
+                                        dcc.Input(
+                                            value=to_year,
+                                            id={"type": "to-year", "index": wms_name},
+                                            type="number",
+                                            placeholder="To year",
+                                        )
+                                    ),
+                                    dbc.Row(
+                                        dcc.Input(
+                                            id={
+                                                "type": "wms-not-contains",
+                                                "index": wms_name,
+                                            },
+                                            type="text",
+                                            placeholder="Not contains",
+                                        )
+                                    ),
+                                    dbc.Row(
+                                        dcc.Checklist(
+                                            options=["show/hide all"],
+                                            value=[],
+                                            id={
+                                                "type": "wms-checked",
+                                                "index": wms_name,
+                                            },
+                                        )
+                                    ),
+                                ],
+                                style={
+                                    "display": "flex",
+                                    "flexDirection": "column",
+                                    "border": "1px solid #ccc",
+                                    "borderRadius": "5px",
+                                    "padding": "20px",
+                                    "backgroundColor": "white",
+                                    "gap": "10px",
+                                    "width": "300px",
+                                },
+                                id=f"wms-item-{wms_name}",
+                            ),
+                        ],
+                    )
+                )
 
             return items
 
@@ -1107,12 +1126,15 @@ class GeoExplorer:
                 if self.color_dict:
                     color_dict |= self.color_dict
 
-                if not is_splitted:
-                    color_dict = {
-                        key: color
-                        for key, color in color_dict.items()
-                        if key in self.selected_data
-                    }
+                color_dict = {
+                    key: color
+                    for key, color in color_dict.items()
+                    if any(key in x for x in self.selected_data)
+                }
+
+                default_colors = [
+                    x for x in default_colors if x not in set(color_dict.values())
+                ]
 
                 new_values = [
                     _get_name(value)
@@ -1227,12 +1249,16 @@ class GeoExplorer:
                     )
                 else:
                     color_dict = {}
+
                 unique_values = values.unique()
                 new_values = [
                     value for value in unique_values if value not in column_values
                 ]
                 existing_values = [
                     value for value in unique_values if value in column_values
+                ]
+                default_colors = [
+                    x for x in default_colors if x not in set(color_dict.values())
                 ]
                 colors = default_colors[
                     len(existing_values) : min(len(unique_values), len(default_colors))
@@ -1279,6 +1305,11 @@ class GeoExplorer:
         )
         def get_wms_object(from_year, to_year, not_contains, checked):
             triggered = dash.callback_context.triggered_id
+            if triggered is None:
+                for wms_name in list(self.wms):
+                    if wms_name not in checked:
+                        self.wms.pop(wms_name)
+                return
             wms_name = triggered["index"]
             assert len(from_year) == 1
             assert len(to_year) == 1
@@ -1290,12 +1321,35 @@ class GeoExplorer:
             checked = next(iter(checked))
             if not_contains is not None:
                 not_contains = [x.strip(",") for x in not_contains.split(" ")]
-            self.wms[wms_name] = WMS_CONSTRUCTORS[wms_name](
-                years=np.arange(int(from_year), int(to_year)),
-                not_contains=not_contains,
-            )
+            try:
+                self.wms[wms_name] = self._wms_constructors[wms_name](
+                    years=np.arange(int(from_year), int(to_year)),
+                    not_contains=not_contains,
+                )
+            except Exception:
+                return dash.no_update
             self.wms[wms_name].checked = bool(checked)
             return 1
+
+        @callback(
+            Output({"type": "checked-btn", "index": dash.ALL}, "style"),
+            Input({"type": "checked-btn", "index": dash.ALL}, "n_clicks"),
+            Input({"type": "checked-btn", "index": dash.ALL}, "id"),
+        )
+        def update_clicks(n_clicks_list, ids):
+            for n_clicks, id_ in zip(n_clicks_list, ids, strict=True):
+                path = id_["index"]
+                self.selected_data[path] = n_clicks
+            return [
+                {
+                    # "display": "none",
+                    "color": (
+                        "rgba(0, 0, 0, 0)"
+                    ),  # if n_clicks % 2 == 0 else OFFWHITE),
+                    "background": ("#5ca3ff" if n_clicks % 2 == 0 else OFFWHITE),
+                }
+                for n_clicks in n_clicks_list
+            ]
 
         @callback(
             Output("lc", "children"),
@@ -1306,7 +1360,9 @@ class GeoExplorer:
             Input("file-removed", "children"),
             Input("clear-table", "n_clicks"),
             Input("wms-items", "children"),
+            Input("wms-checklist", "value"),
             Input("new-file-added2", "children"),
+            Input({"type": "checked-btn", "index": dash.ALL}, "style"),
             State("map", "bounds"),
             State("map", "zoom"),
             State({"type": "geojson-overlay", "filename": dash.ALL}, "checked"),
@@ -1323,7 +1379,9 @@ class GeoExplorer:
             file_removed,
             clear_table,
             wms,
+            wms_checked,
             new_file_added2,
+            checked_buttons,
             bounds,
             zoom,
             is_checked,
@@ -1332,8 +1390,6 @@ class GeoExplorer:
             clicked_ids,
             colorpicker_ids,
         ):
-            print("add_datsa")
-            print(is_checked)
             column_values = [x["column_value"] for x in colorpicker_ids]
             color_dict = dict(zip(column_values, colorpicker_values_list, strict=True))
 
@@ -1343,14 +1399,15 @@ class GeoExplorer:
             filenames = []
 
             wms_layers = []
-            for name, wms_obj in self.wms.items():
+            for wms_name, wms_obj in self.wms.items():
+                if wms_name not in wms_checked:
+                    continue
                 tiles = wms_obj._filter_tiles(box)["name"]
-                print(wms_obj.years)
                 for tile in tiles:
                     wms_layers.append(
                         dl.Overlay(
                             dl.WMSTileLayer(
-                                url="https://wms.geonorge.no/skwms1/wms.nib-prosjekter",
+                                url=wms_obj._url,
                                 layers=tile,
                                 format="image/png",
                                 transparent=True,
@@ -1366,7 +1423,7 @@ class GeoExplorer:
                 color_dict = {i: color for i, color in enumerate(color_dict.values())}
 
             out_alert = []
-            for path in self.selected_data:
+            for path, n_clicks in self.selected_data.items():
                 if path in self.loaded_data:
                     df = self.loaded_data[path]
                 else:
@@ -1378,14 +1435,19 @@ class GeoExplorer:
                     df = pd.concat(matches)
 
                 df = sg.sfilter(df, box)
-                checked: bool = len(df) < 35_000
-                if not checked:
+                if n_clicks:
+                    checked = n_clicks % 2 == 0
+                else:
+                    checked: bool = len(df) < 35_000  #  and not n_clicks
+                    if not checked:
+                        self.selected_data[path] = 1
+                if not checked and not n_clicks:
                     out_alert.append(
                         dbc.Alert(
                             html.Div(
                                 [
                                     html.Span(
-                                        f"Layer {Path(path).name} was set to 'unchecked' because it has too many ({len(df)}) rows in the current map bounds."
+                                        f"Layer '{Path(path).name}' was set as unchecked because it has too many ({len(df)}) rows in the current map bounds."
                                     ),
                                     html.Br(),
                                     html.Span(
@@ -1557,7 +1619,10 @@ class GeoExplorer:
                         )
                     )
 
-            return BASE_LAYERS + wms_layers + data, out_alert if out_alert else None
+            return (
+                (self._base_layers + wms_layers + data),
+                (out_alert if out_alert else None),
+            )
 
         @callback(
             Output("clicked-features", "data"),
@@ -1567,7 +1632,6 @@ class GeoExplorer:
             Input({"type": "geojson", "filename": dash.ALL}, "n_clicks"),
             State({"type": "geojson", "filename": dash.ALL}, "clickData"),
             State({"type": "geojson", "filename": dash.ALL}, "id"),
-            # State({"type": "geojson", "filename": dash.ALL}, "hideout"),
             State("clicked-features", "data"),
             prevent_initial_call=True,
         )
@@ -1639,7 +1703,7 @@ class GeoExplorer:
                             "fontWeight": "bold",
                         },
                         style_data={
-                            "backgroundColor": "#d3d3d3",
+                            "backgroundColor": OFFWHITE,
                             "color": "black",
                         },
                         style_table={"overflowX": "auto"},
