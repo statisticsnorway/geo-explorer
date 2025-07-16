@@ -217,7 +217,7 @@ def _list_dir(path, file_system):
     )
 
 
-sg.NorgeIBilderWms._url = "https://wms.geonorge.no/skwms1/wms.nib-prosjekter"
+sg.NorgeIBilderWms.url = "https://wms.geonorge.no/skwms1/wms.nib-prosjekter"
 
 
 class GeoExplorer:
@@ -296,6 +296,7 @@ class GeoExplorer:
         self.bounds_series = GeoSeries()
         self.loaded_data: dict[str, GeoDataFrame] = {}
         self.selected_data: dict[str, int] = {}
+        self.tile_names: list[str] = []
 
         self.app = Dash(
             __name__,
@@ -328,7 +329,7 @@ class GeoExplorer:
                                     zoom=self.zoom,
                                     children=self._map_children
                                     + [
-                                        dl.LayersControl(self._base_layers, id="lc"),
+                                        html.Div(id="lc"),
                                     ],
                                     id="map",
                                     style={"width": "100%", "height": "90vh"},
@@ -480,6 +481,7 @@ class GeoExplorer:
                                                         "Hide/show wms options",
                                                         id="hide-wms-button",
                                                         n_clicks=1,
+                                                        style={"display": "none"},
                                                     ),
                                                 ),
                                             ]
@@ -811,13 +813,12 @@ class GeoExplorer:
                             n_clicks=n_clicks,
                             style={
                                 "color": "rgba(0, 0, 0, 0)",
-                                # "fillColor": ("blue" if n_clicks % 2 == 0 else "white"),
                                 "background": (
                                     "#5ca3ff" if n_clicks % 2 == 0 else OFFWHITE
                                 ),
-                                # "cursor": "pointer",
                             },
                         ),
+                        html.Span(path),
                         html.Button(
                             "❌",
                             id={
@@ -830,13 +831,13 @@ class GeoExplorer:
                                 "border": "none",
                                 "background": "none",
                                 "cursor": "pointer",
+                                "marginLeft": "auto",
                             },
-                            className="x-button",
                         ),
-                        html.Span(path),
                     ],
                     style={
                         "display": "flex",
+                        "justifyContent": "space-between",
                         "alignItems": "center",
                         "marginBottom": "5px",
                     },
@@ -1016,6 +1017,9 @@ class GeoExplorer:
                 )
                 self.wms[wms_name].checked = False
 
+                # from_year = int(list(self.wms[wms_name].years[0]))
+                # to_year = int(list(self.wms[wms_name].years[-1]))
+
                 items.append(
                     dbc.Row(
                         [
@@ -1070,6 +1074,12 @@ class GeoExplorer:
                                 },
                                 id=f"wms-item-{wms_name}",
                             ),
+                            # dbc.Col(
+                            #     # dbc.Checklist(
+                            #     #     options=self.tile_names,
+                            #     id="wms-layer-checklist",
+                            #     # )
+                            # ),
                         ],
                     )
                 )
@@ -1343,10 +1353,7 @@ class GeoExplorer:
                 self.selected_data[path] = n_clicks
             return [
                 {
-                    # "display": "none",
-                    "color": (
-                        "rgba(0, 0, 0, 0)"
-                    ),  # if n_clicks % 2 == 0 else OFFWHITE),
+                    "color": ("rgba(0, 0, 0, 0)"),
                     "background": ("#5ca3ff" if n_clicks % 2 == 0 else OFFWHITE),
                 }
                 for n_clicks in n_clicks_list
@@ -1365,11 +1372,8 @@ class GeoExplorer:
             Input("new-file-added2", "children"),
             Input({"type": "checked-btn", "index": dash.ALL}, "style"),
             State("map", "bounds"),
-            State("map", "zoom"),
-            State({"type": "geojson-overlay", "filename": dash.ALL}, "checked"),
             State("column-dropdown", "value"),
             State("bins", "children"),
-            State("clicked-ids", "data"),
             State({"type": "colorpicker", "column_value": dash.ALL}, "id"),
             prevent_initial_call=True,
         )
@@ -1384,11 +1388,8 @@ class GeoExplorer:
             new_file_added2,
             checked_buttons,
             bounds,
-            zoom,
-            is_checked,
             column,
             bins,
-            clicked_ids,
             colorpicker_ids,
         ):
             column_values = [x["column_value"] for x in colorpicker_ids]
@@ -1400,15 +1401,17 @@ class GeoExplorer:
             filenames = []
 
             wms_layers = []
+            tiles = []
             for wms_name, wms_obj in self.wms.items():
                 if wms_name not in wms_checked:
                     continue
                 tiles = wms_obj._filter_tiles(box)["name"]
+                self.tile_names = list(tiles)
                 for tile in tiles:
                     wms_layers.append(
                         dl.Overlay(
                             dl.WMSTileLayer(
-                                url=wms_obj._url,
+                                url=wms_obj.url,
                                 layers=tile,
                                 format="image/png",
                                 transparent=True,
@@ -1621,7 +1624,7 @@ class GeoExplorer:
                     )
 
             return (
-                (self._base_layers + wms_layers + data),
+                dl.LayersControl(self._base_layers + wms_layers + data),
                 (out_alert if out_alert else None),
             )
 
