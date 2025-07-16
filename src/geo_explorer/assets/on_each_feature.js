@@ -2,7 +2,7 @@ window.onEachFeatureToggleHighlight = Object.assign({}, window.dashExtensions, {
     default: {
         yellowIfHighlighted: function (feature, layer) {
             window.selectedFeatureIds = window.selectedFeatureIds || [];
-            const featureId = feature.properties._unique_id; // or .id or .uuid
+            const featureId = feature.properties._unique_id; 
             const geomType = feature.geometry.type;
 
             // Store original style ON THE LAYER

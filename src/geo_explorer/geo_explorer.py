@@ -479,7 +479,7 @@ class GeoExplorer:
                                                     html.Button(
                                                         "Hide/show wms options",
                                                         id="hide-wms-button",
-                                                        n_clicks=0,
+                                                        n_clicks=1,
                                                     ),
                                                 ),
                                             ]
@@ -496,6 +496,7 @@ class GeoExplorer:
                                                 html.Div(id="wms-items"),
                                             ],
                                             id="hide-wms-div",
+                                            style={"display": "none"},
                                         ),
                                     ]
                                 ),
