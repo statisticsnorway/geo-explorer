@@ -733,11 +733,12 @@ class GeoExplorer:
                     "center",
                     "bounds",
                     "zoom",
+                    "tile_names",
                 ]
                 and not (k in defaults and v == defaults[k])
             } | {"zoom": zoom, "center": center, "color_dict": color_dict}
             if self.selected_data:
-                data["data"] = data.pop("selected_data")
+                data["data"] = list(data.pop("selected_data"))
             else:
                 data.pop("selected_data")
 
@@ -865,7 +866,8 @@ class GeoExplorer:
                     )
                 )
                 path_to_remove = delete_ids[index]["index"]
-                self.selected_data.pop(path_to_remove)
+                if path_to_remove in self.selected_data:
+                    self.selected_data.pop(path_to_remove)
                 for path in list(self.loaded_data):
                     if path_to_remove in path:
                         del self.loaded_data[path]
@@ -1087,6 +1089,59 @@ class GeoExplorer:
             return items
 
         @callback(
+            Output("new-file-added2", "children"),
+            Input({"type": "from-year", "index": dash.ALL}, "value"),
+            Input({"type": "to-year", "index": dash.ALL}, "value"),
+            Input({"type": "wms-not-contains", "index": dash.ALL}, "value"),
+            Input({"type": "wms-checked", "index": dash.ALL}, "value"),
+            prevent_initial_call=True,
+        )
+        def get_wms_object(from_year, to_year, not_contains, checked):
+            triggered = dash.callback_context.triggered_id
+            if triggered is None:
+                for wms_name in list(self.wms):
+                    if wms_name not in checked:
+                        self.wms.pop(wms_name)
+                return
+            wms_name = triggered["index"]
+            assert len(from_year) == 1
+            assert len(to_year) == 1
+            assert len(not_contains) == 1
+            assert len(checked) == 1
+            from_year = next(iter(from_year))
+            to_year = next(iter(to_year))
+            not_contains = next(iter(not_contains)) or None
+            checked = next(iter(checked))
+            if not_contains is not None:
+                not_contains = [x.strip(",") for x in not_contains.split(" ")]
+            try:
+                self.wms[wms_name] = self._wms_constructors[wms_name](
+                    years=np.arange(int(from_year), int(to_year)),
+                    not_contains=not_contains,
+                )
+            except Exception:
+                return dash.no_update
+            self.wms[wms_name].checked = bool(checked)
+            return 1
+
+        @callback(
+            Output({"type": "checked-btn", "index": dash.ALL}, "style"),
+            Input({"type": "checked-btn", "index": dash.ALL}, "n_clicks"),
+            Input({"type": "checked-btn", "index": dash.ALL}, "id"),
+        )
+        def update_clicks(n_clicks_list, ids):
+            for n_clicks, id_ in zip(n_clicks_list, ids, strict=True):
+                path = id_["index"]
+                self.selected_data[path] = n_clicks
+            return [
+                {
+                    "color": ("rgba(0, 0, 0, 0)"),
+                    "background": ("#5ca3ff" if n_clicks % 2 == 0 else OFFWHITE),
+                }
+                for n_clicks in n_clicks_list
+            ]
+
+        @callback(
             Output("colorpicker-container", "children"),
             Output("bins", "children"),
             Output("is-numeric", "children"),
@@ -1154,14 +1209,15 @@ class GeoExplorer:
                 ]
                 if len(color_dict) < len(default_colors):
                     default_colors = default_colors[
-                        len(color_dict) : min(
-                            len(self.selected_data), len(default_colors)
-                        )
+                        : min(len(self.selected_data), len(default_colors))
                     ]
-                new_colors = default_colors + [
-                    _random_color()
-                    for _ in range(len(new_values) - len(default_colors))
-                ]
+                new_colors = (
+                    default_colors
+                    + [
+                        _random_color()
+                        for _ in range(len(new_values) - len(default_colors))
+                    ]
+                )[: len(new_values)]
 
                 try:
                     color_dict = color_dict | dict(
@@ -1196,7 +1252,7 @@ class GeoExplorer:
                     "Force categorical",
                     n_clicks=force_categorical_clicks,
                     style={
-                        "fillColor": "white",
+                        "background": "white",
                         "color": "black",
                     },
                 )
@@ -1205,7 +1261,7 @@ class GeoExplorer:
                     "Force categorical",
                     n_clicks=force_categorical_clicks,
                     style={
-                        "fillColor": "black",
+                        "background": "black",
                         "color": "white",
                     },
                 )
@@ -1307,59 +1363,6 @@ class GeoExplorer:
             )
 
         @callback(
-            Output("new-file-added2", "children"),
-            Input({"type": "from-year", "index": dash.ALL}, "value"),
-            Input({"type": "to-year", "index": dash.ALL}, "value"),
-            Input({"type": "wms-not-contains", "index": dash.ALL}, "value"),
-            Input({"type": "wms-checked", "index": dash.ALL}, "value"),
-            prevent_initial_call=True,
-        )
-        def get_wms_object(from_year, to_year, not_contains, checked):
-            triggered = dash.callback_context.triggered_id
-            if triggered is None:
-                for wms_name in list(self.wms):
-                    if wms_name not in checked:
-                        self.wms.pop(wms_name)
-                return
-            wms_name = triggered["index"]
-            assert len(from_year) == 1
-            assert len(to_year) == 1
-            assert len(not_contains) == 1
-            assert len(checked) == 1
-            from_year = next(iter(from_year))
-            to_year = next(iter(to_year))
-            not_contains = next(iter(not_contains)) or None
-            checked = next(iter(checked))
-            if not_contains is not None:
-                not_contains = [x.strip(",") for x in not_contains.split(" ")]
-            try:
-                self.wms[wms_name] = self._wms_constructors[wms_name](
-                    years=np.arange(int(from_year), int(to_year)),
-                    not_contains=not_contains,
-                )
-            except Exception:
-                return dash.no_update
-            self.wms[wms_name].checked = bool(checked)
-            return 1
-
-        @callback(
-            Output({"type": "checked-btn", "index": dash.ALL}, "style"),
-            Input({"type": "checked-btn", "index": dash.ALL}, "n_clicks"),
-            Input({"type": "checked-btn", "index": dash.ALL}, "id"),
-        )
-        def update_clicks(n_clicks_list, ids):
-            for n_clicks, id_ in zip(n_clicks_list, ids, strict=True):
-                path = id_["index"]
-                self.selected_data[path] = n_clicks
-            return [
-                {
-                    "color": ("rgba(0, 0, 0, 0)"),
-                    "background": ("#5ca3ff" if n_clicks % 2 == 0 else OFFWHITE),
-                }
-                for n_clicks in n_clicks_list
-            ]
-
-        @callback(
             Output("lc", "children"),
             Output("alert", "children"),
             Input("currently-in-bounds2", "children"),
@@ -1442,7 +1445,7 @@ class GeoExplorer:
                 if n_clicks:
                     checked = n_clicks % 2 == 0
                 else:
-                    checked: bool = len(df) < 35_000  #  and not n_clicks
+                    checked: bool = len(df) < 35_000
                     if not checked:
                         self.selected_data[path] = 1
                 if not checked and not n_clicks:
@@ -1451,7 +1454,7 @@ class GeoExplorer:
                             html.Div(
                                 [
                                     html.Span(
-                                        f"Layer '{Path(path).name}' was set as unchecked because it has too many ({len(df)}) rows in the current map bounds."
+                                        f"Layer '{Path(path).name}' has been unchecked because it has too many ({len(df)}) rows in the current map bounds."
                                     ),
                                     html.Br(),
                                     html.Span(
@@ -1468,6 +1471,8 @@ class GeoExplorer:
                             dismissable=True,
                         )
                     )
+                if not checked:
+                    continue
 
                 if column is not None and column in df and not is_numeric:
                     df["_color"] = df[column].map(color_dict)
@@ -1483,11 +1488,11 @@ class GeoExplorer:
                         ],
                         (notnas[column] >= bins[-1]) & (notnas[column].notna()),
                     ]
-                    assert len(conditions) == len(color_dict), (
-                        (conditions),
-                        (color_dict),
-                        (bins),
-                    )
+                    # assert len(conditions) == len(color_dict), (
+                    #     (conditions),
+                    #     (color_dict),
+                    #     (bins),
+                    # )
                     choices = np.arange(len(conditions)) if bins is not None else None
                     try:
                         notnas["_color"] = [
