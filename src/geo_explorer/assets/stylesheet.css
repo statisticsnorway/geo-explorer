@@ -20,3 +20,40 @@
 .load-button {
     font-size: 15px; /* Reset the font size for the buttons */
 }
+
+::-webkit-scrollbar {
+    width: 15px;
+}
+
+::-webkit-scrollbar-track {
+    border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+    background: rgb(71, 72, 73);
+    border-radius: 10px;
+}
+
+::-webkit-scrollbar-button {
+    display: none;
+}
+
+.scroll-container {
+    margin-right: 10px; 
+    overflow-y: scroll;
+    overflow-x: hide;
+    width: 10px;
+}
+
+.scroll-container::-webkit-scrollbar {
+    width: 10px;
+}
+
+.scroll-container::-webkit-scrollbar-track {
+    border-radius: 10px;
+    width: 10px;
+}
+
+.scroll-container::-webkit-scrollbar-thumb {
+    border-radius: 5px;
+}
