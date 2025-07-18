@@ -399,7 +399,6 @@ class GeoExplorer:
                                                         placeholder="Select column to color by",
                                                         style={
                                                             "font-size": 22,
-                                                            # "width": "90%",
                                                             "overflow": "visible",
                                                         },
                                                         maxHeight=600,
@@ -515,8 +514,6 @@ class GeoExplorer:
                                         "borderRadius": "3px",
                                         "padding": "0px",
                                         "backgroundColor": OFFWHITE,
-                                        # "gap": "10px",
-                                        # "width": "550px",
                                         "margin-bottom": "7px",
                                         "margin-top": "7px",
                                         "margin-left": "0px",
@@ -1835,22 +1832,3 @@ class GeoExplorer:
             ]
         )
         return f"{self.__class__.__name__}({txt})"
-
-
-def to_geojson(df, crs):
-    geometries = shapely.wkb.loads(df["geometry"])
-    coords, indices = shapely.get_coordinates(geometries, return_index=True)
-    df = df.drop(columns="geometry")
-    return {
-        "type": "FeatureCollection",
-        "bbox": tuple(shapely.union_all(geometries).bounds),
-        "features": [
-            {
-                "id": i,
-                "type": "Feature",
-                "properties": df.iloc[i].to_dict(),
-                "geometry": coords[indices == i],
-            }
-            for i in range(len(df))
-        ],
-    }
