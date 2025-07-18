@@ -1,6 +1,7 @@
 # %%
 import sys
 from pathlib import Path
+import os
 
 import sgis as sg
 
@@ -76,5 +77,7 @@ def not_test_geo_explorer_dapla():
 
 
 if __name__ == "__main__":
-
-    not_test_geo_explorer_locally()
+    if any("dapla" in key.lower() for key in os.environ):
+        not_test_geo_explorer_dapla()
+    else:
+        not_test_geo_explorer_locally()

@@ -272,6 +272,8 @@ class GeoExplorer:
         color_dict: dict | None = None,
         file_system=None,
         splitted: bool = False,
+        max_zoom: int = 40,
+        min_zoom: int = 4,
     ) -> None:
         """Initialiser."""
         self.start_dir = start_dir
@@ -327,6 +329,8 @@ class GeoExplorer:
                                 dl.Map(
                                     center=self.center,
                                     zoom=self.zoom,
+                                    maxZoom=max_zoom,
+                                    minZoom=min_zoom,
                                     children=self._map_children
                                     + [
                                         html.Div(id="lc"),
@@ -343,11 +347,7 @@ class GeoExplorer:
                                     [
                                         dbc.Col(
                                             html.Button(
-                                                "Split",
-                                                style={
-                                                    "fillColor": "white",
-                                                    "color": "black",
-                                                },
+                                                "Split rows",
                                                 id="splitter",
                                                 n_clicks=1 if self.splitted else 0,
                                             ),
@@ -356,14 +356,9 @@ class GeoExplorer:
                                             html.Div(
                                                 [
                                                     html.Button(
-                                                        "Export",
+                                                        "Export as code",
                                                         id="export",
-                                                        style={
-                                                            "color": "blue",
-                                                            # "border": "none",
-                                                            # "background": "none",
-                                                            # "cursor": "pointer",
-                                                        },
+                                                        style={"color": "blue"},
                                                     ),
                                                     dbc.Modal(
                                                         [
@@ -404,7 +399,7 @@ class GeoExplorer:
                                                         placeholder="Select column to color by",
                                                         style={
                                                             "font-size": 22,
-                                                            "width": "100%",
+                                                            # "width": "90%",
                                                             "overflow": "visible",
                                                         },
                                                         maxHeight=600,
@@ -412,7 +407,7 @@ class GeoExplorer:
                                                     ),
                                                 ],
                                             ),
-                                            width=10,
+                                            width=9,
                                         ),
                                         dbc.Col(
                                             html.Div(
@@ -420,7 +415,10 @@ class GeoExplorer:
                                             ),
                                             width=2,
                                         ),
-                                    ]
+                                    ],
+                                    style={
+                                        "margin-top": "7px",
+                                    },
                                 ),
                                 dbc.Row(
                                     [
@@ -434,12 +432,12 @@ class GeoExplorer:
                                                 value=5,
                                                 style={
                                                     "font-size": 22,
-                                                    "width": "100%",
                                                     "overflow": "visible",
                                                 },
                                                 maxHeight=300,
                                                 clearable=False,
-                                            )
+                                            ),
+                                            width=4,
                                         ),
                                         dbc.Col(
                                             html.Div(
@@ -468,9 +466,12 @@ class GeoExplorer:
                                                     maxHeight=200,
                                                     clearable=False,
                                                 ),
-                                            )
+                                            ),
+                                            width=5,
                                         ),
-                                    ]
+                                    ],
+                                    id="numeric-options",
+                                    style={"display": "none"},
                                 ),
                                 dbc.Row(
                                     [
@@ -503,7 +504,24 @@ class GeoExplorer:
                                     ]
                                 ),
                                 dbc.Row(
-                                    html.Div(id="remove-buttons"),
+                                    [
+                                        html.Div(html.B("Layers")),
+                                        html.Div(id="remove-buttons"),
+                                    ],
+                                    style={
+                                        "display": "flex",
+                                        "flexDirection": "column",
+                                        "border": "1px solid #ccc",
+                                        "borderRadius": "3px",
+                                        "padding": "0px",
+                                        "backgroundColor": OFFWHITE,
+                                        # "gap": "10px",
+                                        # "width": "550px",
+                                        "margin-bottom": "7px",
+                                        "margin-top": "7px",
+                                        "margin-left": "0px",
+                                        "margin-right": "0px",
+                                    },
                                 ),
                                 dbc.Row(id="colorpicker-container"),
                             ],
@@ -511,6 +529,7 @@ class GeoExplorer:
                                 "height": "90vh",
                                 "overflow": "scroll",
                             },
+                            className="scroll-container",
                         ),
                     ],
                 ),
@@ -576,6 +595,7 @@ class GeoExplorer:
                                             "height": "70vh",
                                             "overflow": "scroll",
                                         },
+                                        className="scroll-container",
                                     ),
                                 ]
                             ),
@@ -878,6 +898,7 @@ class GeoExplorer:
 
         @callback(
             Output("splitter", "n_clicks"),
+            Output("splitter", "style"),
             Output("is_splitted", "data"),
             Output("column-dropdown", "value"),
             Input("splitter", "n_clicks"),
@@ -889,13 +910,23 @@ class GeoExplorer:
                 triggered == "column-dropdown" and column is None
             )
             if is_splitted:
+                style = {
+                    "color": "#e4e4e4",
+                    "background": "black",
+                }
+            else:
+                style = {
+                    "background": "#e4e4e4",
+                    "color": "black",
+                }
+            if is_splitted:
                 column = "split_index"
             elif column == "split_index":
                 column = None
             else:
                 column = dash.no_update
             n_clicks = 1 if is_splitted else 0
-            return n_clicks, is_splitted, column
+            return n_clicks, style, is_splitted, column
 
         @callback(
             Output("new-file-added", "children"),
@@ -972,6 +1003,8 @@ class GeoExplorer:
             prevent_initial_call=True,
         )
         def update_column_dropdown_options(currently_in_bounds):
+            if not currently_in_bounds:
+                return dash.no_update
             return self._get_column_dropdown_options(currently_in_bounds)
 
         @callback(
@@ -1142,6 +1175,16 @@ class GeoExplorer:
             ]
 
         @callback(
+            Output("numeric-options", "style"),
+            Input("is-numeric", "children"),
+        )
+        def get_column_value_color_dict(is_numeric):
+            if is_numeric:
+                return {"margin-bottom": "7px"}
+            else:
+                return {"display": "none"}
+
+        @callback(
             Output("colorpicker-container", "children"),
             Output("bins", "children"),
             Output("is-numeric", "children"),
@@ -1230,7 +1273,7 @@ class GeoExplorer:
                     get_colorpicker_container(color_dict),
                     None,
                     False,
-                    dash.no_update,
+                    None,
                     currently_in_bounds,
                 )
 
@@ -1792,3 +1835,22 @@ class GeoExplorer:
             ]
         )
         return f"{self.__class__.__name__}({txt})"
+
+
+def to_geojson(df, crs):
+    geometries = shapely.wkb.loads(df["geometry"])
+    coords, indices = shapely.get_coordinates(geometries, return_index=True)
+    df = df.drop(columns="geometry")
+    return {
+        "type": "FeatureCollection",
+        "bbox": tuple(shapely.union_all(geometries).bounds),
+        "features": [
+            {
+                "id": i,
+                "type": "Feature",
+                "properties": df.iloc[i].to_dict(),
+                "geometry": coords[indices == i],
+            }
+            for i in range(len(df))
+        ],
+    }
