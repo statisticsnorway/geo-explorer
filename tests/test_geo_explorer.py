@@ -61,6 +61,20 @@ def not_test_geo_explorer_locally():
 
 
 def not_test_geo_explorer_dapla():
+
+    explorer = GeoExplorer(
+        start_dir="/buckets/delt-kart/analyse_data/klargjorte-data/2025",
+        data=[
+            # "/buckets/delt-kart/analyse_data/klargjorte-data/2025/FKB_arealressurs_flate_p2025_v1.parquet",
+        ],
+        # column="arealtype",
+        zoom=13,
+        center=(59.91740845, 10.71394444),
+        file_system=LocalFileSystem(),
+        port=8055,
+    )
+    explorer.run(debug=True)
+
     explorer = GeoExplorer(
         start_dir="/buckets",
         data=[
