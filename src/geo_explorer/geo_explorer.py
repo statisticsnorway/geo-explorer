@@ -901,6 +901,12 @@ class GeoExplorer:
                     style={"width": "90vh"},
                 ),
                 dcc.Store(id="is_splitted", data=False),
+                dcc.Input(
+                    id="debounced_bounds",
+                    value=None,
+                    style={"display": "none"},
+                    debounce=1,
+                ),
                 html.Div(id="currently-in-bounds", style={"display": "none"}),
                 html.Div(id="currently-in-bounds2", style={"display": "none"}),
                 html.Div(id="max_rows_was_changed", style={"display": "none"}),
@@ -1004,7 +1010,7 @@ class GeoExplorer:
             Input("export", "n_clicks"),
             Input("file-removed", "children"),
             # Input("close-export", "n_clicks"),
-            State("map", "bounds"),
+            State("debounced_bounds", "value"),
             State("map", "zoom"),
             State({"type": "colorpicker", "column_value": dash.ALL}, "value"),
             State({"type": "colorpicker", "column_value": dash.ALL}, "id"),
@@ -1281,8 +1287,20 @@ class GeoExplorer:
             return 1, {"display": "none"}
 
         @callback(
-            Output("currently-in-bounds", "children"),
+            Output("debounced_bounds", "value"),
             Input("map", "bounds"),
+        )
+        def update_bounds(bounds):
+            print("update_bounds", bounds)
+            time.sleep(0.5)
+            return json.dumps(bounds)
+            if bounds:
+                return bounds
+            return dash.no_update
+
+        @callback(
+            Output("currently-in-bounds", "children"),
+            Input("debounced_bounds", "value"),
             Input("new-file-added", "children"),
             Input("file-removed", "children"),
             # prevent_initial_call=True,
@@ -1511,7 +1529,7 @@ class GeoExplorer:
             Input("force-categorical", "n_clicks"),
             Input("currently-in-bounds", "children"),
             Input("file-removed", "children"),
-            State("map", "bounds"),
+            State("debounced_bounds", "value"),
             State({"type": "colorpicker", "column_value": dash.ALL}, "value"),
             State({"type": "colorpicker", "column_value": dash.ALL}, "id"),
             State("bins", "children"),
@@ -1749,7 +1767,7 @@ class GeoExplorer:
             Input("new-file-added2", "children"),
             Input({"type": "checked-btn", "index": dash.ALL}, "style"),
             Input("max_rows_was_changed", "children"),
-            State("map", "bounds"),
+            State("debounced_bounds", "value"),
             State("map", "zoom"),
             State("column-dropdown", "value"),
             State("bins", "children"),
