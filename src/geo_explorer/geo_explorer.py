@@ -248,6 +248,7 @@ def _add_data_one_path(
     print([len(x) for x in loaded_data.values()])
     ns = Namespace("onEachFeatureToggleHighlight", "default")
     data = []
+    print(concatted_data["__file_path"])
     df = concatted_data.filter(pl.col("__file_path").str.contains(path))
     if not len(df):
         return [None], None, False
@@ -1328,20 +1329,24 @@ class GeoExplorer:
             Output("column-dropdown", "value"),
             Input("splitter", "n_clicks"),
             Input("column-dropdown", "value"),
-            Input("remove-buttons", "children"),
+            # Input("remove-buttons", "children"),
         )
-        def is_splitted(n_clicks: int, column, remove_buttons):
+        def is_splitted(n_clicks: int, column):
             triggered = dash.callback_context.triggered_id
-            if len(remove_buttons) == 1 and triggered == "remove-buttons":
-                return (
-                    0,
-                    {
-                        "background": "#e4e4e4",
-                        "color": "black",
-                    },
-                    False,
-                    None,
-                )
+            # if (
+            #     remove_buttons is not None
+            #     and len(remove_buttons) == 1
+            #     and triggered == "remove-buttons"
+            # ):
+            #     return (
+            #         0,
+            #         {
+            #             "background": "#e4e4e4",
+            #             "color": "black",
+            #         },
+            #         False,
+            #         None,
+            #     )
             is_splitted: bool = n_clicks % 2 == 1 and not (
                 triggered == "column-dropdown" and column is None
             )
@@ -1647,7 +1652,7 @@ class GeoExplorer:
             Input("new-data-read", "children"),
             State("debounced_bounds", "value"),
             prevent_initial_call=True,
-            background=False,
+            background=True,
         )
         def concat_data(new_data_read, bounds):
             print("concat_data")
@@ -1896,7 +1901,7 @@ class GeoExplorer:
             State({"type": "colorpicker", "column_value": dash.ALL}, "id"),
             State("max_rows", "children"),
             # prevent_initial_call=True,
-            background=False,
+            background=True,
         )
         def add_data(
             currently_in_bounds,
@@ -2026,7 +2031,7 @@ class GeoExplorer:
         #     State("debounced_bounds", "value"),
         #     State("map", "zoom"),
         #     prevent_initial_call=True,
-        #     background=False,
+        #     background=True,
         # )
         def read_and_concat_neighbor_data(_, bounds, zoom):
             print("read_and_concat_neighbor_data", bounds, zoom)
