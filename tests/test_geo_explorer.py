@@ -34,24 +34,24 @@ def not_test_geo_explorer_locally():
 
     explorer = GeoExplorer(
         start_dir="C:/users/ort/OneDrive - Statistisk sentralbyrå/data",
-        data=[
-            "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/N5000_fylke_flate_2023.parquet",
-            "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/N5000_fylke_flate_2024.parquet",
-            {
-                "df1": sg.to_gdf((10.8, 59.9), 4326).assign(num_col=100),
-                "df2": sg.to_gdf((10.8, 59.9), 4326)
-                .to_crs(3035)
-                .pipe(sg.buff, 1000)
-                .assign(num_col=1000),
-                "df3": sg.to_gdf((10.8, 59.9), 4326)
-                .to_crs(3035)
-                .pipe(sg.buff, 1000)
-                .pipe(sg.to_lines)
-                .assign(num_col=10000),
-            },
-        ],
-        selected_features=["0_0", "0_2", "1_0"],
-        column="FYLKE",
+        # data=[
+        #     "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/N5000_fylke_flate_2023.parquet",
+        #     "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/N5000_fylke_flate_2024.parquet",
+        #     {
+        #         "df1": sg.to_gdf((10.8, 59.9), 4326).assign(num_col=100),
+        #         "df2": sg.to_gdf((10.8, 59.9), 4326)
+        #         .to_crs(3035)
+        #         .pipe(sg.buff, 1000)
+        #         .assign(num_col=1000),
+        #         "df3": sg.to_gdf((10.8, 59.9), 4326)
+        #         .to_crs(3035)
+        #         .pipe(sg.buff, 1000)
+        #         .pipe(sg.to_lines)
+        #         .assign(num_col=10000),
+        #     },
+        # ],
+        # selected_features=["0_0", "0_2", "1_0"],
+        # column="FYLKE",
         zoom=13,
         center=(59.91740845, 10.71394444),
         file_system=LocalFileSystem(),
