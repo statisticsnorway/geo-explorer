@@ -230,7 +230,6 @@ def _get_df(path, bounds, loaded_data, concatted_data):
 
 def _add_data_one_path(
     path,
-    n_clicks,
     loaded_data,
     bounds,
     column,
@@ -251,7 +250,7 @@ def _add_data_one_path(
     data = []
     df = concatted_data.filter(pl.col("__file_path").str.contains(path))
     if not len(df):
-        return [None], None, False, n_clicks
+        return [None], None, False
 
     # if path in loaded_data:
     #     df = loaded_data[path]
@@ -262,45 +261,8 @@ def _add_data_one_path(
     #     df = pd.concat(matches)
 
     print("hei")
-    print(df)
     df = filter_by_bounds(df, bounds)
     print("hei igjen", len(df))
-
-    out_n_clicks = n_clicks
-    if n_clicks:
-        checked = n_clicks % 2 == 0
-    else:
-        checked: bool = len(df) < max_rows
-        if not checked:
-            out_n_clicks = 1
-
-    print("TODO: TEMP setter checked to True for testing purposes")
-    checked = True
-    if not checked and not n_clicks:
-        out_alert = dbc.Alert(
-            html.Div(
-                [
-                    html.Span(
-                        f"Layer '{Path(path).name}' has been unchecked because it has too many ({len(df)}) rows in the current map bounds."
-                    ),
-                    html.Br(),
-                    html.Span(
-                        "You can view the data by checking the checkbox in the top right of the map. "
-                    ),
-                    html.Br(),
-                    html.Span(
-                        "But preferably zoom in first to avoid crashing the page."
-                    ),
-                    html.Br(),
-                ]
-            ),
-            color="warning",
-            dismissable=True,
-        )
-    else:
-        out_alert = None
-    if not checked:
-        return [None], out_alert, False, out_n_clicks
 
     rows_are_hidden = len(df) > max_rows
     # if rows_are_hidden:
@@ -315,6 +277,8 @@ def _add_data_one_path(
     df["geometry"] = df["_unique_id"].map(geometries)
     df = GeoDataFrame(df, crs=4326)
     df = _simplify_geometries(df, zoom, max_rows)
+
+    out_alert = None
 
     if column is not None and column in df and not is_numeric:
         df["_color"] = df[column].map(color_dict)
@@ -341,11 +305,11 @@ def _add_data_one_path(
             dl.Overlay(
                 dl.GeoJSON(id={"type": "geojson", "filename": path}),
                 name=_get_name(path),
-                checked=checked,
+                checked=True,
                 id={"type": "geojson-overlay", "filename": path},
             )
         )
-        return data, out_alert, False, out_n_clicks
+        return data, out_alert, False
     if column is not None and column not in df:
         data.append(
             dl.Overlay(
@@ -365,7 +329,7 @@ def _add_data_one_path(
                     id={"type": "geojson", "filename": path},
                 ),
                 name=_get_name(path),
-                checked=checked,
+                checked=True,
                 id={"type": "geojson-overlay", "filename": path},
             )
         )
@@ -421,7 +385,7 @@ def _add_data_one_path(
                     ]
                 ),
                 name=_get_name(path),
-                checked=checked,
+                checked=True,
                 id={"type": "geojson-overlay", "filename": path},
             )
         )
@@ -446,11 +410,18 @@ def _add_data_one_path(
                     id={"type": "geojson", "filename": path},
                 ),
                 name=_get_name(path),
-                checked=checked,
+                checked=True,
                 id={"type": "geojson-overlay", "filename": path},
             )
         )
-    return data, out_alert, rows_are_hidden, out_n_clicks
+    return data, out_alert, rows_are_hidden
+
+
+def polars_isna(df):
+    try:
+        return df.is_nan()
+    except pl.exceptions.InvalidOperationError:
+        return df.is_null()
 
 
 def filter_by_bounds(df: pl.DataFrame, bounds: tuple[float]) -> pl.DataFrame:
@@ -490,13 +461,15 @@ def filter_by_bounds(df: pl.DataFrame, bounds: tuple[float]) -> pl.DataFrame:
 
 def _read_and_to_4326(path: str, file_system) -> GeoDataFrame:
     df = sg.read_geopandas(path, file_system=file_system).to_crs(4326)
-    df[["minx", "miny", "maxx", "maxy"]] = df.geometry.bounds.astype("float16[pyarrow]")
+    bounds = df.geometry.bounds.astype("float16[pyarrow]")
+    df[bounds.columns] = bounds
     return df
 
 
 def _get_unique_id(df, i):
     """Float column of 0.0, 0.01, ..., 3.1211 etc."""
-    return pd.Series(range(len(df)), index=df.index) / 100 + i
+    divider = 10 ** len(str(len(df)))
+    return (pd.Series(range(len(df)), index=df.index) / divider) + i
 
 
 def _read_files(explorer, paths: list[str]) -> None:
@@ -505,7 +478,6 @@ def _read_files(explorer, paths: list[str]) -> None:
     with executor_obj(len(paths)) as executor:
         more_data = list(executor.map(read_func, paths))
     for path, df in zip(paths, more_data, strict=True):
-        # df.loc[:, "_file_bounds"] = explorer.bounds_series[path].bounds
         for col in df.columns:
             if is_datetime64_any_dtype(df[col]):
                 try:
@@ -1063,7 +1035,6 @@ class GeoExplorer:
                     debounce=1,
                 ),
                 html.Div(id="currently-in-bounds", style={"display": "none"}),
-                html.Div(id="currently-in-bounds2", style={"display": "none"}),
                 html.Div(id="data-was-concated", style={"display": "none"}),
                 html.Div(id="data-was-changed", style={"display": "none"}),
                 html.Div(id="new-data-read", style={"display": "none"}),
@@ -1293,20 +1264,6 @@ class GeoExplorer:
             return [
                 html.Div(
                     [
-                        html.Button(
-                            "✓",
-                            id={
-                                "type": "checked-btn",
-                                "index": path,
-                            },
-                            n_clicks=n_clicks,
-                            style={
-                                "color": "rgba(0, 0, 0, 0)",
-                                "background": (
-                                    "#5ca3ff" if n_clicks % 2 == 0 else OFFWHITE
-                                ),
-                            },
-                        ),
                         html.Span(path),
                         html.Button(
                             "❌",
@@ -1371,9 +1328,20 @@ class GeoExplorer:
             Output("column-dropdown", "value"),
             Input("splitter", "n_clicks"),
             Input("column-dropdown", "value"),
+            Input("remove-buttons", "children"),
         )
-        def is_splitted(n_clicks: int, column):
+        def is_splitted(n_clicks: int, column, remove_buttons):
             triggered = dash.callback_context.triggered_id
+            if len(remove_buttons) == 1 and triggered == "remove-buttons":
+                return (
+                    0,
+                    {
+                        "background": "#e4e4e4",
+                        "color": "black",
+                    },
+                    False,
+                    None,
+                )
             is_splitted: bool = n_clicks % 2 == 1 and not (
                 triggered == "column-dropdown" and column is None
             )
@@ -1457,7 +1425,6 @@ class GeoExplorer:
             return dash.no_update
 
         @callback(
-            # Output("currently-in-bounds", "children"),
             Output("new-data-read", "children"),
             Input("debounced_bounds", "value"),
             Input("new-file-added", "children"),
@@ -1665,23 +1632,6 @@ class GeoExplorer:
             return 1
 
         @callback(
-            Output({"type": "checked-btn", "index": dash.ALL}, "style"),
-            Input({"type": "checked-btn", "index": dash.ALL}, "n_clicks"),
-            Input({"type": "checked-btn", "index": dash.ALL}, "id"),
-        )
-        def update_clicks(n_clicks_list, ids):
-            for n_clicks, id_ in zip(n_clicks_list, ids, strict=True):
-                path = id_["index"]
-                self.selected_files[path] = n_clicks
-            return [
-                {
-                    "color": ("rgba(0, 0, 0, 0)"),
-                    "background": ("#5ca3ff" if n_clicks % 2 == 0 else OFFWHITE),
-                }
-                for n_clicks in n_clicks_list
-            ]
-
-        @callback(
             Output("numeric-options", "style"),
             Input("is-numeric", "children"),
         )
@@ -1695,50 +1645,11 @@ class GeoExplorer:
             Output("data-was-concated", "children"),
             Output("data-was-changed", "children"),
             Input("new-data-read", "children"),
-            # Input("column-dropdown", "value"),
-            # Input("cmap-placeholder", "value"),
-            # Input("k", "value"),
-            # Input("force-categorical", "n_clicks"),
-            # Input("currently-in-bounds", "children"),
-            # Input("file-removed", "children"),
-            # Input("currently-in-bounds2", "children"),
-            # Input({"type": "colorpicker", "column_value": dash.ALL}, "value"),
-            # Input("is-numeric", "children"),
-            # Input("file-removed", "children"),
-            # Input("clear-table", "n_clicks"),
-            # Input("wms-items", "children"),
-            # Input("wms-checklist", "value"),
-            # Input("new-file-added2", "children"),
-            # Input({"type": "checked-btn", "index": dash.ALL}, "style"),
-            # Input("max_rows_was_changed", "children"),
             State("debounced_bounds", "value"),
-            # State("map", "zoom"),
-            # State("column-dropdown", "value"),
-            # State("bins", "children"),
-            # State({"type": "colorpicker", "column_value": dash.ALL}, "id"),
-            # State("max_rows", "children"),
             prevent_initial_call=True,
             background=False,
         )
-        def concat_data(
-            new_data_read,
-            # currently_in_bounds,
-            # colorpicker_values_list,
-            # is_numeric,
-            # file_removed,
-            # clear_table,
-            # wms,
-            # wms_checked,
-            # new_file_added2,
-            # checked_buttons,
-            # max_rows_was_changed,
-            bounds,
-            # zoom,
-            # column,
-            # bins,
-            # colorpicker_ids,
-            # max_rows_component,
-        ):
+        def concat_data(new_data_read, bounds):
             print("concat_data")
             t = perf_counter()
             if not new_data_read:
@@ -1756,7 +1667,7 @@ class GeoExplorer:
             Output("bins", "children"),
             Output("is-numeric", "children"),
             Output("force-categorical", "children"),
-            Output("currently-in-bounds2", "children"),
+            Output("currently-in-bounds", "children"),
             Input("column-dropdown", "value"),
             Input("cmap-placeholder", "value"),
             Input("k", "value"),
@@ -1781,7 +1692,7 @@ class GeoExplorer:
             bins,
             is_splitted,
         ):
-            print("get_column_value_color_dict")
+            print("\nget_column_value_color_dict")
             bounds = json.loads(bounds)
             triggered = dash.callback_context.triggered_id
             if not is_splitted and self.splitted:
@@ -1791,7 +1702,7 @@ class GeoExplorer:
             column_values = [x["column_value"] for x in colorpicker_ids]
             default_colors = list(sg.maps.map._CATEGORICAL_CMAP.values())
 
-            if column is None or not column in self.concatted_data:
+            if column is None or column not in self.concatted_data:
                 color_dict = dict(
                     zip(column_values, colorpicker_values_list, strict=True)
                 )
@@ -1842,13 +1753,15 @@ class GeoExplorer:
                 )
 
             bounds = self._nested_bounds_to_bounds(bounds)
-            print("get_column_value_color_dict11111")
 
-            values = filter_by_bounds(
-                self.concatted_data[[column, "minx", "miny", "maxx", "maxy"]], bounds
-            )[column].drop_nans()
-
-            print("get_column_value_color_dict22222")
+            values = (
+                filter_by_bounds(
+                    self.concatted_data[[column, "minx", "miny", "maxx", "maxy"]],
+                    bounds,
+                )[column]
+                .drop_nans()
+                .drop_nulls()
+            )
 
             if not pd.api.types.is_numeric_dtype(values):
                 force_categorical_button = None
@@ -1938,7 +1851,7 @@ class GeoExplorer:
             if color_dict.get(self.nan_label, self.nan_color) != self.nan_color:
                 self.nan_color = color_dict[self.nan_label]
 
-            elif self.nan_label not in color_dict and (values.is_nan().any()):
+            elif self.nan_label not in color_dict and polars_isna(values).any():
                 color_dict[self.nan_label] = self.nan_color
 
             if self.color_dict:
@@ -1966,7 +1879,7 @@ class GeoExplorer:
             Output("lc", "children"),
             Output("alert", "children"),
             Output("max_rows", "children"),
-            Input("currently-in-bounds2", "children"),
+            Input("currently-in-bounds", "children"),
             Input({"type": "colorpicker", "column_value": dash.ALL}, "value"),
             Input("is-numeric", "children"),
             Input("file-removed", "children"),
@@ -1974,7 +1887,6 @@ class GeoExplorer:
             Input("wms-items", "children"),
             Input("wms-checklist", "value"),
             Input("new-file-added2", "children"),
-            Input({"type": "checked-btn", "index": dash.ALL}, "style"),
             Input("max_rows_was_changed", "children"),
             Input("data-was-changed", "children"),
             State("debounced_bounds", "value"),
@@ -1995,7 +1907,6 @@ class GeoExplorer:
             wms,
             wms_checked,
             new_file_added2,
-            checked_buttons,
             max_rows_was_changed,
             data_was_changed,
             bounds,
@@ -2088,10 +1999,7 @@ class GeoExplorer:
             #             list(self.selected_files.values()),
             #         )
             #     )
-            results = [
-                add_data_func(path, n_clicks)
-                for path, n_clicks in self.selected_files.items()
-            ]
+            results = [add_data_func(path) for path in self.selected_files]
             print("add_data2222", perf_counter() - t)
 
             data = list(itertools.chain.from_iterable([x[0] for x in results if x[0]]))
@@ -2100,10 +2008,6 @@ class GeoExplorer:
             # )
             out_alert = [x[1] for x in results if x[1]]
             rows_are_not_hidden = not any(x[2] for x in results)
-            out_n_clicks = [x[3] for x in results]
-            for n_clicks, path in zip(out_n_clicks, self.selected_files, strict=True):
-                if n_clicks is not None:
-                    self.selected_files[path] = n_clicks
 
             print("add_data ferdig etter", perf_counter() - t)
             if rows_are_not_hidden:
@@ -2204,9 +2108,8 @@ class GeoExplorer:
             Output("feature-table-container", "children"),
             Input("clicked-features", "data"),
             State("column-dropdown", "options"),
-            State("currently-in-bounds", "children"),
         )
-        def update_table(data, column_dropdown, currently_in_bounds):
+        def update_table(data, column_dropdown):
             if not data:
                 return "No features clicked."
             if column_dropdown is None:
@@ -2259,7 +2162,7 @@ class GeoExplorer:
         columns = set(
             itertools.chain.from_iterable(
                 set(self.loaded_data[path].columns).difference(
-                    {"__file_path", "_unique_id"}
+                    {"__file_path", "_unique_id", "minx", "miny", "maxx", "maxy"}
                 )
                 for path in currently_in_bounds
             )
