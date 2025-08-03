@@ -1095,9 +1095,9 @@ class GeoExplorer:
                                                     placeholder="Search for files by substring (use '|' as OR and ',' as AND)...",
                                                     id="search-bar",
                                                     debounce=0.5,
+                                                    style={"width": "50vh"},
                                                 ),
                                                 # width=8,
-                                                style={"width": "30vh"},
                                             ),
                                             dbc.Col(
                                                 html.Button(
@@ -1530,6 +1530,8 @@ class GeoExplorer:
             # Input("remove-buttons", "children"),
         )
         def is_splitted(n_clicks: int, column):
+            if self.concatted_data is None:
+                return dash.no_update, dash.no_update, dash.no_update, dash.no_update
             triggered = dash.callback_context.triggered_id
             # if (
             #     remove_buttons is not None
@@ -1898,7 +1900,9 @@ class GeoExplorer:
             column_values = [x["column_value"] for x in colorpicker_ids]
             default_colors = list(sg.maps.map._CATEGORICAL_CMAP.values())
 
-            if column is None or column not in self.concatted_data:
+            if column is None or (
+                self.concatted_data and column not in self.concatted_data
+            ):
                 color_dict = dict(
                     zip(column_values, colorpicker_values_list, strict=True)
                 )
