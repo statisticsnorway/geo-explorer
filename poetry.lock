@@ -4962,13 +4962,13 @@ test = ["pytest"]
 
 [[package]]
 name = "ssb-sgis"
-version = "1.2.10"
+version = "1.2.11"
 description = "GIS functions used at Statistics Norway."
 optional = false
 python-versions = "<4,>=3.10"
 files = [
-    {file = "ssb_sgis-1.2.10-py3-none-any.whl", hash = "sha256:1998849947ca9977a29b0f1694f80174b3909f9b3474878b9d51e3e632049d11"},
-    {file = "ssb_sgis-1.2.10.tar.gz", hash = "sha256:af6465d212eb463a24e954e2479b49c95dc50e6bf6b0f5ed6f76f3672c6588ad"},
+    {file = "ssb_sgis-1.2.11-py3-none-any.whl", hash = "sha256:221c1e4dd3e42e053386c5bf3c48f75f32fd138fffbabf07445ee55845ece1b9"},
+    {file = "ssb_sgis-1.2.11.tar.gz", hash = "sha256:0dce12caa729e838651e060feecdbb37a3a0bebe2f5397e93a73fba5f11d74bc"},
 ]
 
 [package.dependencies]
@@ -5640,4 +5640,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.11,<4"
-content-hash = "43844a84942e4a5f6cf0071adf92d634f82540e2d3aa3c5a54b85264cf55c0d0"
+content-hash = "c1337e0ea0a4ff1acace2e4373341097793e0bc0c494d75406387b5f3bb20c72"
