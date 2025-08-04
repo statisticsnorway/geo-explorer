@@ -1103,8 +1103,8 @@ class GeoExplorer:
                     debounce=1,
                 ),
                 html.Div(id="currently-in-bounds", style={"display": "none"}),
+                html.Div(id="skip_to_add_data", style={"display": "none"}),
                 html.Div(id="missing", style={"display": "none"}),
-                html.Div(id="missing2", style={"display": "none"}),
                 html.Div(id="currently-in-bounds2", style={"display": "none"}),
                 html.Div(id="new-file-added2", style={"display": "none"}),
                 html.Div(id="data-was-concatted", style={"display": "none"}),
@@ -1116,12 +1116,11 @@ class GeoExplorer:
                 html.Div(id="dummy-output", style={"display": "none"}),
                 html.Div(id="bins", style={"display": "none"}),
                 html.Div(False, id="is-numeric", style={"display": "none"}),
-                dcc.Store(id="bounds_per_feature", data={}),
                 dcc.Store(id="clicked-features", data=clicked_features),
                 dcc.Store(id="clicked-ids", data=self.selected_features),
                 dcc.Store(id="current-path", data=self.start_dir),
                 dcc.Interval(
-                    id="interval-component", interval=1000, n_intervals=0, disabled=True
+                    id="interval-component", interval=3000, n_intervals=0, disabled=True
                 ),
             ],
             fluid=True,
@@ -1557,24 +1556,46 @@ class GeoExplorer:
                 return bounds
             return dash.no_update
 
+        [
+            np.int16(-2730),
+            np.int16(29300),
+            np.int16(-8041),
+            np.int16(-9894),
+            np.int16(-16709),
+        ]
+        ["20190611", "20190711", "20190713", "20190805", "20190827"]
+        [
+            np.int16(22917),
+            np.int16(0),
+            np.int16(15258),
+            np.int16(18354),
+            np.int16(18358),
+            np.int16(21291),
+        ]
+        [
+            np.int16(-1927),
+            np.int16(0),
+            np.int16(27408),
+            np.int16(1496),
+            np.int16(7736),
+            np.int16(-15928),
+        ]
+
         @callback(
             Output("new-data-read", "children"),
-            Output("currently-in-bounds", "children"),
+            Output("skip_to_add_data", "children"),
             Output("missing", "children"),
             Output("interval-component", "disabled"),
             Input("debounced_bounds", "value"),
             Input("new-file-added", "children"),
             Input("file-removed", "children"),
             Input("interval-component", "n_intervals"),
-            Input("missing2", "children"),
-            State("bounds_per_feature", "data"),
+            Input("missing", "children"),
             # State("missing", "children"),
             # prevent_initial_call=True,
             background=False,
         )
-        def get_files_in_bounds(
-            bounds, file_added, file_removed, n_intervals, missing, bounds_per_feature
-        ):
+        def get_files_in_bounds(bounds, file_added, file_removed, n_intervals, missing):
             t = perf_counter()
             triggered = dash.callback_context.triggered_id
             print("get_files_in_bounds", triggered, len(missing or []))
@@ -1583,7 +1604,7 @@ class GeoExplorer:
                 bounds = json.loads(bounds)
                 box = shapely.box(*self._nested_bounds_to_bounds(bounds))
                 files_in_bounds = sg.sfilter(self.bounds_series, box)
-                currently_in_bounds = list(set(files_in_bounds.index))
+                self.currently_in_bounds = list(set(files_in_bounds.index))
                 missing = list(
                     {
                         path
@@ -1592,31 +1613,21 @@ class GeoExplorer:
                     }
                 )
             if missing:
-                if len(missing) > 10:
-                    _read_files(self, missing[:10])
-                    missing = missing[10:]
+                if len(missing) > 20:
+                    _read_files(self, missing[:20])
+                    missing = missing[20:]
                     disabled = False
+                    new_data_read = dash.no_update if not len(missing) else True
                 else:
                     _read_files(self, missing)
                     missing = []
                     disabled = True
-                new_data_read = True
+                    new_data_read = True
+                skip_to_add_data = dash.no_update
             else:
-                new_data_read = False
+                new_data_read = dash.no_update
                 disabled = True
-
-            # for path in missing:
-            #     df = self.loaded_data[path]
-            # bounds_per_feature |= {
-            #     id_: (minx, miny, maxx, maxy)
-            #     for id_, minx, miny, maxx, maxy in zip(
-            #         df["_unique_id"],
-            #         df["minx"],
-            #         df["miny"],
-            #         df["maxx"],
-            #         df["maxy"]
-            #     )
-            # }'
+                skip_to_add_data: bool = triggered != "missing"
 
             print(
                 "get_files_in_bounds ferdig etter",
@@ -1626,29 +1637,17 @@ class GeoExplorer:
                 len(self.loaded_data),
             )
 
-            # if len(missing):
-            #     return dash.no_update, dash.no_update, missing
-            return new_data_read, currently_in_bounds, missing, disabled
-
-        @callback(
-            Output("missing2", "children"),
-            Input("missing2", "children"),
-            prevent_initial_call=True,
-        )
-        def circle(missing):
-            print("\n\ncircle\n")
-            return missing
+            return new_data_read, skip_to_add_data, missing, disabled
 
         @callback(
             Output("column-dropdown", "options"),
             Input("currently-in-bounds2", "children"),
-            State("currently-in-bounds", "children"),
             prevent_initial_call=True,
         )
-        def update_column_dropdown_options(_, currently_in_bounds):
-            if not currently_in_bounds:
+        def update_column_dropdown_options(_):
+            if not self.currently_in_bounds:
                 return dash.no_update
-            return self._get_column_dropdown_options(currently_in_bounds)
+            return self._get_column_dropdown_options(self.currently_in_bounds)
 
         @callback(
             Output("hide-wms-div", "style"),
@@ -2066,7 +2065,7 @@ class GeoExplorer:
             Input("max_rows_was_changed", "children"),
             Input("data-was-changed", "children"),
             Input("order-was-changed", "data"),
-            State("currently-in-bounds", "children"),
+            Input("skip_to_add_data", "children"),
             State("debounced_bounds", "value"),
             State("map", "zoom"),
             State("column-dropdown", "value"),
@@ -2089,7 +2088,7 @@ class GeoExplorer:
             max_rows_was_changed,
             data_was_changed,
             order_was_changed,
-            currently_in_bounds,
+            skip_to_add_data,
             bounds,
             zoom,
             column,
@@ -2137,7 +2136,7 @@ class GeoExplorer:
                 _add_data_one_path,
                 loaded_data=self.loaded_data,
                 max_rows=self.max_rows,
-                currently_in_bounds=currently_in_bounds,
+                currently_in_bounds=self.currently_in_bounds,
                 concatted_data=self.concatted_data,
                 nan_color=self.nan_color,
                 bounds=bounds,
@@ -2193,7 +2192,7 @@ class GeoExplorer:
                 "add_data ferdig etter",
                 perf_counter() - t,
                 len(self.loaded_data),
-                len(self.concatted_data),
+                len(self.concatted_data if self.concatted_data is not None else []),
             )
             if rows_are_not_hidden:
                 max_rows_component = None
@@ -2230,10 +2229,6 @@ class GeoExplorer:
         #         else:
         #             _read_files(self, missing)
         #             missing = []
-        #     # for path in missing:
-        #     # bounds_per_feature |= dict(
-        #     #     self.loaded_data[path].set_index("_unique_id").bounds.apply(tuple)
-        #     # )
         #     # df = self.loaded_data[path]
         #     print(
         #         "read_and_concat_neighbor_data finished",
