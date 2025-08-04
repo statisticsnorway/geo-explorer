@@ -722,6 +722,7 @@ class GeoExplorer:
         self.bounds = None
         self.column = column
         self.color_dict = color_dict or {}
+        self.color_dict2 = {}
         self.wms = wms or {}
         self.file_system = file_system or LocalFileSystem()
         self.nan_color = nan_color
@@ -739,7 +740,6 @@ class GeoExplorer:
         self.concatted_data: pl.DataFrame | None = None
         self.tile_names: list[str] = []
         self.currently_in_bounds: list[str] = []
-        self.color_dict2 = {}
 
         if "REDIS_URL" in os.environ:
             # Use Redis & Celery if REDIS_URL set as an env variable
@@ -2035,9 +2035,13 @@ class GeoExplorer:
             print("\nget_column_value_color_dict", column, triggered)
             if column is None and triggered is None:
                 column = self.column
-                self.color_dict = self.color_dict2
             else:
                 self.column = column
+            if triggered is None:
+                self.color_dict = self.color_dict2
+
+            print(self.color_dict)
+            print(self.color_dict2)
 
             if not is_splitted and self.splitted:
                 colorpicker_ids, colorpicker_values_list = [], []
