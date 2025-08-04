@@ -254,7 +254,6 @@ def _add_data_one_path(
     data = []
     if concatted_data is None:
         return [None], None, False
-    print(concatted_data["__file_path"])
     df = concatted_data.filter(pl.col("__file_path").str.contains(path))
     if not len(df):
         return [None], None, False
@@ -652,6 +651,10 @@ def _list_dir(
 
 
 sg.NorgeIBilderWms.url = "https://wms.geonorge.no/skwms1/wms.nib-prosjekter"
+
+
+class EmptyColumnContainer:
+    columns = []
 
 
 class GeoExplorer:
@@ -1100,6 +1103,8 @@ class GeoExplorer:
                     debounce=1,
                 ),
                 html.Div(id="currently-in-bounds", style={"display": "none"}),
+                html.Div(id="missing", style={"display": "none"}),
+                html.Div(id="missing2", style={"display": "none"}),
                 html.Div(id="currently-in-bounds2", style={"display": "none"}),
                 html.Div(id="new-file-added2", style={"display": "none"}),
                 html.Div(id="data-was-concatted", style={"display": "none"}),
@@ -1115,6 +1120,9 @@ class GeoExplorer:
                 dcc.Store(id="clicked-features", data=clicked_features),
                 dcc.Store(id="clicked-ids", data=self.selected_features),
                 dcc.Store(id="current-path", data=self.start_dir),
+                dcc.Interval(
+                    id="interval-component", interval=1000, n_intervals=0, disabled=True
+                ),
             ],
             fluid=True,
         )
@@ -1369,6 +1377,7 @@ class GeoExplorer:
                                             "index": i,
                                         },
                                         n_clicks=0,
+                                        style={"width": "1vh"},
                                     ),
                                 ),
                                 dbc.Row(
@@ -1379,6 +1388,7 @@ class GeoExplorer:
                                             "index": i,
                                         },
                                         n_clicks=0,
+                                        style={"width": "1vh"},
                                     ),
                                 ),
                             ],
@@ -1550,25 +1560,51 @@ class GeoExplorer:
         @callback(
             Output("new-data-read", "children"),
             Output("currently-in-bounds", "children"),
+            Output("missing", "children"),
+            Output("interval-component", "disabled"),
             Input("debounced_bounds", "value"),
             Input("new-file-added", "children"),
             Input("file-removed", "children"),
+            Input("interval-component", "n_intervals"),
+            Input("missing2", "children"),
             State("bounds_per_feature", "data"),
+            # State("missing", "children"),
             # prevent_initial_call=True,
             background=False,
         )
-        def get_files_in_bounds(bounds, file_added, file_removed, bounds_per_feature):
-            bounds = json.loads(bounds)
-
+        def get_files_in_bounds(
+            bounds, file_added, file_removed, n_intervals, missing, bounds_per_feature
+        ):
             t = perf_counter()
-            box = shapely.box(*self._nested_bounds_to_bounds(bounds))
-            files_in_bounds = sg.sfilter(self.bounds_series, box)
-            currently_in_bounds = set(files_in_bounds.index)
-            missing = list(
-                {path for path in files_in_bounds.index if path not in self.loaded_data}
-            )
+            triggered = dash.callback_context.triggered_id
+            print("get_files_in_bounds", triggered, len(missing or []))
+
+            if triggered != "missing":
+                bounds = json.loads(bounds)
+                box = shapely.box(*self._nested_bounds_to_bounds(bounds))
+                files_in_bounds = sg.sfilter(self.bounds_series, box)
+                currently_in_bounds = list(set(files_in_bounds.index))
+                missing = list(
+                    {
+                        path
+                        for path in files_in_bounds.index
+                        if path not in self.loaded_data
+                    }
+                )
             if missing:
-                _read_files(self, missing)
+                if len(missing) > 10:
+                    _read_files(self, missing[:10])
+                    missing = missing[10:]
+                    disabled = False
+                else:
+                    _read_files(self, missing)
+                    missing = []
+                    disabled = True
+                new_data_read = True
+            else:
+                new_data_read = False
+                disabled = True
+
             # for path in missing:
             #     df = self.loaded_data[path]
             # bounds_per_feature |= {
@@ -1580,20 +1616,28 @@ class GeoExplorer:
             #         df["maxx"],
             #         df["maxy"]
             #     )
-            # }
+            # }'
+
             print(
                 "get_files_in_bounds ferdig etter",
                 perf_counter() - t,
                 "-",
                 len(missing),
-                len(currently_in_bounds),
+                len(self.loaded_data),
             )
-            return bool(missing), list(currently_in_bounds)
-            if missing:
-                return 1
-            else:
-                return 0
-                # return dash.no_update
+
+            # if len(missing):
+            #     return dash.no_update, dash.no_update, missing
+            return new_data_read, currently_in_bounds, missing, disabled
+
+        @callback(
+            Output("missing2", "children"),
+            Input("missing2", "children"),
+            prevent_initial_call=True,
+        )
+        def circle(missing):
+            print("\n\ncircle\n")
+            return missing
 
         @callback(
             Output("column-dropdown", "options"),
@@ -1784,10 +1828,12 @@ class GeoExplorer:
             bounds = self._nested_bounds_to_bounds(bounds)
 
             _concat_data(self, bounds)
+
+            # print("self.concatted_data")
+            # print(self.concatted_data)
+
             print("concat_data finished after", perf_counter() - t)
-            t = perf_counter()
-            self.concatted_data.to_dict()
-            print("to_json finished after", perf_counter() - t)
+
             return 1, 1
 
         @callback(
@@ -2143,7 +2189,12 @@ class GeoExplorer:
             out_alert = [x[1] for x in results if x[1]]
             rows_are_not_hidden = not any(x[2] for x in results)
 
-            print("add_data ferdig etter", perf_counter() - t)
+            print(
+                "add_data ferdig etter",
+                perf_counter() - t,
+                len(self.loaded_data),
+                len(self.concatted_data),
+            )
             if rows_are_not_hidden:
                 max_rows_component = None
             else:
@@ -2155,38 +2206,42 @@ class GeoExplorer:
                 max_rows_component,
             )
 
-        @callback(
-            Input("alert", "children"),
-            State("debounced_bounds", "value"),
-            State("map", "zoom"),
-            prevent_initial_call=True,
-            background=False,
-        )
-        def read_and_concat_neighbor_data(_, bounds, zoom):
-            print("read_and_concat_neighbor_data", bounds, zoom)
-            t = perf_counter()
-            bounds = json.loads(bounds)
-            box = shapely.box(*self._nested_bounds_to_bounds(bounds))
-            box = _buffer_box(box, 10_000 / (zoom**0.75))
-            files_in_bounds = sg.sfilter(self.bounds_series, box)
-            missing = list(
-                {path for path in files_in_bounds.index if path not in self.loaded_data}
-            )
-            if missing:
-                _read_files(self, missing)
-                _concat_data(self, box.bounds)
-
-            # for path in missing:
-            # bounds_per_feature |= dict(
-            #     self.loaded_data[path].set_index("_unique_id").bounds.apply(tuple)
-            # )
-            # df = self.loaded_data[path]
-            print(
-                "read_and_concat_neighbor_data finished",
-                perf_counter() - t,
-                len(self.loaded_data),
-                len(self.concatted_data) if self.concatted_data is not None else 0,
-            )
+        # @callback(
+        #     Input("alert", "children"),
+        #     State("debounced_bounds", "value"),
+        #     State("map", "zoom"),
+        #     prevent_initial_call=True,
+        #     background=False,
+        # )
+        # def read_and_concat_neighbor_data(_, bounds, zoom):
+        #     print("read_and_concat_neighbor_data", bounds, zoom)
+        #     t = perf_counter()
+        #     bounds = json.loads(bounds)
+        #     box = shapely.box(*self._nested_bounds_to_bounds(bounds))
+        #     box = _buffer_box(box, 10_000 / (zoom**0.75))
+        #     files_in_bounds = sg.sfilter(self.bounds_series, box)
+        #     missing = list(
+        #         {path for path in files_in_bounds.index if path not in self.loaded_data}
+        #     )
+        #     if missing:
+        #         if len(missing) > 10:
+        #             _read_files(self, missing[:10])
+        #             missing = missing[10:]
+        #         else:
+        #             _read_files(self, missing)
+        #             missing = []
+        #     # for path in missing:
+        #     # bounds_per_feature |= dict(
+        #     #     self.loaded_data[path].set_index("_unique_id").bounds.apply(tuple)
+        #     # )
+        #     # df = self.loaded_data[path]
+        #     print(
+        #         "read_and_concat_neighbor_data finished",
+        #         perf_counter() - t,
+        #         len(missing),
+        #         # len(self.loaded_data),
+        #         # len(self.concatted_data) if self.concatted_data is not None else 0,
+        # )
 
         @callback(
             Output("clicked-features", "data"),
@@ -2237,7 +2292,6 @@ class GeoExplorer:
                 )
                 clicked_features.pop(pop_index)
                 clicked_ids.pop(pop_index)
-            print(locals())
             return clicked_features, clicked_ids
 
         @callback(
@@ -2297,7 +2351,9 @@ class GeoExplorer:
     def _get_column_dropdown_options(self, currently_in_bounds):
         columns = set(
             itertools.chain.from_iterable(
-                set(self.loaded_data[path].columns).difference(
+                set(
+                    self.loaded_data.get(path, EmptyColumnContainer).columns
+                ).difference(
                     {"__file_path", "_unique_id", "minx", "miny", "maxx", "maxy"}
                 )
                 for path in currently_in_bounds
