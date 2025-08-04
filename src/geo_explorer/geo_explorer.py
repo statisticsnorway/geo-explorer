@@ -719,6 +719,7 @@ class GeoExplorer:
         else:
             self.center = (59.91740845, 10.71394444)
         self.zoom = zoom
+        self.bounds = None
         self.column = column
         self.color_dict = color_dict or {}
         self.wms = wms or {}
@@ -737,6 +738,8 @@ class GeoExplorer:
         self.loaded_data: dict[str, pl.DataFrame] = {}
         self.concatted_data: pl.DataFrame | None = None
         self.tile_names: list[str] = []
+        self.currently_in_bounds: list[str] = []
+        self.color_dict2 = {}
 
         if "REDIS_URL" in os.environ:
             # Use Redis & Celery if REDIS_URL set as an env variable
@@ -768,369 +771,376 @@ class GeoExplorer:
 
         clicked_features = []
 
-        self.app.layout = dbc.Container(
-            [
-                dcc.Location(id="url", refresh=False),
-                dbc.Row(
-                    html.Div(id="alert"),
-                ),
-                dbc.Row(
-                    html.Div(id="alert2"),
-                ),
-                dbc.Row(
-                    html.Div(id="new-file-added"),
-                ),
-                dbc.Row(
-                    [
-                        dbc.Col(
-                            [
-                                dl.Map(
-                                    center=self.center,
-                                    zoom=self.zoom,
-                                    maxZoom=max_zoom,
-                                    minZoom=min_zoom,
-                                    children=self._map_children
-                                    + [
-                                        html.Div(id="lc"),
-                                    ],
-                                    id="map",
-                                    style={"width": "100%", "height": "90vh"},
-                                ),
-                            ],
-                            width=8,
-                        ),
-                        dbc.Col(
-                            [
-                                dbc.Row(
-                                    [
-                                        dbc.Col(
-                                            html.Button(
-                                                "Split rows",
-                                                id="splitter",
-                                                n_clicks=1 if self.splitted else 0,
-                                            ),
-                                        ),
-                                        dbc.Col(
-                                            html.Div(
-                                                [
-                                                    html.Button(
-                                                        "Export as code",
-                                                        id="export",
-                                                        style={"color": "blue"},
-                                                    ),
-                                                    dbc.Modal(
-                                                        [
-                                                            dbc.ModalHeader(
-                                                                dbc.ModalTitle(
-                                                                    "Code to reproduce explore view."
-                                                                ),
-                                                                close_button=False,
-                                                            ),
-                                                            dbc.ModalBody(
-                                                                id="export-text"
-                                                            ),
-                                                            dbc.ModalFooter(
-                                                                dbc.Button(
-                                                                    "Copy code",
-                                                                    id="copy-export",
-                                                                    className="ms-auto",
-                                                                    n_clicks=0,
-                                                                )
-                                                            ),
-                                                        ],
-                                                        id="export-view",
-                                                        is_open=False,
-                                                    ),
-                                                ]
-                                            )
-                                        ),
-                                        dbc.Col(id="max_rows"),
-                                    ],
-                                ),
-                                dbc.Row(
-                                    [
-                                        dbc.Col(
-                                            html.Div(
-                                                [
-                                                    dcc.Dropdown(
-                                                        id="column-dropdown",
-                                                        value=self.column,
-                                                        placeholder="Select column to color by",
-                                                        style={
-                                                            "font-size": 22,
-                                                            "overflow": "visible",
-                                                        },
-                                                        maxHeight=600,
-                                                        clearable=True,
-                                                    ),
-                                                ],
-                                            ),
-                                            width=9,
-                                        ),
-                                        dbc.Col(
-                                            html.Div(
-                                                id="force-categorical",
-                                            ),
-                                            width=2,
-                                        ),
-                                    ],
-                                    style={
-                                        "margin-top": "7px",
-                                    },
-                                ),
-                                dbc.Row(
-                                    [
-                                        dbc.Col(
-                                            dcc.Dropdown(
-                                                id="k",
-                                                options=[
-                                                    {"label": f"k={i}", "value": i}
-                                                    for i in [3, 4, 5, 6, 7, 8, 9]
-                                                ],
-                                                value=5,
-                                                style={
-                                                    "font-size": 22,
-                                                    "overflow": "visible",
-                                                },
-                                                maxHeight=300,
-                                                clearable=False,
-                                            ),
-                                            width=4,
-                                        ),
-                                        dbc.Col(
-                                            html.Div(
-                                                dcc.Dropdown(
-                                                    id="cmap-placeholder",
-                                                    options=[
-                                                        {
-                                                            "label": f"cmap={name}",
-                                                            "value": name,
-                                                        }
-                                                        for name in [
-                                                            "viridis",
-                                                            "plasma",
-                                                            "inferno",
-                                                            "magma",
-                                                            "Greens",
-                                                        ]
-                                                        + [
-                                                            name
-                                                            for name, cmap in matplotlib.colormaps.items()
-                                                            if "linear"
-                                                            in str(cmap).lower()
-                                                        ]
-                                                    ],
-                                                    value="viridis",
-                                                    maxHeight=200,
-                                                    clearable=False,
+        def get_layout():
+            print("get_layout", self.bounds)
+            return dbc.Container(
+                [
+                    dbc.Row(
+                        html.Div(id="alert"),
+                    ),
+                    dbc.Row(
+                        html.Div(id="alert2"),
+                    ),
+                    dbc.Row(
+                        html.Div(id="new-file-added"),
+                    ),
+                    dbc.Row(
+                        [
+                            dbc.Col(
+                                [
+                                    dl.Map(
+                                        center=self.center,
+                                        bounds=self.bounds,
+                                        zoom=self.zoom,
+                                        maxZoom=max_zoom,
+                                        minZoom=min_zoom,
+                                        children=self._map_children
+                                        + [
+                                            html.Div(id="lc"),
+                                        ],
+                                        id="map",
+                                        style={"width": "100%", "height": "90vh"},
+                                    ),
+                                ],
+                                width=8,
+                            ),
+                            dbc.Col(
+                                [
+                                    dbc.Row(
+                                        [
+                                            dbc.Col(
+                                                html.Button(
+                                                    "Split rows",
+                                                    id="splitter",
+                                                    n_clicks=1 if self.splitted else 0,
                                                 ),
                                             ),
-                                            width=5,
-                                        ),
-                                    ],
-                                    id="numeric-options",
-                                    style={"display": "none"},
+                                            dbc.Col(
+                                                html.Div(
+                                                    [
+                                                        html.Button(
+                                                            "Export as code",
+                                                            id="export",
+                                                            style={"color": "blue"},
+                                                        ),
+                                                        dbc.Modal(
+                                                            [
+                                                                dbc.ModalHeader(
+                                                                    dbc.ModalTitle(
+                                                                        "Code to reproduce explore view."
+                                                                    ),
+                                                                    close_button=False,
+                                                                ),
+                                                                dbc.ModalBody(
+                                                                    id="export-text"
+                                                                ),
+                                                                dbc.ModalFooter(
+                                                                    dbc.Button(
+                                                                        "Copy code",
+                                                                        id="copy-export",
+                                                                        className="ms-auto",
+                                                                        n_clicks=0,
+                                                                    )
+                                                                ),
+                                                            ],
+                                                            id="export-view",
+                                                            is_open=False,
+                                                        ),
+                                                    ]
+                                                )
+                                            ),
+                                            dbc.Col(id="max_rows"),
+                                        ],
+                                    ),
+                                    dbc.Row(
+                                        [
+                                            dbc.Col(
+                                                html.Div(
+                                                    [
+                                                        dcc.Dropdown(
+                                                            id="column-dropdown",
+                                                            value=self.column,
+                                                            placeholder="Select column to color by",
+                                                            style={
+                                                                "font-size": 22,
+                                                                "overflow": "visible",
+                                                            },
+                                                            maxHeight=600,
+                                                            clearable=True,
+                                                        ),
+                                                    ],
+                                                ),
+                                                width=9,
+                                            ),
+                                            dbc.Col(
+                                                html.Div(
+                                                    id="force-categorical",
+                                                ),
+                                                width=2,
+                                            ),
+                                        ],
+                                        style={
+                                            "margin-top": "7px",
+                                        },
+                                    ),
+                                    dbc.Row(
+                                        [
+                                            dbc.Col(
+                                                dcc.Dropdown(
+                                                    id="k",
+                                                    options=[
+                                                        {"label": f"k={i}", "value": i}
+                                                        for i in [3, 4, 5, 6, 7, 8, 9]
+                                                    ],
+                                                    value=5,
+                                                    style={
+                                                        "font-size": 22,
+                                                        "overflow": "visible",
+                                                    },
+                                                    maxHeight=300,
+                                                    clearable=False,
+                                                ),
+                                                width=4,
+                                            ),
+                                            dbc.Col(
+                                                html.Div(
+                                                    dcc.Dropdown(
+                                                        id="cmap-placeholder",
+                                                        options=[
+                                                            {
+                                                                "label": f"cmap={name}",
+                                                                "value": name,
+                                                            }
+                                                            for name in [
+                                                                "viridis",
+                                                                "plasma",
+                                                                "inferno",
+                                                                "magma",
+                                                                "Greens",
+                                                            ]
+                                                            + [
+                                                                name
+                                                                for name, cmap in matplotlib.colormaps.items()
+                                                                if "linear"
+                                                                in str(cmap).lower()
+                                                            ]
+                                                        ],
+                                                        value="viridis",
+                                                        maxHeight=200,
+                                                        clearable=False,
+                                                    ),
+                                                ),
+                                                width=5,
+                                            ),
+                                        ],
+                                        id="numeric-options",
+                                        style={"display": "none"},
+                                    ),
+                                    dbc.Row(
+                                        [
+                                            dbc.Row(
+                                                [
+                                                    dbc.Col(
+                                                        html.Button(
+                                                            "Hide/show wms options",
+                                                            id="hide-wms-button",
+                                                            n_clicks=1,
+                                                            style={"display": "none"},
+                                                        ),
+                                                    ),
+                                                ]
+                                            ),
+                                            html.Div(
+                                                [
+                                                    html.Div(
+                                                        dcc.Checklist(
+                                                            options=["Norge i bilder"],
+                                                            value=[],
+                                                            id="wms-checklist",
+                                                        ),
+                                                    ),
+                                                    html.Div(id="wms-items"),
+                                                ],
+                                                id="hide-wms-div",
+                                                style={"display": "none"},
+                                            ),
+                                        ]
+                                    ),
+                                    dbc.Row(
+                                        [
+                                            html.Div(html.B("Layers")),
+                                            dbc.Col(id="remove-buttons"),
+                                        ],
+                                        style={
+                                            "display": "flex",
+                                            "flexDirection": "column",
+                                            "border": "1px solid #ccc",
+                                            "borderRadius": "3px",
+                                            "padding": "0px",
+                                            "backgroundColor": OFFWHITE,
+                                            "margin-bottom": "7px",
+                                            "margin-top": "7px",
+                                            "margin-left": "0px",
+                                            "margin-right": "0px",
+                                        },
+                                    ),
+                                    dbc.Row(id="colorpicker-container"),
+                                ],
+                                style={
+                                    "height": "90vh",
+                                    "overflow": "scroll",
+                                },
+                                className="scroll-container",
+                            ),
+                        ],
+                    ),
+                    dbc.Row(
+                        [
+                            dbc.Col(
+                                html.Button(
+                                    "❌ Clear table",
+                                    id="clear-table",
+                                    style={
+                                        "color": "red",
+                                        "border": "none",
+                                        "background": "none",
+                                        "cursor": "pointer",
+                                    },
                                 ),
-                                dbc.Row(
+                                width=1,
+                            ),
+                            dbc.Col(
+                                html.Div(id="feature-table-container"),
+                                style={"width": "100%", "height": "auto"},
+                                width=11,
+                            ),
+                        ],
+                        style={
+                            "height": "auto",
+                            "overflow": "visible",
+                        },
+                    ),
+                    dbc.Row(
+                        [
+                            dbc.Col(
+                                html.Div(
                                     [
+                                        html.Br(),
+                                        html.H2("File Browser"),
                                         dbc.Row(
                                             [
                                                 dbc.Col(
                                                     html.Button(
-                                                        "Hide/show wms options",
-                                                        id="hide-wms-button",
-                                                        n_clicks=1,
-                                                        style={"display": "none"},
-                                                    ),
+                                                        "⬆️ Go Up",
+                                                        id="up-button",
+                                                        style={"width": "10vh"},
+                                                    )
+                                                ),
+                                                dbc.Col(
+                                                    dcc.Input(
+                                                        self.start_dir,
+                                                        id="path-display",
+                                                        style={
+                                                            "width": "70vh",
+                                                        },
+                                                        debounce=0.2,
+                                                    )
                                                 ),
                                             ]
                                         ),
-                                        html.Div(
+                                        html.Br(),
+                                        dbc.Row(
+                                            html.Div(id="file-list-alert"),
+                                        ),
+                                        dbc.Row(
                                             [
-                                                html.Div(
-                                                    dcc.Checklist(
-                                                        options=["Norge i bilder"],
-                                                        value=[],
-                                                        id="wms-checklist",
+                                                dbc.Col(
+                                                    dcc.Input(
+                                                        placeholder="Search for files by substring (use '|' as OR and ',' as AND)...",
+                                                        id="search-bar",
+                                                        debounce=0.5,
+                                                        style={"width": "50vh"},
                                                     ),
+                                                    # width=8,
                                                 ),
-                                                html.Div(id="wms-items"),
-                                            ],
-                                            id="hide-wms-div",
-                                            style={"display": "none"},
+                                                dbc.Col(
+                                                    html.Button(
+                                                        id="case-sensitive",
+                                                        n_clicks=1,
+                                                        children="Case sensitive",
+                                                        style={"width": "5vh"},
+                                                    ),
+                                                    # width=3,
+                                                ),
+                                                dbc.Col(
+                                                    html.Button(
+                                                        id="recursive",
+                                                        n_clicks=0,
+                                                        children="Recursive",
+                                                        style={"width": "5vh"},
+                                                    ),
+                                                    # width=2,
+                                                ),
+                                            ]
+                                        ),
+                                        html.Br(),
+                                        html.Div(
+                                            id="file-list",
+                                            style={
+                                                "font-size": 12,
+                                                "width": "100%",
+                                                "height": "70vh",
+                                                "overflow": "scroll",
+                                            },
+                                            className="scroll-container",
                                         ),
                                     ]
                                 ),
-                                dbc.Row(
-                                    [
-                                        html.Div(html.B("Layers")),
-                                        dbc.Col(id="remove-buttons"),
-                                    ],
-                                    style={
-                                        "display": "flex",
-                                        "flexDirection": "column",
-                                        "border": "1px solid #ccc",
-                                        "borderRadius": "3px",
-                                        "padding": "0px",
-                                        "backgroundColor": OFFWHITE,
-                                        "margin-bottom": "7px",
-                                        "margin-top": "7px",
-                                        "margin-left": "0px",
-                                        "margin-right": "0px",
-                                    },
-                                ),
-                                dbc.Row(id="colorpicker-container"),
-                            ],
-                            style={
-                                "height": "90vh",
-                                "overflow": "scroll",
-                            },
-                            className="scroll-container",
-                        ),
-                    ],
-                ),
-                dbc.Row(
-                    [
-                        dbc.Col(
-                            html.Button(
-                                "❌ Clear table",
-                                id="clear-table",
-                                style={
-                                    "color": "red",
-                                    "border": "none",
-                                    "background": "none",
-                                    "cursor": "pointer",
-                                },
+                                # width=4,
                             ),
-                            width=1,
-                        ),
-                        dbc.Col(
-                            html.Div(id="feature-table-container"),
-                            style={"width": "100%", "height": "auto"},
-                            width=11,
-                        ),
-                    ],
-                    style={
-                        "height": "auto",
-                        "overflow": "visible",
-                    },
-                ),
-                dbc.Row(
-                    [
-                        dbc.Col(
-                            html.Div(
-                                [
-                                    html.Br(),
-                                    html.H2("File Browser"),
-                                    dbc.Row(
-                                        [
-                                            dbc.Col(
-                                                html.Button(
-                                                    "⬆️ Go Up",
-                                                    id="up-button",
-                                                    style={"width": "10vh"},
-                                                )
-                                            ),
-                                            dbc.Col(
-                                                dcc.Input(
-                                                    self.start_dir,
-                                                    id="path-display",
-                                                    style={
-                                                        "width": "70vh",
-                                                    },
-                                                    debounce=0.2,
-                                                )
-                                            ),
-                                        ]
-                                    ),
-                                    html.Br(),
-                                    dbc.Row(
-                                        html.Div(id="file-list-alert"),
-                                    ),
-                                    dbc.Row(
-                                        [
-                                            dbc.Col(
-                                                dcc.Input(
-                                                    placeholder="Search for files by substring (use '|' as OR and ',' as AND)...",
-                                                    id="search-bar",
-                                                    debounce=0.5,
-                                                    style={"width": "50vh"},
-                                                ),
-                                                # width=8,
-                                            ),
-                                            dbc.Col(
-                                                html.Button(
-                                                    id="case-sensitive",
-                                                    n_clicks=1,
-                                                    children="Case sensitive",
-                                                    style={"width": "5vh"},
-                                                ),
-                                                # width=3,
-                                            ),
-                                            dbc.Col(
-                                                html.Button(
-                                                    id="recursive",
-                                                    n_clicks=0,
-                                                    children="Recursive",
-                                                    style={"width": "5vh"},
-                                                ),
-                                                # width=2,
-                                            ),
-                                        ]
-                                    ),
-                                    html.Br(),
-                                    html.Div(
-                                        id="file-list",
-                                        style={
-                                            "font-size": 12,
-                                            "width": "100%",
-                                            "height": "70vh",
-                                            "overflow": "scroll",
-                                        },
-                                        className="scroll-container",
-                                    ),
-                                ]
-                            ),
-                            # width=4,
-                        ),
-                    ],
-                    style={"width": "90vh"},
-                ),
-                dcc.Store(id="is_splitted", data=False),
-                dcc.Input(
-                    id="debounced_bounds",
-                    value=None,
-                    style={"display": "none"},
-                    debounce=1,
-                ),
-                dcc.Store(
-                    id="persisted-bounds",
-                    data=None,
-                    storage_type="local",
-                ),
-                html.Div(id="currently-in-bounds", style={"display": "none"}),
-                html.Div(id="skip_to_add_data", style={"display": "none"}),
-                html.Div(id="missing", style={"display": "none"}),
-                html.Div(id="currently-in-bounds2", style={"display": "none"}),
-                html.Div(id="new-file-added2", style={"display": "none"}),
-                html.Div(id="data-was-concatted", style={"display": "none"}),
-                html.Div(id="data-was-changed", style={"display": "none"}),
-                dcc.Store(id="order-was-changed", data=None),
-                html.Div(id="new-data-read", style={"display": "none"}),
-                html.Div(id="max_rows_was_changed", style={"display": "none"}),
-                html.Div(id="file-removed", style={"display": "none"}),
-                html.Div(id="dummy-output", style={"display": "none"}),
-                html.Div(id="bins", style={"display": "none"}),
-                html.Div(False, id="is-numeric", style={"display": "none"}),
-                dcc.Store(id="clicked-features", data=clicked_features),
-                dcc.Store(id="clicked-ids", data=self.selected_features),
-                dcc.Store(id="current-path", data=self.start_dir),
-                dcc.Interval(
-                    id="interval-component", interval=2000, n_intervals=0, disabled=True
-                ),
-            ],
-            fluid=True,
-        )
+                        ],
+                        style={"width": "90vh"},
+                    ),
+                    dcc.Store(id="is_splitted", data=False),
+                    dcc.Input(
+                        id="debounced_bounds",
+                        value=None,
+                        style={"display": "none"},
+                        debounce=1,
+                    ),
+                    dcc.Store(
+                        id="persisted-bounds",
+                        data=None,
+                        storage_type="local",
+                    ),
+                    html.Div(id="currently-in-bounds", style={"display": "none"}),
+                    html.Div(id="skip_to_add_data", style={"display": "none"}),
+                    html.Div(id="missing", style={"display": "none"}),
+                    html.Div(id="currently-in-bounds2", style={"display": "none"}),
+                    html.Div(id="new-file-added2", style={"display": "none"}),
+                    html.Div(id="data-was-concatted", style={"display": "none"}),
+                    html.Div(id="data-was-changed", style={"display": "none"}),
+                    dcc.Store(id="order-was-changed", data=None),
+                    html.Div(id="new-data-read", style={"display": "none"}),
+                    html.Div(id="max_rows_was_changed", style={"display": "none"}),
+                    html.Div(id="file-removed", style={"display": "none"}),
+                    html.Div(id="dummy-output", style={"display": "none"}),
+                    html.Div(id="bins", style={"display": "none"}),
+                    html.Div(False, id="is-numeric", style={"display": "none"}),
+                    dcc.Store(id="clicked-features", data=clicked_features),
+                    dcc.Store(id="clicked-ids", data=self.selected_features),
+                    dcc.Store(id="current-path", data=self.start_dir),
+                    dcc.Interval(
+                        id="interval-component",
+                        interval=2000,
+                        n_intervals=0,
+                        disabled=True,
+                    ),
+                ],
+                fluid=True,
+            )
+
+        self.app.layout = get_layout
 
         error_mess = "'data' must be a list of file paths or a dict of GeoDataFrames."
         bounds_series_dict = {}
@@ -1239,7 +1249,7 @@ class GeoExplorer:
             if triggered in ["file-removed", "close-export"] or not export_clicks:
                 return None, False
 
-            bounds = json.loads(bounds)
+            # bounds = json.loads(bounds)
             centroid = shapely.box(*self._nested_bounds_to_bounds(bounds)).centroid
             center = (centroid.y, centroid.x)
 
@@ -1575,60 +1585,17 @@ class GeoExplorer:
 
         @callback(
             Output("debounced_bounds", "value"),
-            # Output("persisted-bounds", "data"),
             Input("map", "bounds"),
+            Input("map", "zoom"),
         )
-        def update_bounds(bounds):
-            # print("update_bounds")
-            # centroid = shapely.box(*self._nested_bounds_to_bounds(bounds)).centroid
-            # self.center = (centroid.y, centroid.x)
-            bounds = json.dumps(bounds)
-            return bounds  # , bounds
-            if bounds:
-                return bounds
-            return dash.no_update
-
-        @callback(
-            Output("url", "search"),
-            Input("map", "bounds"),
-            State("url", "search"),
-            # prevent_initial_call=True,
-        )
-        def update_url(bounds, search):
-            if bounds:
-                import urllib.parse
-
-                params = urllib.parse.urlencode({"bounds": json.dumps(bounds)})
-                return f"?{params}"
-            return dash.no_update
-
-        @callback(
-            Output("map", "bounds"),
-            Input("url", "search"),
-            # prevent_initial_call=True,
-        )
-        def set_bounds_from_url(search):
-            if search:
-                import urllib.parse
-
-                params = urllib.parse.parse_qs(search.lstrip("?"))
-                if "bounds" in params:
-                    try:
-                        bounds = json.loads(params["bounds"][0])
-                        return bounds
-                    except Exception:
-                        pass
-            return dash.no_update
-
-        # @callback(
-        #     Output("map", "bounds"),
-        #     Input("persisted-bounds", "data"),
-        #     prevent_initial_call=True,
-        # )
-        # def restore_bounds(bounds):
-        #     if bounds:
-        #         return bounds
-        #     return dash.no_update
+        def update_bounds(bounds, zoom):
+            if bounds is None:
+                return dash.no_update
+            self.bounds = bounds
+            centroid = shapely.box(*self._nested_bounds_to_bounds(bounds)).centroid
+            self.center = (centroid.y, centroid.x)
+            self.zoom = zoom
+            return json.dumps(bounds)
 
         [
             np.int16(-2730),
@@ -1726,7 +1693,7 @@ class GeoExplorer:
             print("get_files_in_bounds", triggered, len(missing or []))
 
             if triggered != "missing":
-                bounds = json.loads(bounds)
+                # bounds = json.loads(bounds)
                 box = shapely.box(*self._nested_bounds_to_bounds(bounds))
                 files_in_bounds = sg.sfilter(self.bounds_series, box)
                 self.currently_in_bounds = list(set(files_in_bounds.index))
@@ -2064,9 +2031,14 @@ class GeoExplorer:
             bins,
             is_splitted,
         ):
-            print("\nget_column_value_color_dict")
-            bounds = json.loads(bounds)
             triggered = dash.callback_context.triggered_id
+            print("\nget_column_value_color_dict", column, triggered)
+            if column is None and triggered is None:
+                column = self.column
+                self.color_dict = self.color_dict2
+            else:
+                self.column = column
+
             if not is_splitted and self.splitted:
                 colorpicker_ids, colorpicker_values_list = [], []
                 self.splitted = is_splitted
@@ -2119,6 +2091,8 @@ class GeoExplorer:
                 except ValueError as e:
                     raise ValueError(f"{e}: {new_values} - {new_colors}") from e
 
+                self.color_dict2 = color_dict
+
                 return (
                     get_colorpicker_container(color_dict),
                     None,
@@ -2127,6 +2101,7 @@ class GeoExplorer:
                     1,
                 )
 
+            # bounds = json.loads(bounds)
             bounds = self._nested_bounds_to_bounds(bounds)
 
             values = filter_by_bounds(
@@ -2236,6 +2211,7 @@ class GeoExplorer:
             if self.color_dict:
                 color_dict |= self.color_dict
 
+            self.color_dict2 = color_dict
             return (
                 get_colorpicker_container(color_dict),
                 bins,
@@ -2304,7 +2280,7 @@ class GeoExplorer:
             print("add_data")
             t = perf_counter()
 
-            bounds = json.loads(bounds)
+            print(bounds)
             bounds = self._nested_bounds_to_bounds(bounds)
 
             column_values = [x["column_value"] for x in colorpicker_ids]
@@ -2540,6 +2516,8 @@ class GeoExplorer:
                 .to_crs(4326)
                 .total_bounds
             )
+        if isinstance(bounds, str):
+            bounds = json.loads(bounds)
         mins, maxs = bounds
         miny, minx = mins
         maxy, maxx = maxs
