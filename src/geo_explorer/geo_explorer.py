@@ -189,27 +189,19 @@ def get_colorpicker_container(color_dict: dict[str, str]) -> html.Div:
     )
 
 
-def _concat_data(explorer, bounds):
-    dfs = [
-        _get_df(
-            path,
-            bounds=bounds,
-            loaded_data=explorer.loaded_data,
-            concatted_data=explorer.concatted_data,
-        )
-        for path in explorer.selected_files
-    ]
-    dfs = [df for sublist in dfs for df in sublist if df is not None and len(df) > 0]
-    if dfs:
-        if explorer.concatted_data is not None:
-            dfs.append(explorer.concatted_data)
-        explorer.concatted_data = pl.concat(dfs, how="diagonal_relaxed")
-
-
-def _get_df(path, bounds, loaded_data, concatted_data):
+def _get_df(path, loaded_data, concatted_data, override: bool = False):
     # cols_to_keep = ["_unique_id", "minx", "miny", "maxx", "maxy", "geometry"]
 
-    if path in loaded_data:
+    if (
+        path in loaded_data
+        and not override
+        and (
+            concatted_data is not None and (concatted_data["__file_path"] == path).any()
+        )
+    ):
+        # data already loaded and filtered
+        return []
+    elif path in loaded_data:
         df = loaded_data[path].with_columns(__file_path=pl.lit(path))
         return [df]
 
@@ -222,7 +214,7 @@ def _get_df(path, bounds, loaded_data, concatted_data):
         matches = [
             df.with_columns(__file_path=pl.lit(key))
             for key, df in loaded_data.items()
-            if path in key and key not in paths_loaded  # and intersects(df)
+            if path in key and (override or key not in paths_loaded)
         ]
     else:
         matches = [
@@ -282,6 +274,8 @@ def _add_data_one_path(
     df["geometry"] = shapely.from_wkb(df["geometry"])
     df = GeoDataFrame(df, crs=4326)
     df = _simplify_geometries(df, zoom, max_rows)
+
+    print(df)
 
     out_alert = None
 
@@ -1366,8 +1360,8 @@ class GeoExplorer:
             # Input("new-file-added", "children"),
             Input("alert", "children"),
             Input("file-removed", "children"),
-            Input({"type": "filter", "index": dash.ALL}, "value"),
-            Input({"type": "filter", "index": dash.ALL}, "id"),
+            State({"type": "filter", "index": dash.ALL}, "value"),
+            State({"type": "filter", "index": dash.ALL}, "id"),
             prevent_initial_call=True,
         )
         def render_items(new_file_added, file_removed, filter_functions, filter_ids):
@@ -1430,7 +1424,7 @@ class GeoExplorer:
                         dbc.Row(
                             dcc.Input(
                                 get_filter_function_if_any(path),
-                                placeholder="Filter function...",
+                                placeholder="Filter (with polars or pandas)",
                                 id={
                                     "type": "filter",
                                     "index": path,
@@ -1846,10 +1840,9 @@ class GeoExplorer:
             Output("alert2", "children"),
             Input({"type": "filter", "index": dash.ALL}, "value"),
             Input({"type": "filter", "index": dash.ALL}, "id"),
-            State("debounced_bounds", "value"),
             prevent_initial_call=True,
         )
-        def filter_data(filter_functions: list[str], filter_ids: list[str], bounds):
+        def filter_data(filter_functions: list[str], filter_ids: list[str]):
             if not filter_functions:
                 return dash.no_update
             triggered = dash.callback_context.triggered_id
@@ -1870,10 +1863,8 @@ class GeoExplorer:
                 pl.col("__file_path").str.contains(path) == False
             )
             # constructing dataset to be filtered from the full dataset, in case it has already been filtered on another query
-            bounds = json.loads(bounds)
-            bounds = self._nested_bounds_to_bounds(bounds)
             this_data = pl.concat(
-                _get_df(path, bounds, self.loaded_data, self.concatted_data)
+                _get_df(path, self.loaded_data, self.concatted_data, override=True)
             )
 
             out_alert = None
@@ -1966,13 +1957,24 @@ class GeoExplorer:
             if not new_data_read:
                 return dash.no_update, 1
 
-            bounds = json.loads(bounds)
-            bounds = self._nested_bounds_to_bounds(bounds)
-
-            _concat_data(self, bounds)
-
-            # print("self.concatted_data")
-            # print(self.concatted_data)
+            dfs = [
+                _get_df(
+                    path,
+                    loaded_data=self.loaded_data,
+                    concatted_data=self.concatted_data,
+                )
+                for path in self.selected_files
+            ]
+            dfs = [
+                df
+                for sublist in dfs
+                for df in sublist
+                if df is not None and len(df) > 0
+            ]
+            if dfs:
+                if self.concatted_data is not None:
+                    dfs.append(self.concatted_data)
+                self.concatted_data = pl.concat(dfs, how="diagonal_relaxed")
 
             print("concat_data finished after", perf_counter() - t)
 
@@ -2296,44 +2298,12 @@ class GeoExplorer:
                 bins=bins,
                 alpha=self.alpha,
             )
-            # get_df_func = partial(
-            #     _get_df,
-            #     loaded_data=self.loaded_data,
-            #     concatted_data=self.concatted_data,
-            # )
-            # print("add_data000", perf_counter() - t)
-            # print(len(self.loaded_data))
-            # print(len(self.concatted_data))
-
-            # with ProcessPoolExecutor() as executor:
-            #     dfs: list[GeoDataFrame | None] = list(
-            #         executor.map(get_df_func, list(self.selected_files))
-            #     )
-            # for df, path in zip(dfs, self.selected_files, strict=True):
-            #     if df is None:
-            #         continue
-            #     assert df["_unique_id"].is_unique
-            #     self.concatted_data[path] = df
-            #     print("\n\nhei", path)
-            #     print(self.concatted_data[path])
-
             print("add_data111", perf_counter() - t)
 
-            # with ProcessPoolExecutor() as executor:
-            #     results = list(
-            #         executor.map(
-            #             add_data_func,
-            #             list(self.selected_files),
-            #             list(self.selected_files.values()),
-            #         )
-            #     )
             results = [add_data_func(path) for path in self.selected_files]
             print("add_data2222", perf_counter() - t)
 
             data = list(itertools.chain.from_iterable([x[0] for x in results if x[0]]))
-            # dissolved = list(
-            #     itertools.chain.from_iterable([x[4] for x in results if x[4]])
-            # )
             out_alert = [x[1] for x in results if x[1]]
             rows_are_not_hidden = not any(x[2] for x in results)
 
