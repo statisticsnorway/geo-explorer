@@ -770,6 +770,7 @@ class GeoExplorer:
 
         self.app.layout = dbc.Container(
             [
+                dcc.Location(id="url", refresh=False),
                 dbc.Row(
                     html.Div(id="alert"),
                 ),
@@ -1101,6 +1102,11 @@ class GeoExplorer:
                     value=None,
                     style={"display": "none"},
                     debounce=1,
+                ),
+                dcc.Store(
+                    id="persisted-bounds",
+                    data=None,
+                    storage_type="local",
                 ),
                 html.Div(id="currently-in-bounds", style={"display": "none"}),
                 html.Div(id="skip_to_add_data", style={"display": "none"}),
@@ -1569,13 +1575,60 @@ class GeoExplorer:
 
         @callback(
             Output("debounced_bounds", "value"),
+            # Output("persisted-bounds", "data"),
             Input("map", "bounds"),
         )
         def update_bounds(bounds):
-            return json.dumps(bounds)
+            # print("update_bounds")
+            # centroid = shapely.box(*self._nested_bounds_to_bounds(bounds)).centroid
+            # self.center = (centroid.y, centroid.x)
+            bounds = json.dumps(bounds)
+            return bounds  # , bounds
             if bounds:
                 return bounds
             return dash.no_update
+
+        @callback(
+            Output("url", "search"),
+            Input("map", "bounds"),
+            State("url", "search"),
+            # prevent_initial_call=True,
+        )
+        def update_url(bounds, search):
+            if bounds:
+                import urllib.parse
+
+                params = urllib.parse.urlencode({"bounds": json.dumps(bounds)})
+                return f"?{params}"
+            return dash.no_update
+
+        @callback(
+            Output("map", "bounds"),
+            Input("url", "search"),
+            # prevent_initial_call=True,
+        )
+        def set_bounds_from_url(search):
+            if search:
+                import urllib.parse
+
+                params = urllib.parse.parse_qs(search.lstrip("?"))
+                if "bounds" in params:
+                    try:
+                        bounds = json.loads(params["bounds"][0])
+                        return bounds
+                    except Exception:
+                        pass
+            return dash.no_update
+
+        # @callback(
+        #     Output("map", "bounds"),
+        #     Input("persisted-bounds", "data"),
+        #     prevent_initial_call=True,
+        # )
+        # def restore_bounds(bounds):
+        #     if bounds:
+        #         return bounds
+        #     return dash.no_update
 
         [
             np.int16(-2730),
