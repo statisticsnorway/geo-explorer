@@ -176,6 +176,24 @@ def get_colorpicker_container(color_dict: dict[str, str]) -> html.Div:
                         dbc.Label([value]),
                         width="auto",
                     ),
+                    dbc.Col(
+                        html.Button(
+                            "❌",
+                            id={
+                                "type": "delete-btn",
+                                "index": value,
+                            },
+                            n_clicks=0,
+                            style={
+                                "color": "red",
+                                "border": "none",
+                                "background": "none",
+                                "cursor": "pointer",
+                                "marginLeft": "auto",
+                            },
+                        ),
+                        width="auto",
+                    ),
                 ],
                 style={
                     "display": "flex",
@@ -732,7 +750,7 @@ class GeoExplorer:
         self.alpha = alpha
         self.file_system = file_system
         self.selected_features: list[str] = (
-            selected_features if selected_features is not None else []
+            selected_features if selected_features is not None else {}
         )
         self.bounds_series = GeoSeries()
         self.selected_files: dict[str, int] = {}
@@ -772,7 +790,7 @@ class GeoExplorer:
         clicked_features = []
 
         def get_layout():
-            print("get_layout", self.bounds)
+            print("\n\n\n\n\nget_layout", self.bounds)
             return dbc.Container(
                 [
                     dbc.Row(
@@ -814,6 +832,7 @@ class GeoExplorer:
                                                     id="splitter",
                                                     n_clicks=1 if self.splitted else 0,
                                                 ),
+                                                style={"display": "none"},
                                             ),
                                             dbc.Col(
                                                 html.Div(
@@ -821,7 +840,7 @@ class GeoExplorer:
                                                         html.Button(
                                                             "Export as code",
                                                             id="export",
-                                                            style={"color": "blue"},
+                                                            style={"color": "#285cd4"},
                                                         ),
                                                         dbc.Modal(
                                                             [
@@ -1002,6 +1021,19 @@ class GeoExplorer:
                                     id="clear-table",
                                     style={
                                         "color": "red",
+                                        "border": "none",
+                                        "background": "none",
+                                        "cursor": "pointer",
+                                    },
+                                ),
+                                width=1,
+                            ),
+                            dbc.Col(
+                                html.Button(
+                                    "Select all",
+                                    id="show-all-table",
+                                    style={
+                                        "color": "#285cd4",
                                         "border": "none",
                                         "background": "none",
                                         "cursor": "pointer",
@@ -1419,6 +1451,23 @@ class GeoExplorer:
                                 "marginRight": "10px",
                             },
                         ),
+                        dbc.Col(
+                            html.Button(
+                                "⟳",
+                                id={
+                                    "type": "reload-btn",
+                                    "index": path,
+                                },
+                                n_clicks=0,
+                                style={
+                                    "color": "#285cd4",
+                                    "border": "none",
+                                    "background": "none",
+                                    "cursor": "pointer",
+                                    "marginLeft": "auto",
+                                },
+                            )
+                        ),
                         dbc.Col(html.Span(path)),
                         dbc.Col(
                             html.Button(
@@ -1475,7 +1524,46 @@ class GeoExplorer:
                 return _change_order(self, n_clicks_down, buttons, "down")
 
         @callback(
-            Output("file-removed", "children"),
+            Output("file-removed", "children", allow_duplicate=True),
+            Input({"type": "reload-btn", "index": dash.ALL}, "n_clicks"),
+            State({"type": "reload-btn", "index": dash.ALL}, "id"),
+            prevent_initial_call=True,
+        )
+        def reload_data(n_clicks_list, reload_ids):
+            if not any(n_clicks_list):
+                return dash.no_update
+            triggered = dash.callback_context.triggered_id
+            if triggered and triggered["type"] == "reload-btn":
+                triggered_index = triggered["index"]
+                index = next(
+                    iter(
+                        i
+                        for i, id_ in enumerate(reload_ids)
+                        if id_["index"] == triggered_index
+                    )
+                )
+                n_clicks = n_clicks_list[index]
+                if n_clicks == 0:
+                    return dash.no_update
+                path_to_reload = reload_ids[index]["index"]
+                this_data = pl.concat(
+                    _get_df(
+                        path_to_reload,
+                        self.loaded_data,
+                        self.concatted_data,
+                        override=True,
+                    )
+                )
+                other_data = self.concatted_data.filter(
+                    pl.col("__file_path").str.contains(path_to_reload) == False
+                )
+
+                self.concatted_data = pl.concat(
+                    [this_data, other_data], how="diagonal_relaxed"
+                )
+
+        @callback(
+            Output("file-removed", "children", allow_duplicate=True),
             Input({"type": "delete-btn", "index": dash.ALL}, "n_clicks"),
             State({"type": "delete-btn", "index": dash.ALL}, "id"),
             prevent_initial_call=True,
@@ -1493,27 +1581,53 @@ class GeoExplorer:
                         if id_["index"] == triggered_index
                     )
                 )
+                n_clicks = n_clicks_list[index]
+                if n_clicks == 0:
+                    return dash.no_update
                 path_to_remove = delete_ids[index]["index"]
+                print("\n\n\n\n\n\ndelete_item", path_to_remove)
                 if path_to_remove in self.selected_files:
                     self.selected_files.pop(path_to_remove)
+                any_removed = False
                 for path in list(self.loaded_data):
                     if path_to_remove in path:
                         del self.loaded_data[path]
-                self.bounds_series = self.bounds_series[
-                    lambda x: ~x.index.str.contains(path_to_remove)
-                ]
+                        self.concatted_data = self.concatted_data.filter(
+                            pl.col("__file_path").str.contains(path) == False
+                        )
+                        any_removed = True
+                if not any_removed and self.column:
+                    self.concatted_data = self.concatted_data.filter(
+                        pl.col(self.column) != path_to_remove
+                    )
+                else:
+                    self.bounds_series = self.bounds_series[
+                        lambda x: ~x.index.str.contains(path_to_remove)
+                    ]
             return 1
+
+        @callback(
+            Output("column-dropdown", "value", allow_duplicate=True),
+            Input("file-removed", "children"),
+            prevent_initial_call=True,
+        )
+        def reset_columns(_):
+            if not self.selected_files:
+                return ""
+            return dash.no_update
 
         @callback(
             Output("splitter", "n_clicks"),
             Output("splitter", "style"),
             Output("is_splitted", "data"),
-            Output("column-dropdown", "value"),
+            Output("column-dropdown", "value", allow_duplicate=True),
             Input("splitter", "n_clicks"),
             Input("column-dropdown", "value"),
             # Input("remove-buttons", "children"),
+            prevent_initial_call=True,
         )
         def is_splitted(n_clicks: int, column):
+            print("is_splitted")
             if self.concatted_data is None:
                 return dash.no_update, dash.no_update, dash.no_update, dash.no_update
             triggered = dash.callback_context.triggered_id
@@ -1718,9 +1832,11 @@ class GeoExplorer:
                     new_data_read = True
                 skip_to_add_data = dash.no_update
             else:
-                new_data_read = dash.no_update
+                new_data_read: bool = (
+                    True if triggered in ["file-removed"] else dash.no_update
+                )
                 disabled = True
-                skip_to_add_data: bool = triggered != "missing"
+                skip_to_add_data: bool = triggered not in ["missing", "file-removed"]
 
             print(
                 "get_files_in_bounds ferdig etter",
@@ -1728,6 +1844,10 @@ class GeoExplorer:
                 "-",
                 len(missing),
                 len(self.loaded_data),
+                new_data_read,
+                skip_to_add_data,
+                len(missing),
+                disabled,
             )
 
             return new_data_read, skip_to_add_data, missing, disabled
@@ -2033,16 +2153,19 @@ class GeoExplorer:
         ):
             triggered = dash.callback_context.triggered_id
             print("\nget_column_value_color_dict", column, triggered)
-            if column is None and triggered is None:
+            if not self.selected_files:
+                self.column = None
+                column = None
+            elif column is None and triggered is None:
                 column = self.column
             else:
                 self.column = column
-            if triggered is None:
+            if triggered is None and self.selected_files:
                 self.color_dict = self.color_dict2
 
+            print(self.column, column)
             print(self.color_dict)
             print(self.color_dict2)
-
             if not is_splitted and self.splitted:
                 colorpicker_ids, colorpicker_values_list = [], []
                 self.splitted = is_splitted
@@ -2053,7 +2176,6 @@ class GeoExplorer:
             if column is None or (
                 self.concatted_data is not None and column not in self.concatted_data
             ):
-                print("hohoho")
                 color_dict = dict(
                     zip(column_values, colorpicker_values_list, strict=True)
                 )
@@ -2242,7 +2364,7 @@ class GeoExplorer:
             Input({"type": "colorpicker", "column_value": dash.ALL}, "value"),
             Input("is-numeric", "children"),
             Input("file-removed", "children"),
-            Input("clear-table", "n_clicks"),
+            # Input("clear-table", "n_clicks"),
             Input("wms-items", "children"),
             Input("wms-checklist", "value"),
             Input("new-file-added2", "children"),
@@ -2257,7 +2379,6 @@ class GeoExplorer:
             State({"type": "colorpicker", "column_value": dash.ALL}, "id"),
             State("max_rows", "children"),
             State({"type": "delete-btn", "index": dash.ALL}, "id"),
-            # prevent_initial_call=True,
             background=False,
         )
         def add_data(
@@ -2265,7 +2386,7 @@ class GeoExplorer:
             colorpicker_values_list,
             is_numeric,
             file_removed,
-            clear_table,
+            # clear_table,
             wms,
             wms_checked,
             new_file_added2,
@@ -2395,23 +2516,45 @@ class GeoExplorer:
             Output("clicked-ids", "data"),
             Input("clicked-ids", "data"),
             Input("clear-table", "n_clicks"),
+            Input("show-all-table", "n_clicks"),
             Input({"type": "geojson", "filename": dash.ALL}, "n_clicks"),
             State({"type": "geojson", "filename": dash.ALL}, "clickData"),
             State({"type": "geojson", "filename": dash.ALL}, "id"),
             State("clicked-features", "data"),
-            prevent_initial_call=True,
+            State("map", "bounds"),
+            # prevent_initial_call=True,
         )
         def display_feature_attributes(
             clicked_ids,
             clear_table,
+            show_all,
             n_clicks,
             features,
             feature_ids,
             clicked_features,
+            bounds,
         ):
             triggered = dash.callback_context.triggered_id
+            print("display_feature_attributes", triggered)
+            print(features)
+            if triggered is None:
+                clicked_ids = list(self.selected_features)
+                clicked_features = list(self.selected_features.values())
+                return clicked_features, clicked_ids
             if triggered == "clear-table":
+                self.selected_features = {}
                 return [], []
+
+            if triggered == "show-all-table" and self.concatted_data is not None:
+                bounds = self._nested_bounds_to_bounds(bounds)
+                data = filter_by_bounds(self.concatted_data, bounds)
+                clicked_ids = list(data["_unique_id"])
+                clicked_features = data.drop("geometry").to_dicts()
+                self.selected_features = dict(
+                    zip(clicked_ids, clicked_features, strict=True)
+                )
+                return clicked_features, clicked_ids
+
             if not features or not any(features):
                 return dash.no_update, dash.no_update
 
@@ -2439,14 +2582,19 @@ class GeoExplorer:
                 )
                 clicked_features.pop(pop_index)
                 clicked_ids.pop(pop_index)
+            self.selected_features = dict(
+                zip(clicked_ids, clicked_features, strict=True)
+            )
             return clicked_features, clicked_ids
 
         @callback(
             Output("feature-table-container", "children"),
             Input("clicked-features", "data"),
             State("column-dropdown", "options"),
+            # prevent_initial_call=True,
         )
         def update_table(data, column_dropdown):
+            print("update_table", data, column_dropdown)
             if not data:
                 return "No features clicked."
             if column_dropdown is None:
@@ -2471,7 +2619,11 @@ class GeoExplorer:
                             "backgroundColor": OFFWHITE,
                             "color": "black",
                         },
-                        style_table={"overflowX": "auto"},
+                        style_table={
+                            "overflowX": "show",
+                            "overflowY": "scroll",
+                            "height": "40vh",
+                        },
                     ),
                 ]
             )
