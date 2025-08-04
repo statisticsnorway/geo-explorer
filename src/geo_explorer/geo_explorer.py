@@ -188,44 +188,31 @@ def get_colorpicker_container(color_dict: dict[str, str]) -> html.Div:
     )
 
 
-def _concat_data(
-    bounds,
-    selected_files,
-    loaded_data,
-    concatted_data,
-):
-    if concatted_data is not None and len(concatted_data):
-        concatted_data = pl.DataFrame(concatted_data, strict=False)
-    else:
-        concatted_data = None
-
+def _concat_data(explorer, bounds):
     dfs = [
         _get_df(
             path,
             bounds=bounds,
-            loaded_data=loaded_data,
-            concatted_data=concatted_data,
+            loaded_data=explorer.loaded_data,
+            concatted_data=explorer.concatted_data,
         )
-        for path in selected_files
+        for path in explorer.selected_files
     ]
     dfs = [df for sublist in dfs for df in sublist if df is not None and len(df) > 0]
     if dfs:
-        if concatted_data is not None and len(concatted_data):
-            dfs.append(concatted_data)
-        concatted_data = pl.concat(dfs, how="diagonal_relaxed")
-    return concatted_data
+        if explorer.concatted_data is not None:
+            dfs.append(explorer.concatted_data)
+        explorer.concatted_data = pl.concat(dfs, how="diagonal_relaxed")
 
 
 def _get_df(path, bounds, loaded_data, concatted_data):
     cols_to_keep = ["_unique_id", "minx", "miny", "maxx", "maxy", "geometry"]
 
     if path in loaded_data:
-        df = pl.DataFrame(loaded_data[path], strict=False)[cols_to_keep].with_columns(
-            __file_path=pl.lit(path)
-        )
+        df = loaded_data[path][cols_to_keep].with_columns(__file_path=pl.lit(path))
         return [df]
 
-    if concatted_data is not None:
+    if concatted_data is not None and len(concatted_data):
         df = concatted_data[["__file_path"]].filter(
             pl.col("__file_path").str.contains(path)
         )
@@ -265,8 +252,9 @@ def _add_data_one_path(
     print([len(x) for x in loaded_data.values()])
     ns = Namespace("onEachFeatureToggleHighlight", "default")
     data = []
-    if concatted_data is None or not len(concatted_data):
+    if concatted_data is None:
         return [None], None, False
+    print(concatted_data["__file_path"])
     df = concatted_data.filter(pl.col("__file_path").str.contains(path))
     if not len(df):
         return [None], None, False
@@ -291,7 +279,7 @@ def _add_data_one_path(
 
     # df = df.drop(columns=["_file_bounds"])
     df = df.to_pandas()
-    df["geometry"] = shapely.from_wkt(df["geometry"])
+    df["geometry"] = shapely.from_wkb(df["geometry"])
     df = GeoDataFrame(df, crs=4326)
     df = _simplify_geometries(df, zoom, max_rows)
 
@@ -468,9 +456,8 @@ def _get_unique_id(df, i):
     return (pd.Series(range(len(df)), index=df.index) / divider) + i
 
 
-def _read_files(explorer, paths: list[str], loaded_data) -> None:
+def _read_files(explorer, paths: list[str]) -> None:
     read_func = partial(_read_and_to_4326, file_system=explorer.file_system)
-
     executor_obj = ThreadPoolExecutor if len(paths) <= 3 else ProcessPoolExecutor
     with executor_obj(len(paths)) as executor:
         more_data = list(executor.map(read_func, paths))
@@ -482,13 +469,12 @@ def _read_files(explorer, paths: list[str], loaded_data) -> None:
                 except Exception:
                     df = df.drop(col, axis=1)
         df["__file_path"] = path
-        df["_unique_id"] = _get_unique_id(df, len(loaded_data))
+        df["_unique_id"] = _get_unique_id(df, len(explorer.loaded_data))
         if explorer.splitted:
             df["split_index"] = [f"{_get_name(path)} {i}" for i in range(len(df))]
         # df = pl.from_pandas(df.drop(columns=[df.geometry.name]))
-        df = pl.from_pandas(df.assign(geometry=df.geometry.to_wkt()))
-        loaded_data[path] = df.to_dict(as_series=False)
-    return loaded_data
+        df = pl.from_pandas(df.assign(geometry=df.geometry.to_wkb()))
+        explorer.loaded_data[path] = df
 
 
 def _standardize_path(path: str | PurePosixPath) -> str:
@@ -1119,8 +1105,6 @@ class GeoExplorer:
                 html.Div(id="data-was-concatted", style={"display": "none"}),
                 html.Div(id="data-was-changed", style={"display": "none"}),
                 dcc.Store(id="order-was-changed", data=None),
-                dcc.Store(id="concatted-data", data={}),
-                dcc.Store(id="loaded-data", data={}),
                 html.Div(id="new-data-read", style={"display": "none"}),
                 html.Div(id="max_rows_was_changed", style={"display": "none"}),
                 html.Div(id="file-removed", style={"display": "none"}),
@@ -1446,15 +1430,13 @@ class GeoExplorer:
 
         @callback(
             Output("file-removed", "children"),
-            Output("loaded-data", "data", allow_duplicate=True),
             Input({"type": "delete-btn", "index": dash.ALL}, "n_clicks"),
             State({"type": "delete-btn", "index": dash.ALL}, "id"),
-            State("loaded-data", "data"),
             prevent_initial_call=True,
         )
-        def delete_item(n_clicks_list, delete_ids, loaded_data):
+        def delete_item(n_clicks_list, delete_ids):
             if not any(n_clicks_list):
-                return dash.no_update, dash.no_update
+                return dash.no_update
             triggered = dash.callback_context.triggered_id
             if triggered and triggered["type"] == "delete-btn":
                 triggered_index = triggered["index"]
@@ -1468,13 +1450,13 @@ class GeoExplorer:
                 path_to_remove = delete_ids[index]["index"]
                 if path_to_remove in self.selected_files:
                     self.selected_files.pop(path_to_remove)
-                for path in list(loaded_data):
+                for path in list(self.loaded_data):
                     if path_to_remove in path:
-                        del loaded_data[path]
+                        del self.loaded_data[path]
                 self.bounds_series = self.bounds_series[
                     lambda x: ~x.index.str.contains(path_to_remove)
                 ]
-            return 1, loaded_data
+            return 1
 
         @callback(
             Output("splitter", "n_clicks"),
@@ -1484,10 +1466,9 @@ class GeoExplorer:
             Input("splitter", "n_clicks"),
             Input("column-dropdown", "value"),
             # Input("remove-buttons", "children"),
-            State("concatted-data", "data"),
         )
-        def is_splitted(n_clicks: int, column, concatted_data):
-            if concatted_data is None:
+        def is_splitted(n_clicks: int, column):
+            if self.concatted_data is None:
                 return dash.no_update, dash.no_update, dash.no_update, dash.no_update
             triggered = dash.callback_context.triggered_id
             is_splitted: bool = n_clicks % 2 == 1 and not (
@@ -1512,7 +1493,6 @@ class GeoExplorer:
             Input({"type": "load-parquet", "index": dash.ALL}, "n_clicks"),
             Input("is_splitted", "data"),
             State({"type": "file-path", "index": dash.ALL}, "id"),
-            # State("loaded-data", "data"),
             # prevent_initial_call=True,
         )
         def append_path(load_parquet, is_splitted, ids):
@@ -1522,7 +1502,7 @@ class GeoExplorer:
                     return dash.no_update, dash.no_update
                 self.splitted = True
                 for key, df in self.loaded_data.items():
-                    loaded_data[key] = loaded_data[key].with_columns(
+                    self.loaded_data[key] = self.loaded_data[key].with_columns(
                         split_index=[f"{_get_name(key)} {i}" for i in range(len(df))]
                     )
                 return 1, {"display": "none"}
@@ -1570,18 +1550,14 @@ class GeoExplorer:
         @callback(
             Output("new-data-read", "children"),
             Output("currently-in-bounds", "children"),
-            Output("loaded-data", "data", allow_duplicate=True),
             Input("debounced_bounds", "value"),
             Input("new-file-added", "children"),
             Input("file-removed", "children"),
             State("bounds_per_feature", "data"),
-            State("loaded-data", "data"),
-            prevent_initial_call=True,
-            background=True,
+            # prevent_initial_call=True,
+            background=False,
         )
-        def get_files_in_bounds(
-            bounds, file_added, file_removed, bounds_per_feature, loaded_data
-        ):
+        def get_files_in_bounds(bounds, file_added, file_removed, bounds_per_feature):
             bounds = json.loads(bounds)
 
             t = perf_counter()
@@ -1589,14 +1565,10 @@ class GeoExplorer:
             files_in_bounds = sg.sfilter(self.bounds_series, box)
             currently_in_bounds = set(files_in_bounds.index)
             missing = list(
-                {
-                    path
-                    for path in files_in_bounds.index
-                    if path not in (loaded_data or [])
-                }
+                {path for path in files_in_bounds.index if path not in self.loaded_data}
             )
             if missing:
-                loaded_data = _read_files(self, missing, loaded_data)
+                _read_files(self, missing)
             # for path in missing:
             #     df = self.loaded_data[path]
             # bounds_per_feature |= {
@@ -1616,11 +1588,7 @@ class GeoExplorer:
                 len(missing),
                 len(currently_in_bounds),
             )
-            return (
-                bool(missing),
-                list(currently_in_bounds),
-                loaded_data,
-            )
+            return bool(missing), list(currently_in_bounds)
             if missing:
                 return 1
             else:
@@ -1631,13 +1599,12 @@ class GeoExplorer:
             Output("column-dropdown", "options"),
             Input("currently-in-bounds2", "children"),
             State("currently-in-bounds", "children"),
-            State("loaded-data", "data"),
             prevent_initial_call=True,
         )
-        def update_column_dropdown_options(_, currently_in_bounds, loaded_data):
+        def update_column_dropdown_options(_, currently_in_bounds):
             if not currently_in_bounds:
                 return dash.no_update
-            return self._get_column_dropdown_options(currently_in_bounds, loaded_data)
+            return self._get_column_dropdown_options(currently_in_bounds)
 
         @callback(
             Output("hide-wms-div", "style"),
@@ -1802,28 +1769,26 @@ class GeoExplorer:
         @callback(
             Output("data-was-concatted", "children"),
             Output("data-was-changed", "children"),
-            Output("concatted-data", "data"),
             Input("new-data-read", "children"),
             State("debounced_bounds", "value"),
-            State("concatted-data", "data"),
-            State("loaded-data", "data"),
             prevent_initial_call=True,
-            background=True,
+            background=False,
         )
-        def concat_data(new_data_read, bounds, concatted_data, loaded_data):
+        def concat_data(new_data_read, bounds):
             print("concat_data")
             t = perf_counter()
             if not new_data_read:
-                return dash.no_update, 1, concatted_data
+                return dash.no_update, 1
 
             bounds = json.loads(bounds)
             bounds = self._nested_bounds_to_bounds(bounds)
 
-            concatted_data = _concat_data(
-                bounds, self.selected_files, loaded_data, concatted_data
-            )
+            _concat_data(self, bounds)
             print("concat_data finished after", perf_counter() - t)
-            return 1, 1, concatted_data.to_dict(as_series=False)
+            t = perf_counter()
+            self.concatted_data.to_dict()
+            print("to_json finished after", perf_counter() - t)
+            return 1, 1
 
         @callback(
             Output("colorpicker-container", "children"),
@@ -1836,7 +1801,6 @@ class GeoExplorer:
             Input("k", "value"),
             Input("force-categorical", "n_clicks"),
             Input("data-was-concatted", "children"),
-            Input("concatted-data", "data"),
             State("debounced_bounds", "value"),
             State({"type": "colorpicker", "column_value": dash.ALL}, "value"),
             State({"type": "colorpicker", "column_value": dash.ALL}, "id"),
@@ -1849,7 +1813,6 @@ class GeoExplorer:
             k: int,
             force_categorical_clicks: int,
             data_was_concatted,
-            concatted_data,
             bounds,
             colorpicker_values_list,
             colorpicker_ids,
@@ -1866,11 +1829,8 @@ class GeoExplorer:
             column_values = [x["column_value"] for x in colorpicker_ids]
             default_colors = list(sg.maps.map._CATEGORICAL_CMAP.values())
 
-            if concatted_data is not None:
-                concatted_data = pl.DataFrame(concatted_data, strict=False)
-
             if column is None or (
-                concatted_data is not None and column not in concatted_data
+                self.concatted_data is not None and column not in self.concatted_data
             ):
                 color_dict = dict(
                     zip(column_values, colorpicker_values_list, strict=True)
@@ -1925,7 +1885,7 @@ class GeoExplorer:
 
             values = (
                 filter_by_bounds(
-                    concatted_data[[column, "minx", "miny", "maxx", "maxy"]],
+                    self.concatted_data[[column, "minx", "miny", "maxx", "maxy"]],
                     bounds,
                 )[column]
                 .drop_nans()
@@ -1956,7 +1916,7 @@ class GeoExplorer:
                 force_categorical_clicks or 0
             ) % 2 == 0 and pd.api.types.is_numeric_dtype(values)
             if is_numeric:
-                series = concatted_data[column].drop_nans()
+                series = self.concatted_data[column].drop_nans()
                 if len(series.drop_nans().unique()) <= k:
                     bins = list(series.drop_nans().unique())
                 else:
@@ -2068,10 +2028,8 @@ class GeoExplorer:
             State({"type": "colorpicker", "column_value": dash.ALL}, "id"),
             State("max_rows", "children"),
             State({"type": "delete-btn", "index": dash.ALL}, "id"),
-            State("loaded-data", "data"),
-            State("concatted-data", "data"),
             # prevent_initial_call=True,
-            background=True,
+            background=False,
         )
         def add_data(
             currently_in_bounds2,
@@ -2093,8 +2051,6 @@ class GeoExplorer:
             colorpicker_ids,
             max_rows_component,
             delete_buttons,
-            loaded_data,
-            concatted_data,
         ):
             print("add_data")
             t = perf_counter()
@@ -2131,14 +2087,12 @@ class GeoExplorer:
             if is_numeric:
                 color_dict = {i: color for i, color in enumerate(color_dict.values())}
 
-            concatted_data = pl.DataFrame(concatted_data, strict=False)
-
             add_data_func = partial(
                 _add_data_one_path,
-                loaded_data=loaded_data,
+                loaded_data=self.loaded_data,
                 max_rows=self.max_rows,
                 currently_in_bounds=currently_in_bounds,
-                concatted_data=concatted_data,
+                concatted_data=self.concatted_data,
                 nan_color=self.nan_color,
                 bounds=bounds,
                 column=column,
@@ -2148,13 +2102,44 @@ class GeoExplorer:
                 bins=bins,
                 alpha=self.alpha,
             )
+            # get_df_func = partial(
+            #     _get_df,
+            #     loaded_data=self.loaded_data,
+            #     concatted_data=self.concatted_data,
+            # )
+            # print("add_data000", perf_counter() - t)
+            # print(len(self.loaded_data))
+            # print(len(self.concatted_data))
+
+            # with ProcessPoolExecutor() as executor:
+            #     dfs: list[GeoDataFrame | None] = list(
+            #         executor.map(get_df_func, list(self.selected_files))
+            #     )
+            # for df, path in zip(dfs, self.selected_files, strict=True):
+            #     if df is None:
+            #         continue
+            #     assert df["_unique_id"].is_unique
+            #     self.concatted_data[path] = df
+            #     print("\n\nhei", path)
+            #     print(self.concatted_data[path])
 
             print("add_data111", perf_counter() - t)
 
+            # with ProcessPoolExecutor() as executor:
+            #     results = list(
+            #         executor.map(
+            #             add_data_func,
+            #             list(self.selected_files),
+            #             list(self.selected_files.values()),
+            #         )
+            #     )
             results = [add_data_func(path) for path in self.selected_files]
             print("add_data2222", perf_counter() - t)
 
             data = list(itertools.chain.from_iterable([x[0] for x in results if x[0]]))
+            # dissolved = list(
+            #     itertools.chain.from_iterable([x[4] for x in results if x[4]])
+            # )
             out_alert = [x[1] for x in results if x[1]]
             rows_are_not_hidden = not any(x[2] for x in results)
 
@@ -2170,13 +2155,13 @@ class GeoExplorer:
                 max_rows_component,
             )
 
-        # @callback(
-        #     Input("alert", "children"),
-        #     State("debounced_bounds", "value"),
-        #     State("map", "zoom"),
-        #     prevent_initial_call=True,
-        #     background=True,
-        # )
+        @callback(
+            Input("alert", "children"),
+            State("debounced_bounds", "value"),
+            State("map", "zoom"),
+            prevent_initial_call=True,
+            background=False,
+        )
         def read_and_concat_neighbor_data(_, bounds, zoom):
             print("read_and_concat_neighbor_data", bounds, zoom)
             t = perf_counter()
@@ -2200,7 +2185,7 @@ class GeoExplorer:
                 "read_and_concat_neighbor_data finished",
                 perf_counter() - t,
                 len(self.loaded_data),
-                # len(self.concatted_data) if self.concatted_data is not None else 0,
+                len(self.concatted_data) if self.concatted_data is not None else 0,
             )
 
         @callback(
@@ -2259,13 +2244,14 @@ class GeoExplorer:
             Output("feature-table-container", "children"),
             Input("clicked-features", "data"),
             State("column-dropdown", "options"),
-            State("loaded-data", "data"),
         )
-        def update_table(data, column_dropdown, loaded_data):
+        def update_table(data, column_dropdown):
             if not data:
                 return "No features clicked."
             if column_dropdown is None:
-                column_dropdown = self._get_column_dropdown_options(list(loaded_data))
+                column_dropdown = self._get_column_dropdown_options(
+                    list(self.loaded_data)
+                )
             all_columns = {x["label"] for x in column_dropdown}
             if not self.splitted:
                 all_columns = all_columns.difference({"split_index"})
@@ -2308,10 +2294,10 @@ class GeoExplorer:
             Input("clicked-ids", "data"),
         )
 
-    def _get_column_dropdown_options(self, currently_in_bounds, loaded_data):
+    def _get_column_dropdown_options(self, currently_in_bounds):
         columns = set(
             itertools.chain.from_iterable(
-                set(loaded_data[path]).difference(
+                set(self.loaded_data[path].columns).difference(
                     {"__file_path", "_unique_id", "minx", "miny", "maxx", "maxy"}
                 )
                 for path in currently_in_bounds
