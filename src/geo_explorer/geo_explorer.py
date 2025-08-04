@@ -1,3 +1,4 @@
+from typing import Any
 import re
 from time import perf_counter
 import threading
@@ -206,10 +207,10 @@ def _concat_data(explorer, bounds):
 
 
 def _get_df(path, bounds, loaded_data, concatted_data):
-    cols_to_keep = ["_unique_id", "minx", "miny", "maxx", "maxy", "geometry"]
+    # cols_to_keep = ["_unique_id", "minx", "miny", "maxx", "maxy", "geometry"]
 
     if path in loaded_data:
-        df = loaded_data[path][cols_to_keep].with_columns(__file_path=pl.lit(path))
+        df = loaded_data[path].with_columns(__file_path=pl.lit(path))
         return [df]
 
     if concatted_data is not None and len(concatted_data):
@@ -219,13 +220,13 @@ def _get_df(path, bounds, loaded_data, concatted_data):
         paths_loaded = set(df["__file_path"])
 
         matches = [
-            df[cols_to_keep].with_columns(__file_path=pl.lit(key))
+            df.with_columns(__file_path=pl.lit(key))
             for key, df in loaded_data.items()
             if path in key and key not in paths_loaded  # and intersects(df)
         ]
     else:
         matches = [
-            df[cols_to_keep].with_columns(__file_path=pl.lit(key))
+            df.with_columns(__file_path=pl.lit(key))
             for key, df in loaded_data.items()
             if path in key
         ]
@@ -286,6 +287,8 @@ def _add_data_one_path(
 
     if column is not None and column in df and not is_numeric:
         df["_color"] = df[column].map(color_dict)
+    elif column is not None and bins is None:
+        df["_color"] = nan_color
     elif column is not None and column in df:
         notnas = df[df[column].notna()]
         conditions = [
@@ -423,7 +426,7 @@ def _add_data_one_path(
 
 def polars_isna(df):
     try:
-        return df.is_nan()
+        return (df.is_nan()) | (df.is_null())
     except pl.exceptions.InvalidOperationError:
         return df.is_null()
 
@@ -966,7 +969,7 @@ class GeoExplorer:
                                 dbc.Row(
                                     [
                                         html.Div(html.B("Layers")),
-                                        html.Div(id="remove-buttons"),
+                                        dbc.Col(id="remove-buttons"),
                                     ],
                                     style={
                                         "display": "flex",
@@ -1123,7 +1126,7 @@ class GeoExplorer:
                 dcc.Store(id="clicked-ids", data=self.selected_features),
                 dcc.Store(id="current-path", data=self.start_dir),
                 dcc.Interval(
-                    id="interval-component", interval=3000, n_intervals=0, disabled=True
+                    id="interval-component", interval=2000, n_intervals=0, disabled=True
                 ),
             ],
             fluid=True,
@@ -1363,11 +1366,19 @@ class GeoExplorer:
             # Input("new-file-added", "children"),
             Input("alert", "children"),
             Input("file-removed", "children"),
+            Input({"type": "filter", "index": dash.ALL}, "value"),
+            Input({"type": "filter", "index": dash.ALL}, "id"),
             prevent_initial_call=True,
         )
-        def render_items(new_file_added, file_removed):
+        def render_items(new_file_added, file_removed, filter_functions, filter_ids):
+            def get_filter_function_if_any(path):
+                try:
+                    return get_index(filter_functions, filter_ids, path)
+                except ValueError:
+                    return None
+
             return [
-                html.Div(
+                dbc.Row(
                     [
                         dbc.Col(
                             [
@@ -1398,29 +1409,34 @@ class GeoExplorer:
                                 "marginRight": "10px",
                             },
                         ),
-                        html.Span(path),
-                        dcc.Input(
-                            id={
-                                "type": "filter",
-                                "index": path,
-                            },
-                            debounce=3,
-
+                        dbc.Col(html.Span(path)),
+                        dbc.Col(
+                            html.Button(
+                                "❌",
+                                id={
+                                    "type": "delete-btn",
+                                    "index": path,
+                                },
+                                n_clicks=0,
+                                style={
+                                    "color": "red",
+                                    "border": "none",
+                                    "background": "none",
+                                    "cursor": "pointer",
+                                    "marginLeft": "auto",
+                                },
+                            )
                         ),
-                        html.Button(
-                            "❌",
-                            id={
-                                "type": "delete-btn",
-                                "index": path,
-                            },
-                            n_clicks=0,
-                            style={
-                                "color": "red",
-                                "border": "none",
-                                "background": "none",
-                                "cursor": "pointer",
-                                "marginLeft": "auto",
-                            },
+                        dbc.Row(
+                            dcc.Input(
+                                get_filter_function_if_any(path),
+                                placeholder="Filter function...",
+                                id={
+                                    "type": "filter",
+                                    "index": path,
+                                },
+                                debounce=3,
+                            ),
                         ),
                     ],
                     style={
@@ -1592,7 +1608,7 @@ class GeoExplorer:
             np.int16(-15928),
         ]
 
-        # så bytta så ndvi er nr 2...
+        # under bytta så ndvi er nr 2...
         [
             np.int16(22917),
             np.int16(0),
@@ -1618,10 +1634,30 @@ class GeoExplorer:
             np.int16(-15928),
         ]
 
-        [np.int16(22917), np.int16(0), np.int16(15258), np.int16(18354), np.int16(18358), np.int16(21291)]
-        ['20190611', '20190616', '20190711', '20190713', '20190805', '20190827']
-        [np.int16(-2730), np.int16(29300), np.int16(-8041), np.int16(-9894), np.int16(-16709)]
-        [np.int16(-1927), np.int16(0), np.int16(27408), np.int16(1496), np.int16(7736), np.int16(-15928)]
+        [
+            np.int16(22917),
+            np.int16(0),
+            np.int16(15258),
+            np.int16(18354),
+            np.int16(18358),
+            np.int16(21291),
+        ]
+        ["20190611", "20190616", "20190711", "20190713", "20190805", "20190827"]
+        [
+            np.int16(-2730),
+            np.int16(29300),
+            np.int16(-8041),
+            np.int16(-9894),
+            np.int16(-16709),
+        ]
+        [
+            np.int16(-1927),
+            np.int16(0),
+            np.int16(27408),
+            np.int16(1496),
+            np.int16(7736),
+            np.int16(-15928),
+        ]
 
         @callback(
             Output("new-data-read", "children"),
@@ -1810,39 +1846,65 @@ class GeoExplorer:
             Output("alert2", "children"),
             Input({"type": "filter", "index": dash.ALL}, "value"),
             Input({"type": "filter", "index": dash.ALL}, "id"),
+            State("debounced_bounds", "value"),
             prevent_initial_call=True,
         )
-        def filter_data(filter_functions: str, ids):
-            if not filter_functions or not any(filter_functions):
+        def filter_data(filter_functions: list[str], filter_ids: list[str], bounds):
+            if not filter_functions:
                 return dash.no_update
             triggered = dash.callback_context.triggered_id
+
             path = triggered["index"]
-            i = ids[ids.index(path)]
-            filter_function =             if not filter_functions or not any(filter_functions):
-[i]
+            filter_function = get_index(filter_functions, filter_ids, path)
+            if filter_function is None:
+                # no_update only if None, not if empty string (meaning filter has been filled, then cleared)
+                return dash.no_update
+
+            filter_function = filter_function.strip()
             try:
                 filter_function = eval(filter_function)
-            except Exception as e:
-                print(e)
-                print(type(filter_function))
-                print(filter_function)
-            this_data = self.concatted_data.filter(
-                pl.col("__file_path").str.contains(path)
-            )
+            except Exception:
+                pass
+
             other_data = self.concatted_data.filter(
                 pl.col("__file_path").str.contains(path) == False
             )
-            try:
-                this_data = this_data.filter(filter_function)
-            except Exception as e:
-                return dbc.Alert(
-                    f"{type(e)}: {str(e)}",
-                    color="warning",
-                    dismissable=True,
-                )
+            # constructing dataset to be filtered from the full dataset, in case it has already been filtered on another query
+            bounds = json.loads(bounds)
+            bounds = self._nested_bounds_to_bounds(bounds)
+            this_data = pl.concat(
+                _get_df(path, bounds, self.loaded_data, self.concatted_data)
+            )
+
+            out_alert = None
+            if filter_function is not None and not (
+                isinstance(filter_function, str) and filter_function == ""
+            ):
+                try:
+                    if callable(filter_function):
+                        filter_function = filter_function(this_data)
+                    this_data = this_data.filter(filter_function)
+                except Exception as e:
+                    try:
+                        this_data = this_data.to_pandas()
+                        if callable(filter_function):
+                            filter_function = filter_function(this_data)
+                        this_data = pl.DataFrame(this_data.loc[filter_function])
+                    except Exception as e2:
+                        out_alert = dbc.Alert(
+                            (
+                                f"Filter function failed with polars ({type(e).__name__}: {str(e)}) "
+                                f"and pandas: ({type(e2).__name__}: {str(e2)})"
+                            ),
+                            color="warning",
+                            dismissable=True,
+                        )
+
             self.concatted_data = pl.concat(
                 [this_data, other_data], how="diagonal_relaxed"
             )
+
+            return out_alert
 
         @callback(
             Output("new-file-added2", "children"),
@@ -1927,6 +1989,7 @@ class GeoExplorer:
             Input("k", "value"),
             Input("force-categorical", "n_clicks"),
             Input("data-was-concatted", "children"),
+            Input("alert2", "children"),
             State("debounced_bounds", "value"),
             State({"type": "colorpicker", "column_value": dash.ALL}, "value"),
             State({"type": "colorpicker", "column_value": dash.ALL}, "id"),
@@ -1939,6 +2002,7 @@ class GeoExplorer:
             k: int,
             force_categorical_clicks: int,
             data_was_concatted,
+            alert2,
             bounds,
             colorpicker_values_list,
             colorpicker_ids,
@@ -1958,6 +2022,7 @@ class GeoExplorer:
             if column is None or (
                 self.concatted_data is not None and column not in self.concatted_data
             ):
+                print("hohoho")
                 color_dict = dict(
                     zip(column_values, colorpicker_values_list, strict=True)
                 )
@@ -1968,7 +2033,7 @@ class GeoExplorer:
                 color_dict = {
                     key: color
                     for key, color in color_dict.items()
-                    if any(key in x for x in self.selected_files)
+                    if any(str(key) in x for x in self.selected_files)
                 }
 
                 default_colors = [
@@ -2009,16 +2074,13 @@ class GeoExplorer:
 
             bounds = self._nested_bounds_to_bounds(bounds)
 
-            values = (
-                filter_by_bounds(
-                    self.concatted_data[[column, "minx", "miny", "maxx", "maxy"]],
-                    bounds,
-                )[column]
-                .drop_nans()
-                .drop_nulls()
-            )
+            values = filter_by_bounds(
+                self.concatted_data[[column, "minx", "miny", "maxx", "maxy"]],
+                bounds,
+            )[column]
+            values_no_nans = values.drop_nans().drop_nulls()
 
-            if not pd.api.types.is_numeric_dtype(values):
+            if not values_no_nans.dtype.is_numeric():
                 force_categorical_button = None
             elif (force_categorical_clicks or 0) % 2 == 0:
                 force_categorical_button = html.Button(
@@ -2040,13 +2102,13 @@ class GeoExplorer:
                 )
             is_numeric = (
                 force_categorical_clicks or 0
-            ) % 2 == 0 and pd.api.types.is_numeric_dtype(values)
-            if is_numeric:
-                series = self.concatted_data[column].drop_nans()
-                if len(series.drop_nans().unique()) <= k:
-                    bins = list(series.drop_nans().unique())
+            ) % 2 == 0 and values_no_nans.dtype.is_numeric()
+
+            if is_numeric and len(values_no_nans):
+                if len(values_no_nans.unique()) <= k:
+                    bins = list(values_no_nans.unique())
                 else:
-                    bins = jenks_breaks(series, n_classes=k)
+                    bins = jenks_breaks(values_no_nans.to_numpy(), n_classes=k)
 
                 if column_values is not None and triggered in [
                     "map",
@@ -2064,14 +2126,18 @@ class GeoExplorer:
                     ]
                     rounded_bins = [round(x, 1) for x in bins]
                     color_dict = {
-                        f"{round(min(series), 1)} - {rounded_bins[0]}": colors_[0],
+                        f"{round(min(values_no_nans), 1)} - {rounded_bins[0]}": colors_[
+                            0
+                        ],
                         **{
                             f"{start} - {stop}": colors_[i + 1]
                             for i, (start, stop) in enumerate(
                                 itertools.pairwise(rounded_bins[1:-1])
                             )
                         },
-                        f"{rounded_bins[-1]} - {round(max(series), 1)}": colors_[-1],
+                        f"{rounded_bins[-1]} - {round(max(values_no_nans), 1)}": colors_[
+                            -1
+                        ],
                     }
             else:
                 # make sure the existing color scheme is not altered
@@ -2085,7 +2151,7 @@ class GeoExplorer:
                 else:
                     color_dict = {}
 
-                unique_values = values.unique()
+                unique_values = values_no_nans.unique()
                 new_values = [
                     value for value in unique_values if value not in column_values
                 ]
@@ -2104,6 +2170,8 @@ class GeoExplorer:
                 color_dict = color_dict | dict(zip(new_values, colors, strict=True))
                 bins = None
 
+            print("\n\ncolor_dict")
+            print(color_dict)
             if color_dict.get(self.nan_label, self.nan_color) != self.nan_color:
                 self.nan_color = color_dict[self.nan_label]
 
@@ -2477,3 +2545,8 @@ class GeoExplorer:
             ]
         )
         return f"{self.__class__.__name__}({txt})"
+
+
+def get_index(values: list[Any], ids: list[Any], index: Any):
+    i = [x["index"] for x in ids].index(index)
+    return values[i]
