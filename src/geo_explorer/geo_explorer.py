@@ -777,6 +777,9 @@ class GeoExplorer:
                     html.Div(id="alert"),
                 ),
                 dbc.Row(
+                    html.Div(id="alert2"),
+                ),
+                dbc.Row(
                     html.Div(id="new-file-added"),
                 ),
                 dbc.Row(
@@ -1396,6 +1399,14 @@ class GeoExplorer:
                             },
                         ),
                         html.Span(path),
+                        dcc.Input(
+                            id={
+                                "type": "filter",
+                                "index": path,
+                            },
+                            debounce=3,
+
+                        ),
                         html.Button(
                             "❌",
                             id={
@@ -1581,6 +1592,37 @@ class GeoExplorer:
             np.int16(-15928),
         ]
 
+        # så bytta så ndvi er nr 2...
+        [
+            np.int16(22917),
+            np.int16(0),
+            np.int16(15258),
+            np.int16(18354),
+            np.int16(18358),
+            np.int16(21291),
+        ]
+        ["20190611", "20190616", "20190711", "20190713", "20190805", "20190827"]
+        [
+            np.int16(-2730),
+            np.int16(29300),
+            np.int16(-8041),
+            np.int16(-9894),
+            np.int16(-16709),
+        ]
+        [
+            np.int16(-1927),
+            np.int16(0),
+            np.int16(27408),
+            np.int16(1496),
+            np.int16(7736),
+            np.int16(-15928),
+        ]
+
+        [np.int16(22917), np.int16(0), np.int16(15258), np.int16(18354), np.int16(18358), np.int16(21291)]
+        ['20190611', '20190616', '20190711', '20190713', '20190805', '20190827']
+        [np.int16(-2730), np.int16(29300), np.int16(-8041), np.int16(-9894), np.int16(-16709)]
+        [np.int16(-1927), np.int16(0), np.int16(27408), np.int16(1496), np.int16(7736), np.int16(-15928)]
+
         @callback(
             Output("new-data-read", "children"),
             Output("skip_to_add_data", "children"),
@@ -1613,6 +1655,7 @@ class GeoExplorer:
                     }
                 )
             if missing:
+                # while cumsum < 100_000:
                 if len(missing) > 20:
                     _read_files(self, missing[:20])
                     missing = missing[20:]
@@ -1762,6 +1805,44 @@ class GeoExplorer:
                 )
 
             return items
+
+        @callback(
+            Output("alert2", "children"),
+            Input({"type": "filter", "index": dash.ALL}, "value"),
+            Input({"type": "filter", "index": dash.ALL}, "id"),
+            prevent_initial_call=True,
+        )
+        def filter_data(filter_functions: str, ids):
+            if not filter_functions or not any(filter_functions):
+                return dash.no_update
+            triggered = dash.callback_context.triggered_id
+            path = triggered["index"]
+            i = ids[ids.index(path)]
+            filter_function =             if not filter_functions or not any(filter_functions):
+[i]
+            try:
+                filter_function = eval(filter_function)
+            except Exception as e:
+                print(e)
+                print(type(filter_function))
+                print(filter_function)
+            this_data = self.concatted_data.filter(
+                pl.col("__file_path").str.contains(path)
+            )
+            other_data = self.concatted_data.filter(
+                pl.col("__file_path").str.contains(path) == False
+            )
+            try:
+                this_data = this_data.filter(filter_function)
+            except Exception as e:
+                return dbc.Alert(
+                    f"{type(e)}: {str(e)}",
+                    color="warning",
+                    dismissable=True,
+                )
+            self.concatted_data = pl.concat(
+                [this_data, other_data], how="diagonal_relaxed"
+            )
 
         @callback(
             Output("new-file-added2", "children"),
