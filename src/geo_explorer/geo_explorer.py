@@ -188,6 +188,7 @@ def get_colorpicker_container(color_dict: dict[str, str]) -> html.Div:
 def _get_df(path, loaded_data, concatted_data, override: bool = False):
     # cols_to_keep = ["_unique_id", "minx", "miny", "maxx", "maxy", "geometry"]
 
+    t = perf_counter()
     if (
         path in loaded_data
         and not override
@@ -197,22 +198,63 @@ def _get_df(path, loaded_data, concatted_data, override: bool = False):
     ):
         # data already loaded and filtered
         return []
-    elif path in loaded_data:
+    if path in loaded_data:
         df = loaded_data[path].with_columns(__file_path=pl.lit(path))
         return [df]
 
     if concatted_data is not None and len(concatted_data):
-        df = concatted_data[["__file_path"]].filter(
-            pl.col("__file_path").str.contains(path)
-        )
-        paths_loaded = set(df["__file_path"])
+        print("_get_df", 222)
+        # df = concatted_data[["__file_path"]].filter(
+        #     pl.col("__file_path").str.contains(path)
+        # )
+        # paths_loaded = df["__file_path"].unique()
+        # t = perf_counter()
+        # df = concatted_data["__file_path"].unique()
+        # print(perf_counter() - t)
+        # t = perf_counter()
+        # paths_loaded = {x for x in concatted_data["__file_path"].unique() if path in x}
+        # print(perf_counter() - t)
+        # print(len(paths_loaded))
+        # t = perf_counter()
+        # df = concatted_data["__file_path"]
+        # paths_loaded = df.filter(df.str.contains(path)).unique()
+        # print(perf_counter() - t)
+        # print(len(paths_loaded))
+
+        paths_loaded = {x for x in concatted_data["__file_path"].unique() if path in x}
+        # print("paths_loaded")
+        # print(perf_counter() - t)
+        # for df, key in loaded_data.items():
+        #     try:
+        #         (path in key and (override or key not in paths_loaded))
+        #     except Exception as e:
+        #         print("\n\n\n\n\n\n\n\n\n\n\n", e, path, key)
+        #         print(type(path), type(key))
+        #         print()
+        #         print()
+        #         print()
+        #         print()
+        # print(
+        #     [
+        #         key
+        #         for key in loaded_data.items()
+        #         if path in key and (override or key not in paths_loaded)
+        #     ]
+        # )
 
         matches = [
-            df.with_columns(__file_path=pl.lit(key))
-            for key, df in loaded_data.items()
+            key
+            for key in loaded_data
             if path in key and (override or key not in paths_loaded)
         ]
+        if matches:
+            matches = [
+                loaded_data[key].with_columns(__file_path=pl.lit(key))
+                for key in loaded_data
+            ]
+
     else:
+        print("_get_df", 333)
         matches = [
             df.with_columns(__file_path=pl.lit(key))
             for key, df in loaded_data.items()
@@ -266,11 +308,11 @@ def _add_data_one_path(
     # debug_print("dissolve ferdig etter", perf_counter() - t)
 
     # df = df.drop(columns=["_file_bounds"])
+    if len(df) > max_rows:
+        df = df.sample(max_rows)
     df = df.to_pandas()
     df["geometry"] = shapely.from_wkb(df["geometry"])
     df = GeoDataFrame(df, crs=4326)
-    if len(df) > max_rows:
-        df = df.sample(max_rows)
 
     debug_print(df)
 
@@ -1827,19 +1869,21 @@ class GeoExplorer:
                     }
                 )
             if missing:
-                to_read = 0
-                cumsum = 0
-                files_and_sizes = {x["name"]: x["size"] for x in file_data_dict}
-                for path in missing:
-                    if path in files_and_sizes:
-                        size = files_and_sizes[path]
-                    else:
-                        size = self.file_system.info(path)["size"]
-                    cumsum += size
-                    to_read += 1
-                    # read max 1 GB
-                    if cumsum > 1_000_000_000 or to_read > cpu_count() * 2:
-                        break
+                if len(missing) > 10:
+                    to_read = 0
+                    cumsum = 0
+                    files_and_sizes = {x["name"]: x["size"] for x in file_data_dict}
+                    for path in missing:
+                        if path in files_and_sizes:
+                            size = files_and_sizes[path]
+                        else:
+                            size = self.file_system.info(path)["size"]
+                        cumsum += size
+                        to_read += 1
+                        if cumsum > 500_000_000 or to_read > cpu_count() * 2:
+                            break
+                else:
+                    to_read = min(10, len(missing))
                 print("to_read", to_read, len(missing))
                 if len(missing) > to_read:
                     _read_files(self, missing[:to_read])
@@ -2033,10 +2077,9 @@ class GeoExplorer:
                     this_data = this_data.filter(filter_function)
                 except Exception as e:
                     try:
-                        this_data = this_data.to_pandas()
-                        if callable(filter_function):
-                            filter_function = filter_function(this_data)
-                        this_data = pl.DataFrame(this_data.loc[filter_function])
+                        this_data = pl.DataFrame(
+                            this_data.to_pandas().loc[filter_function]
+                        )
                     except Exception as e2:
                         out_alert = dbc.Alert(
                             (
@@ -2120,6 +2163,8 @@ class GeoExplorer:
                 )
                 for path in self.selected_files
             ]
+            debug_print("concat_dat111111", perf_counter() - t)
+
             dfs = [
                 df
                 for sublist in dfs
@@ -2522,7 +2567,6 @@ class GeoExplorer:
         ):
             triggered = dash.callback_context.triggered_id
             debug_print("display_feature_attributes", triggered)
-            debug_print(features)
             if triggered is None:
                 clicked_ids = list(self.selected_features)
                 clicked_features = list(self.selected_features.values())
@@ -2580,7 +2624,7 @@ class GeoExplorer:
             # prevent_initial_call=True,
         )
         def update_table(data, column_dropdown):
-            debug_print("update_table", data, column_dropdown)
+            debug_print("update_table")
             if not data:
                 return "No features clicked."
             if column_dropdown is None:
@@ -2641,7 +2685,15 @@ class GeoExplorer:
                 set(
                     self.loaded_data.get(path, EmptyColumnContainer).columns
                 ).difference(
-                    {"__file_path", "_unique_id", "minx", "miny", "maxx", "maxy"}
+                    {
+                        "__file_path",
+                        "_unique_id",
+                        "minx",
+                        "miny",
+                        "maxx",
+                        "maxy",
+                        "geometry",
+                    }
                 )
                 for path in currently_in_bounds
             )
