@@ -46,10 +46,24 @@ from geopandas import GeoSeries
 from jenkspy import jenks_breaks
 from shapely.errors import GEOSException
 from shapely.geometry import Polygon
+import joblib
+from multiprocessing import cpu_count
 
 from .fs import LocalFileSystem
 
+
 OFFWHITE = "#ebebeb"
+DEBUG = 1
+
+if DEBUG:
+
+    def debug_print(*args):
+        print(*args)
+
+else:
+
+    def debug_print(*args):
+        pass
 
 
 def _clicked_button_style():
@@ -83,45 +97,9 @@ def _get_max_rows_displayed_component(max_rows: int):
                 type="number",
                 debounce=1,
             ),
+            style={"width": "10vh"},
         ),
     ]
-
-
-def _simplify_geometries(df: GeoDataFrame, zoom: int, max_rows: int) -> GeoDataFrame:
-    print("simplyfy", len(df), zoom)
-
-    t = perf_counter()
-    if len(df) <= max_rows:
-        return df
-
-    def _simplify(geometries: GeoSeries):
-        return geometries
-        if zoom >= 13 or not geometries.geom_type.str.contains("Polygon").any():
-            return geometries
-        if zoom <= 5:
-            return [shapely.box(*bounds) for bounds in geometries.bounds.values]
-        elif zoom == 6:
-            return geometries.to_crs(3035).simplify(30000).to_crs(4326)
-        elif zoom == 7:
-            return geometries.to_crs(3035).simplify(10000).to_crs(4326)
-        elif zoom == 8:
-            return geometries.to_crs(3035).simplify(2500).to_crs(4326)
-        elif zoom == 9:
-            return geometries.to_crs(3035).simplify(1000).to_crs(4326)
-        elif zoom == 10:
-            return geometries.to_crs(3035).simplify(500).to_crs(4326)
-        elif zoom == 11:
-            return geometries.to_crs(3035).simplify(200).to_crs(4326)
-        elif zoom == 12:
-            return geometries.to_crs(3035).simplify(50).to_crs(4326)
-
-    if len(df) > max_rows:
-        df = df.sample(max_rows)
-        print("concat ferdig etter", perf_counter() - t)
-        df.geometry = _simplify(df.geometry)
-
-    print("simplyfy ferdig etter", perf_counter() - t, "-", len(df))
-    return df
 
 
 def _change_order(explorer, n_clicks_list, buttons, what: str):
@@ -137,14 +115,14 @@ def _change_order(explorer, n_clicks_list, buttons, what: str):
         i2 = i - 1
     else:
         i2 = i + 1
-    print("\n\n\n\n\nchange_order", what, i, i2)
+    debug_print("\n\n\n\n\nchange_order", what, i, i2)
     buttons[i], buttons[i2] = buttons[i2], buttons[i]
     keys = list(reversed(explorer.selected_files))
     values = list(reversed(explorer.selected_files.values()))
-    print(keys)
+    debug_print(keys)
     keys[i], keys[i2] = keys[i2], keys[i]
     values[i], values[i2] = values[i2], values[i]
-    print(keys)
+    debug_print(keys)
     explorer.selected_files = dict(reversed(list(zip(keys, values))))
     return buttons, True
 
@@ -240,7 +218,7 @@ def _get_df(path, loaded_data, concatted_data, override: bool = False):
             for key, df in loaded_data.items()
             if path in key
         ]
-    print(len(matches), "matches for", path)
+    debug_print(len(matches), "matches for", path)
     return matches
 
 
@@ -259,8 +237,8 @@ def _add_data_one_path(
     nan_color,
     alpha,
 ):
-    print("add_data_one_path", path)
-    print([len(x) for x in loaded_data.values()])
+    debug_print("add_data_one_path", path)
+    debug_print([len(x) for x in loaded_data.values()])
     ns = Namespace("onEachFeatureToggleHighlight", "default")
     data = []
     if concatted_data is None:
@@ -285,23 +263,24 @@ def _add_data_one_path(
     # t = perf_counter()
     # dissolved = df[[df.geometry.name]].dissolve().assign(_dissolved=True)
     # dissolved_indices = set(df["_unique_id"])
-    # print("dissolve ferdig etter", perf_counter() - t)
+    # debug_print("dissolve ferdig etter", perf_counter() - t)
 
     # df = df.drop(columns=["_file_bounds"])
     df = df.to_pandas()
     df["geometry"] = shapely.from_wkb(df["geometry"])
     df = GeoDataFrame(df, crs=4326)
-    df = _simplify_geometries(df, zoom, max_rows)
+    if len(df) > max_rows:
+        df = df.sample(max_rows)
 
-    print(df)
+    debug_print(df)
 
     out_alert = None
 
-    if column is not None and column in df and not is_numeric:
+    if column and column in df and not is_numeric:
         df["_color"] = df[column].map(color_dict)
-    elif column is not None and bins is None:
+    elif column and bins is None:
         df["_color"] = nan_color
-    elif column is not None and column in df:
+    elif column and column in df:
         notnas = df[df[column].notna()]
         conditions = [
             (notnas[column] < bins[1]) & (notnas[column].notna()),
@@ -329,7 +308,8 @@ def _add_data_one_path(
             )
         )
         return data, out_alert, False
-    if column is not None and column not in df:
+    if column and column not in df:
+        print("_add_data_one_path111", column)
         data.append(
             dl.Overlay(
                 dl.GeoJSON(
@@ -352,7 +332,8 @@ def _add_data_one_path(
                 id={"type": "geojson-overlay", "filename": path},
             )
         )
-    elif column is not None:
+    elif column:
+        print("_add_data_one_path222", column)
         data.append(
             dl.Overlay(
                 dl.LayerGroup(
@@ -411,6 +392,7 @@ def _add_data_one_path(
     else:
         # no column
         color = color_dict[_get_name(path)]
+        print("_add_data_one_path333", color, "-", color_dict)
         data.append(
             dl.Overlay(
                 dl.GeoJSON(
@@ -453,12 +435,14 @@ def filter_by_bounds(df: pl.DataFrame, bounds: tuple[float]) -> pl.DataFrame:
         & (pl.col("miny") <= float(maxy))
         & (pl.col("maxy") >= float(miny))
     )
-    print("filter_by_bounds finished", perf_counter() - t, len(df))
+    debug_print("filter_by_bounds finished", perf_counter() - t, len(df))
     return df
 
 
 def _read_and_to_4326(path: str, file_system) -> GeoDataFrame:
-    df = sg.read_geopandas(path, file_system=file_system).to_crs(4326)
+    df = sg.read_geopandas(path, file_system=file_system)
+    if len(df):
+        df = df.to_crs(4326)
     bounds = df.geometry.bounds.astype("float32[pyarrow]")
     df[bounds.columns] = bounds
     return df
@@ -471,10 +455,12 @@ def _get_unique_id(df, i):
 
 
 def _read_files(explorer, paths: list[str]) -> None:
-    read_func = partial(_read_and_to_4326, file_system=explorer.file_system)
-    executor_obj = ThreadPoolExecutor if len(paths) <= 3 else ProcessPoolExecutor
-    with executor_obj(len(paths)) as executor:
-        more_data = list(executor.map(read_func, paths))
+    backend = "threading" if len(paths) <= 3 else "loky"
+    with joblib.Parallel(len(paths), backend=backend) as parallel:
+        more_data = parallel(
+            joblib.delayed(_read_and_to_4326)(path, file_system=explorer.file_system)
+            for path in paths
+        )
     for path, df in zip(paths, more_data, strict=True):
         for col in df.columns:
             if is_datetime64_any_dtype(df[col]):
@@ -486,7 +472,6 @@ def _read_files(explorer, paths: list[str]) -> None:
         df["_unique_id"] = _get_unique_id(df, len(explorer.loaded_data))
         if explorer.splitted:
             df["split_index"] = [f"{_get_name(path)} {i}" for i in range(len(df))]
-        # df = pl.from_pandas(df.drop(columns=[df.geometry.name]))
         df = pl.from_pandas(df.assign(geometry=df.geometry.to_wkb()))
         explorer.loaded_data[path] = df
 
@@ -532,11 +517,16 @@ def _get_bounds_series(path, file_system):
     ]
     if not paths:
         paths = [path]
-    return sg.get_bounds_series(paths, file_system=file_system).to_crs(4326)
+    bounds_series = sg.get_bounds_series(paths, file_system=file_system)
+    if len(bounds_series):
+        bounds_series = bounds_series.to_crs(4326)
+    return bounds_series
 
 
-def _get_file_list_button(path, isdir: bool, current_path, file_system):
-    size = 15
+def _get_file_list_row(path, timestamp, size, isdir: bool, current_path, file_system):
+    debug_print("_get_file_list_row")
+    timestamp = str(timestamp)[:19]
+    mb = str(round(size / 1_000_000, 2))
     is_loadable = not file_system.isdir(path) or (
         path.endswith(".parquet")
         or all(x.endswith(".parquet") for x in file_system.ls(path))
@@ -544,20 +534,14 @@ def _get_file_list_button(path, isdir: bool, current_path, file_system):
     if is_loadable:
         button = html.Button(
             "Load",
-            id={
-                "type": "load-parquet",
-                "index": path,
-            },
+            id={"type": "load-parquet", "index": path},
             className="load-button",
             n_clicks=0,
         )
     else:
         button = html.Button(
             "Load",
-            id={
-                "type": "load-parquet",
-                "index": path,
-            },
+            id={"type": "load-parquet", "index": path},
             className="load-button",
             n_clicks=0,
             style={
@@ -569,31 +553,45 @@ def _get_file_list_button(path, isdir: bool, current_path, file_system):
         )
     txt_type = html.U if isdir else str
     path_name = _standardize_path(path).replace(current_path, "").lstrip("/")
-    return html.Div(
+    return html.Tr(
         [
-            button,
-            html.Button(
-                txt_type(f"[DIR] {path_name}" if isdir else path_name),
-                id={"type": "file-path", "index": path},
-                className="path-button",
-                style={
-                    "padding-left": f"{int(size/5)}px",
-                    "backgroundColor": "rgba(0, 0, 0, 0)",
-                    "fillColor": "rgba(0, 0, 0, 0)",
-                    "width": "70vh",
-                }
-                | ({"color": OFFWHITE} if not isdir else {"color": "#78b3e7"}),
-                n_clicks=0,
-                disabled=False if isdir else True,
+            html.Td(button),
+            html.Td(
+                html.Button(
+                    txt_type(f"[DIR] {path_name}" if isdir else path_name),
+                    id={"type": "file-path", "index": path},
+                    className="path-button",
+                    style={
+                        "padding-left": "3px",
+                        "backgroundColor": "rgba(0, 0, 0, 0)",
+                        "fillColor": "rgba(0, 0, 0, 0)",
+                        "width": "80vh",
+                    }
+                    | ({"color": OFFWHITE} if not isdir else {"color": "#78b3e7"}),
+                    n_clicks=0,
+                    disabled=False if isdir else True,
+                )
             ),
-        ],
-        className="button-container",
+            html.Td(
+                timestamp,
+                style={
+                    "padding-left": "10px",
+                },
+            ),
+            html.Td(
+                mb,
+                style={
+                    "padding-left": "10px",
+                },
+            ),
+        ]
     )
 
 
 def _list_dir(
     path: str, containing: str, case_sensitive: bool, recursive: bool, file_system
 ):
+    debug_print("_list_dir")
     path = _standardize_path(path)
     containing = containing or ""
     containing = [txt.strip() for txt in containing.split(",") if txt.strip()]
@@ -624,43 +622,47 @@ def _list_dir(
     if (recursive or 0) % 2 == 0:
 
         def _ls(path):
-            return file_system.ls(path)
+            return file_system.ls(path, detail=True)
 
     else:
 
         def _ls(path):
             try:
-                return file_system.glob(str(Path(path) / "**"), recursive=True)
+                return file_system.glob(
+                    str(Path(path) / "**"), detail=True, recursive=True
+                )
             except Exception:
-                return file_system.glob(str(Path(path) / "**"))
+                return file_system.glob(str(Path(path) / "**"), detail=True)
 
     paths = list(_ls(path))
     if not paths:
         try:
-            paths = file_system.glob(path, recursive=True)
+            paths = file_system.glob(path, recursive=True, detail=True)
         except Exception:
-            paths = file_system.glob(path)
+            paths = file_system.glob(path, detail=True)
 
     paths = [
         x
         for x in paths
-        if _contains(x)
-        and (file_system.isdir(x) or any(x.endswith(txt) for txt in [".parquet"]))
-        and Path(path).parts != Path(x).parts
+        if _contains(x["name"])
+        and (
+            file_system.isdir(x["name"])
+            or any(x["name"].endswith(txt) for txt in [".parquet"])
+        )
+        and Path(path).parts != Path(x["name"]).parts
     ]
-    paths.sort()
-    isdir_list = [file_system.isdir(x) for x in paths]
+
+    paths.sort(key=lambda x: x["name"])
+    isdir_list = [file_system.isdir(x["name"]) for x in paths]
+
     return (
-        html.Ul(
-            [
-                html.Li(
-                    [
-                        _get_file_list_button(this_path, isdir, path, file_system)
-                        for this_path, isdir in zip(paths, isdir_list, strict=True)
-                    ]
-                )
-            ]
-        ),
+        paths,
+        [
+            _get_file_list_row(
+                x["name"], x["updated"], x["size"], isdir, path, file_system
+            )
+            for x, isdir in zip(paths, isdir_list, strict=True)
+        ],
         None,
     )
 
@@ -759,24 +761,6 @@ class GeoExplorer:
         self.tile_names: list[str] = []
         self.currently_in_bounds: list[str] = []
 
-        if "REDIS_URL" in os.environ:
-            # Use Redis & Celery if REDIS_URL set as an env variable
-            from celery import Celery
-
-            celery_app = Celery(
-                __name__,
-                broker=os.environ["REDIS_URL"],
-                backend=os.environ["REDIS_URL"],
-            )
-            background_callback_manager = CeleryManager(celery_app)
-
-        else:
-            # Diskcache for non-production apps when developing locally
-            import diskcache
-
-            cache = diskcache.Cache("./cache")
-            background_callback_manager = dash.DiskcacheManager(cache)
-
         self.app = Dash(
             __name__,
             suppress_callback_exceptions=True,
@@ -784,13 +768,12 @@ class GeoExplorer:
             requests_pathname_prefix=f"/proxy/{self.port}/" if self.port else None,
             serve_locally=True,
             assets_folder="assets",
-            background_callback_manager=background_callback_manager,
         )
 
         clicked_features = []
 
         def get_layout():
-            print("\n\n\n\n\nget_layout", self.bounds)
+            debug_print("\n\n\n\n\nget_layout", self.bounds)
             return dbc.Container(
                 [
                     dbc.Row(
@@ -1065,7 +1048,7 @@ class GeoExplorer:
                                                     html.Button(
                                                         "⬆️ Go Up",
                                                         id="up-button",
-                                                        style={"width": "10vh"},
+                                                        style={"width": "10%"},
                                                     )
                                                 ),
                                                 dbc.Col(
@@ -1073,7 +1056,7 @@ class GeoExplorer:
                                                         self.start_dir,
                                                         id="path-display",
                                                         style={
-                                                            "width": "70vh",
+                                                            "width": "100%",
                                                         },
                                                         debounce=0.2,
                                                     )
@@ -1091,7 +1074,7 @@ class GeoExplorer:
                                                         placeholder="Search for files by substring (use '|' as OR and ',' as AND)...",
                                                         id="search-bar",
                                                         debounce=0.5,
-                                                        style={"width": "50vh"},
+                                                        style={"width": "50%"},
                                                     ),
                                                     # width=8,
                                                 ),
@@ -1100,7 +1083,7 @@ class GeoExplorer:
                                                         id="case-sensitive",
                                                         n_clicks=1,
                                                         children="Case sensitive",
-                                                        style={"width": "5vh"},
+                                                        style={"width": "5%"},
                                                     ),
                                                     # width=3,
                                                 ),
@@ -1109,15 +1092,60 @@ class GeoExplorer:
                                                         id="recursive",
                                                         n_clicks=0,
                                                         children="Recursive",
-                                                        style={"width": "5vh"},
+                                                        style={"width": "5%"},
                                                     ),
                                                     # width=2,
                                                 ),
                                             ]
                                         ),
                                         html.Br(),
-                                        html.Div(
-                                            id="file-list",
+                                        dbc.Row(
+                                            html.Div(
+                                                html.Table(
+                                                    [
+                                                        html.Thead(
+                                                            html.Tr(
+                                                                [
+                                                                    html.Th("Load"),
+                                                                    html.Th(
+                                                                        html.Button(
+                                                                            "File Name 🡑🡓",
+                                                                            id={
+                                                                                "type": "sort_by",
+                                                                                "key": "name",
+                                                                            },
+                                                                            n_clicks=0,
+                                                                        )
+                                                                    ),
+                                                                    html.Th(
+                                                                        html.Button(
+                                                                            "Timestamp 🡑🡓",
+                                                                            id={
+                                                                                "type": "sort_by",
+                                                                                "key": "updated",
+                                                                            },
+                                                                            n_clicks=0,
+                                                                        )
+                                                                    ),
+                                                                    html.Th(
+                                                                        html.Button(
+                                                                            "Size (MB) 🡑🡓",
+                                                                            id={
+                                                                                "type": "sort_by",
+                                                                                "key": "size",
+                                                                            },
+                                                                            n_clicks=0,
+                                                                        )
+                                                                    ),
+                                                                ]
+                                                            )
+                                                        ),
+                                                        html.Tbody(
+                                                            id="file-list",
+                                                        ),
+                                                    ]
+                                                )
+                                            ),
                                             style={
                                                 "font-size": 12,
                                                 "width": "100%",
@@ -1126,12 +1154,15 @@ class GeoExplorer:
                                             },
                                             className="scroll-container",
                                         ),
+                                        # html.Div(
+                                        #     id="file-list",
+                                        # ),
                                     ]
                                 ),
                                 # width=4,
                             ),
                         ],
-                        style={"width": "90vh"},
+                        style={"width": "120vh"},
                     ),
                     dcc.Store(id="is_splitted", data=False),
                     dcc.Input(
@@ -1140,11 +1171,8 @@ class GeoExplorer:
                         style={"display": "none"},
                         debounce=1,
                     ),
-                    dcc.Store(
-                        id="persisted-bounds",
-                        data=None,
-                        storage_type="local",
-                    ),
+                    dcc.Store(id="persisted-bounds", data=None, storage_type="local"),
+                    dcc.Store(id="file-data-dict", data=None),
                     html.Div(id="currently-in-bounds", style={"display": "none"}),
                     html.Div(id="skip_to_add_data", style={"display": "none"}),
                     html.Div(id="missing", style={"display": "none"}),
@@ -1182,7 +1210,9 @@ class GeoExplorer:
                     if not isinstance(value, GeoDataFrame):
                         raise ValueError(error_mess)
                     key = _standardize_path(key)
-                    self.loaded_data[key] = value.to_crs(4326)
+                    if len(value):
+                        value = value.to_crs(4326)
+                    self.loaded_data[key] = value
                     self.selected_files[key] = 0
                     bounds_series_dict[key] = shapely.box(
                         *self.loaded_data[key].total_bounds
@@ -1199,14 +1229,15 @@ class GeoExplorer:
                 [x for x in self.selected_files if x not in bounds_series_dict],
                 self.file_system,
             )
-            self.bounds_series = pd.concat(
-                [
-                    self.bounds_series,
-                    sg.get_bounds_series(
-                        child_paths, file_system=self.file_system
-                    ).to_crs(4326),
-                ]
-            )
+            if child_paths:
+                self.bounds_series = pd.concat(
+                    [
+                        self.bounds_series,
+                        sg.get_bounds_series(
+                            child_paths, file_system=self.file_system
+                        ).to_crs(4326),
+                    ]
+                )
             _read_files(
                 self,
                 [x for x in self.selected_files if x not in bounds_series_dict],
@@ -1281,7 +1312,6 @@ class GeoExplorer:
             if triggered in ["file-removed", "close-export"] or not export_clicks:
                 return None, False
 
-            # bounds = json.loads(bounds)
             centroid = shapely.box(*self._nested_bounds_to_bounds(bounds)).centroid
             center = (centroid.y, centroid.x)
 
@@ -1367,16 +1397,66 @@ class GeoExplorer:
                 return _unclicked_button_style()
 
         @callback(
+            Output("file-data-dict", "data"),
             Output("file-list", "children"),
             Output("file-list-alert", "children"),
+            Output({"type": "sort_by", "key": dash.ALL}, "n_clicks"),
             Input("current-path", "data"),
             Input("search-bar", "value"),
             Input("case-sensitive", "n_clicks"),
             Input("recursive", "n_clicks"),
+            Input({"type": "sort_by", "key": dash.ALL}, "n_clicks"),
+            Input({"type": "sort_by", "key": dash.ALL}, "id"),
+            State("file-list", "children"),
+            State("file-data-dict", "data"),
         )
-        def update_file_list(path, search_word, case_sensitive, recursive):
-            return _list_dir(
-                path, search_word, case_sensitive, recursive, self.file_system
+        def update_file_list(
+            path,
+            search_word,
+            case_sensitive,
+            recursive,
+            sort_by_clicks,
+            sort_by_ids,
+            file_list,
+            file_data_dict,
+        ):
+            triggered = dash.callback_context.triggered_id
+            debug_print("update_file_list", triggered)
+            if isinstance(triggered, dict) and triggered["type"] == "sort_by":
+                sort_by_key = triggered["key"]
+                sort_by_clicks = [
+                    clicks if x["key"] == sort_by_key else 0
+                    for x, clicks in zip(sort_by_ids, sort_by_clicks, strict=True)
+                ]
+                alert = None
+            else:
+                file_data_dict, file_list, alert = _list_dir(
+                    path, search_word, case_sensitive, recursive, self.file_system
+                )
+                if sum(sort_by_clicks):
+                    sort_by_key = next(
+                        iter(
+                            x["key"]
+                            for x, clicks in zip(
+                                sort_by_ids, sort_by_clicks, strict=True
+                            )
+                            if clicks
+                        )
+                    )
+            if sum(sort_by_clicks):
+                sorted_pairs = sorted(
+                    zip(file_data_dict, file_list), key=lambda x: x[0][sort_by_key]
+                )
+                if sum(sort_by_clicks) % 2 == 0:
+                    sorted_pairs = list(reversed(sorted_pairs))
+                file_data_dict = [x[0] for x in sorted_pairs]
+                file_list = [x[1] for x in sorted_pairs]
+
+            return (
+                file_data_dict,
+                file_list,
+                alert,
+                sort_by_clicks,
             )
 
         @callback(
@@ -1585,9 +1665,10 @@ class GeoExplorer:
                 if n_clicks == 0:
                     return dash.no_update
                 path_to_remove = delete_ids[index]["index"]
-                print("\n\n\n\n\n\ndelete_item", path_to_remove)
-                if path_to_remove in self.selected_files:
-                    self.selected_files.pop(path_to_remove)
+                debug_print("\n\n\n\n\n\ndelete_item", path_to_remove)
+                for path in dict(self.selected_files):
+                    if path_to_remove in [path, Path(path).stem]:
+                        self.selected_files.pop(path)
                 any_removed = False
                 for path in list(self.loaded_data):
                     if path_to_remove in path:
@@ -1627,12 +1708,12 @@ class GeoExplorer:
             prevent_initial_call=True,
         )
         def is_splitted(n_clicks: int, column):
-            print("is_splitted")
+            debug_print("is_splitted")
             if self.concatted_data is None:
                 return dash.no_update, dash.no_update, dash.no_update, dash.no_update
             triggered = dash.callback_context.triggered_id
             is_splitted: bool = n_clicks % 2 == 1 and not (
-                triggered == "column-dropdown" and column is None
+                triggered == "column-dropdown" and not column
             )
             if is_splitted:
                 style = _clicked_button_style()
@@ -1651,12 +1732,14 @@ class GeoExplorer:
             Output("new-file-added", "children"),
             Output("new-file-added", "style"),
             Input({"type": "load-parquet", "index": dash.ALL}, "n_clicks"),
+            Input({"type": "load-parquet", "index": dash.ALL}, "id"),
             Input("is_splitted", "data"),
             State({"type": "file-path", "index": dash.ALL}, "id"),
             # prevent_initial_call=True,
         )
-        def append_path(load_parquet, is_splitted, ids):
+        def append_path(load_parquet, load_parquet_ids, is_splitted, ids):
             triggered = dash.callback_context.triggered_id
+            debug_print("append_path", triggered)
             if triggered == "is_splitted":
                 if not is_splitted:
                     return dash.no_update, dash.no_update
@@ -1672,9 +1755,9 @@ class GeoExplorer:
                 selected_path = triggered["index"]
             except Exception as e:
                 raise type(e)(f"{e}: {triggered}")
-            selected_path = _standardize_path(selected_path)
-            if selected_path in self.selected_files:
-                return dash.no_update
+            n_clicks = get_index(load_parquet, load_parquet_ids, selected_path)
+            if selected_path in self.selected_files or not n_clicks:
+                return dash.no_update, dash.no_update
             try:
                 more_bounds = _get_bounds_series(
                     selected_path, file_system=self.file_system
@@ -1711,85 +1794,9 @@ class GeoExplorer:
             self.zoom = zoom
             return json.dumps(bounds)
 
-        [
-            np.int16(-2730),
-            np.int16(29300),
-            np.int16(-8041),
-            np.int16(-9894),
-            np.int16(-16709),
-        ]
-        ["20190611", "20190711", "20190713", "20190805", "20190827"]
-        [
-            np.int16(22917),
-            np.int16(0),
-            np.int16(15258),
-            np.int16(18354),
-            np.int16(18358),
-            np.int16(21291),
-        ]
-        [
-            np.int16(-1927),
-            np.int16(0),
-            np.int16(27408),
-            np.int16(1496),
-            np.int16(7736),
-            np.int16(-15928),
-        ]
-
-        # under bytta så ndvi er nr 2...
-        [
-            np.int16(22917),
-            np.int16(0),
-            np.int16(15258),
-            np.int16(18354),
-            np.int16(18358),
-            np.int16(21291),
-        ]
-        ["20190611", "20190616", "20190711", "20190713", "20190805", "20190827"]
-        [
-            np.int16(-2730),
-            np.int16(29300),
-            np.int16(-8041),
-            np.int16(-9894),
-            np.int16(-16709),
-        ]
-        [
-            np.int16(-1927),
-            np.int16(0),
-            np.int16(27408),
-            np.int16(1496),
-            np.int16(7736),
-            np.int16(-15928),
-        ]
-
-        [
-            np.int16(22917),
-            np.int16(0),
-            np.int16(15258),
-            np.int16(18354),
-            np.int16(18358),
-            np.int16(21291),
-        ]
-        ["20190611", "20190616", "20190711", "20190713", "20190805", "20190827"]
-        [
-            np.int16(-2730),
-            np.int16(29300),
-            np.int16(-8041),
-            np.int16(-9894),
-            np.int16(-16709),
-        ]
-        [
-            np.int16(-1927),
-            np.int16(0),
-            np.int16(27408),
-            np.int16(1496),
-            np.int16(7736),
-            np.int16(-15928),
-        ]
-
         @callback(
             Output("new-data-read", "children"),
-            Output("skip_to_add_data", "children"),
+            # Output("skip_to_add_data", "children"),
             Output("missing", "children"),
             Output("interval-component", "disabled"),
             Input("debounced_bounds", "value"),
@@ -1797,17 +1804,18 @@ class GeoExplorer:
             Input("file-removed", "children"),
             Input("interval-component", "n_intervals"),
             Input("missing", "children"),
+            State("file-data-dict", "data"),
             # State("missing", "children"),
             # prevent_initial_call=True,
-            background=False,
         )
-        def get_files_in_bounds(bounds, file_added, file_removed, n_intervals, missing):
+        def get_files_in_bounds(
+            bounds, file_added, file_removed, n_intervals, missing, file_data_dict
+        ):
             t = perf_counter()
             triggered = dash.callback_context.triggered_id
-            print("get_files_in_bounds", triggered, len(missing or []))
+            debug_print("get_files_in_bounds", triggered, len(missing or []))
 
             if triggered != "missing":
-                # bounds = json.loads(bounds)
                 box = shapely.box(*self._nested_bounds_to_bounds(bounds))
                 files_in_bounds = sg.sfilter(self.bounds_series, box)
                 self.currently_in_bounds = list(set(files_in_bounds.index))
@@ -1819,10 +1827,23 @@ class GeoExplorer:
                     }
                 )
             if missing:
-                # while cumsum < 100_000:
-                if len(missing) > 20:
-                    _read_files(self, missing[:20])
-                    missing = missing[20:]
+                to_read = 0
+                cumsum = 0
+                files_and_sizes = {x["name"]: x["size"] for x in file_data_dict}
+                for path in missing:
+                    if path in files_and_sizes:
+                        size = files_and_sizes[path]
+                    else:
+                        size = self.file_system.info(path)["size"]
+                    cumsum += size
+                    to_read += 1
+                    # read max 1 GB
+                    if cumsum > 1_000_000_000 or to_read > cpu_count() * 2:
+                        break
+                print("to_read", to_read, len(missing))
+                if len(missing) > to_read:
+                    _read_files(self, missing[:to_read])
+                    missing = missing[to_read:]
                     disabled = False
                     new_data_read = dash.no_update if not len(missing) else True
                 else:
@@ -1830,27 +1851,22 @@ class GeoExplorer:
                     missing = []
                     disabled = True
                     new_data_read = True
-                skip_to_add_data = dash.no_update
             else:
-                new_data_read: bool = (
-                    True if triggered in ["file-removed"] else dash.no_update
-                )
+                new_data_read = True
                 disabled = True
-                skip_to_add_data: bool = triggered not in ["missing", "file-removed"]
 
-            print(
+            debug_print(
                 "get_files_in_bounds ferdig etter",
                 perf_counter() - t,
                 "-",
                 len(missing),
                 len(self.loaded_data),
                 new_data_read,
-                skip_to_add_data,
                 len(missing),
                 disabled,
             )
 
-            return new_data_read, skip_to_add_data, missing, disabled
+            return new_data_read, missing, disabled
 
         @callback(
             Output("column-dropdown", "options"),
@@ -2089,10 +2105,9 @@ class GeoExplorer:
             Input("new-data-read", "children"),
             State("debounced_bounds", "value"),
             prevent_initial_call=True,
-            background=False,
         )
         def concat_data(new_data_read, bounds):
-            print("concat_data")
+            debug_print("concat_data")
             t = perf_counter()
             if not new_data_read:
                 return dash.no_update, 1
@@ -2116,7 +2131,7 @@ class GeoExplorer:
                     dfs.append(self.concatted_data)
                 self.concatted_data = pl.concat(dfs, how="diagonal_relaxed")
 
-            print("concat_data finished after", perf_counter() - t)
+            debug_print("concat_data finished after", perf_counter() - t)
 
             return 1, 1
 
@@ -2152,20 +2167,22 @@ class GeoExplorer:
             is_splitted,
         ):
             triggered = dash.callback_context.triggered_id
-            print("\nget_column_value_color_dict", column, triggered)
+            debug_print("\nget_column_value_color_dict", column, triggered)
             if not self.selected_files:
                 self.column = None
                 column = None
-            elif column is None and triggered is None:
+                return html.Div(), None, False, None, 1
+            elif not column and triggered is None:
                 column = self.column
             else:
                 self.column = column
             if triggered is None and self.selected_files:
                 self.color_dict = self.color_dict2
 
-            print(self.column, column)
-            print(self.color_dict)
-            print(self.color_dict2)
+            debug_print(self.column, column)
+            debug_print(self.color_dict)
+            debug_print(self.color_dict2)
+            debug_print(self.selected_files)
             if not is_splitted and self.splitted:
                 colorpicker_ids, colorpicker_values_list = [], []
                 self.splitted = is_splitted
@@ -2173,7 +2190,7 @@ class GeoExplorer:
             column_values = [x["column_value"] for x in colorpicker_ids]
             default_colors = list(sg.maps.map._CATEGORICAL_CMAP.values())
 
-            if column is None or (
+            if not column or (
                 self.concatted_data is not None and column not in self.concatted_data
             ):
                 color_dict = dict(
@@ -2227,7 +2244,6 @@ class GeoExplorer:
                     1,
                 )
 
-            # bounds = json.loads(bounds)
             bounds = self._nested_bounds_to_bounds(bounds)
 
             values = filter_by_bounds(
@@ -2326,8 +2342,8 @@ class GeoExplorer:
                 color_dict = color_dict | dict(zip(new_values, colors, strict=True))
                 bins = None
 
-            print("\n\ncolor_dict")
-            print(color_dict)
+            debug_print("\n\ncolor_dict")
+            debug_print(color_dict)
             if color_dict.get(self.nan_label, self.nan_color) != self.nan_color:
                 self.nan_color = color_dict[self.nan_label]
 
@@ -2371,7 +2387,7 @@ class GeoExplorer:
             Input("max_rows_was_changed", "children"),
             Input("data-was-changed", "children"),
             Input("order-was-changed", "data"),
-            Input("skip_to_add_data", "children"),
+            # Input("skip_to_add_data", "children"),
             State("debounced_bounds", "value"),
             State("map", "zoom"),
             State("column-dropdown", "value"),
@@ -2379,7 +2395,6 @@ class GeoExplorer:
             State({"type": "colorpicker", "column_value": dash.ALL}, "id"),
             State("max_rows", "children"),
             State({"type": "delete-btn", "index": dash.ALL}, "id"),
-            background=False,
         )
         def add_data(
             currently_in_bounds2,
@@ -2393,7 +2408,7 @@ class GeoExplorer:
             max_rows_was_changed,
             data_was_changed,
             order_was_changed,
-            skip_to_add_data,
+            # skip_to_add_data,
             bounds,
             zoom,
             column,
@@ -2402,16 +2417,15 @@ class GeoExplorer:
             max_rows_component,
             delete_buttons,
         ):
-            print("add_data")
+            debug_print("\n\nadd_data", len(self.loaded_data))
             t = perf_counter()
 
-            print(bounds)
+            debug_print(bounds)
             bounds = self._nested_bounds_to_bounds(bounds)
 
             column_values = [x["column_value"] for x in colorpicker_ids]
             color_dict = dict(zip(column_values, colorpicker_values_list, strict=True))
-
-            data = []
+            print(color_dict)
 
             wms_layers = []
             tiles = []
@@ -2452,21 +2466,26 @@ class GeoExplorer:
                 bins=bins,
                 alpha=self.alpha,
             )
-            print("add_data111", perf_counter() - t)
+            debug_print("add_data111", perf_counter() - t)
 
             results = [add_data_func(path) for path in self.selected_files]
-            print("add_data2222", perf_counter() - t)
+            debug_print("add_data2222", perf_counter() - t)
 
             data = list(itertools.chain.from_iterable([x[0] for x in results if x[0]]))
             out_alert = [x[1] for x in results if x[1]]
             rows_are_not_hidden = not any(x[2] for x in results)
 
-            print(
+            debug_print(
                 "add_data ferdig etter",
                 perf_counter() - t,
                 len(self.loaded_data),
                 len(self.concatted_data if self.concatted_data is not None else []),
             )
+            if self.concatted_data is not None:
+                print(
+                    len({x for x in self.concatted_data["__file_path"]}),
+                    len(self.loaded_data),
+                )
             if rows_are_not_hidden:
                 max_rows_component = None
             else:
@@ -2477,39 +2496,6 @@ class GeoExplorer:
                 (out_alert if out_alert else None),
                 max_rows_component,
             )
-
-        # @callback(
-        #     Input("alert", "children"),
-        #     State("debounced_bounds", "value"),
-        #     State("map", "zoom"),
-        #     prevent_initial_call=True,
-        #     background=False,
-        # )
-        # def read_and_concat_neighbor_data(_, bounds, zoom):
-        #     print("read_and_concat_neighbor_data", bounds, zoom)
-        #     t = perf_counter()
-        #     bounds = json.loads(bounds)
-        #     box = shapely.box(*self._nested_bounds_to_bounds(bounds))
-        #     box = _buffer_box(box, 10_000 / (zoom**0.75))
-        #     files_in_bounds = sg.sfilter(self.bounds_series, box)
-        #     missing = list(
-        #         {path for path in files_in_bounds.index if path not in self.loaded_data}
-        #     )
-        #     if missing:
-        #         if len(missing) > 10:
-        #             _read_files(self, missing[:10])
-        #             missing = missing[10:]
-        #         else:
-        #             _read_files(self, missing)
-        #             missing = []
-        #     # df = self.loaded_data[path]
-        #     print(
-        #         "read_and_concat_neighbor_data finished",
-        #         perf_counter() - t,
-        #         len(missing),
-        #         # len(self.loaded_data),
-        #         # len(self.concatted_data) if self.concatted_data is not None else 0,
-        # )
 
         @callback(
             Output("clicked-features", "data"),
@@ -2535,8 +2521,8 @@ class GeoExplorer:
             bounds,
         ):
             triggered = dash.callback_context.triggered_id
-            print("display_feature_attributes", triggered)
-            print(features)
+            debug_print("display_feature_attributes", triggered)
+            debug_print(features)
             if triggered is None:
                 clicked_ids = list(self.selected_features)
                 clicked_features = list(self.selected_features.values())
@@ -2594,7 +2580,7 @@ class GeoExplorer:
             # prevent_initial_call=True,
         )
         def update_table(data, column_dropdown):
-            print("update_table", data, column_dropdown)
+            debug_print("update_table", data, column_dropdown)
             if not data:
                 return "No features clicked."
             if column_dropdown is None:
@@ -2624,6 +2610,8 @@ class GeoExplorer:
                             "overflowY": "scroll",
                             "height": "40vh",
                         },
+                        # row_selectable=True,
+                        sort_action="native",
                     ),
                 ]
             )
