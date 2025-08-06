@@ -1649,17 +1649,25 @@ class GeoExplorer:
             return 1, 1
 
         @callback(
+            Output("force-categorical", "n_clicks"),
+            Input("column-dropdown", "value"),
+            prevent_initial_call=True,
+        )
+        def reset_force_categorical(_):
+            return 0
+
+        @callback(
             Output("colorpicker-container", "children"),
             Output("bins", "children"),
             Output("is-numeric", "children"),
             Output("force-categorical", "children"),
             Output("currently-in-bounds2", "children"),
-            Input("column-dropdown", "value"),
             Input("cmap-placeholder", "value"),
             Input("k", "value"),
             Input("force-categorical", "n_clicks"),
             Input("data-was-concatted", "children"),
             Input("alert2", "children"),
+            State("column-dropdown", "value"),
             State("debounced_bounds", "value"),
             State({"type": "colorpicker", "column_value": dash.ALL}, "value"),
             State({"type": "colorpicker", "column_value": dash.ALL}, "id"),
@@ -1667,12 +1675,12 @@ class GeoExplorer:
             State("is_splitted", "data"),
         )
         def get_column_value_color_dict(
-            column,
             cmap: str,
             k: int,
             force_categorical_clicks: int,
             data_was_concatted,
             alert2,
+            column,
             bounds,
             colorpicker_values_list,
             colorpicker_ids,
