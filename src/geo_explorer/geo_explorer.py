@@ -20,6 +20,7 @@ from typing import ClassVar
 import dash
 import dash_bootstrap_components as dbc
 import dash_leaflet as dl
+from fsspec.spec import AbstractFileSystem
 import joblib
 import matplotlib
 import numpy as np
@@ -63,7 +64,7 @@ else:
 def _clicked_button_style():
     return {
         "color": "#e4e4e4",
-        "background": "black",
+        "background": "#2F3034",
     }
 
 
@@ -659,7 +660,146 @@ def _list_dir(
     )
 
 
-sg.NorgeIBilderWms.url = "https://wms.geonorge.no/skwms1/wms.nib-prosjekter"
+def get_file_browser_container(start_dir: str):
+    return dbc.Row(
+        [
+            dbc.Col(
+                html.Div(
+                    [
+                        html.Br(),
+                        html.H2("File Browser"),
+                        dbc.Row(
+                            [
+                                dbc.Col(
+                                    [
+                                        html.Button(
+                                            "🡑 Go Up",
+                                            id="up-button",
+                                            style=_unclicked_button_style(),
+                                        ),
+                                        html.Button(
+                                            id="recursive",
+                                            n_clicks=0,
+                                            children="Recursive",
+                                        ),
+                                    ],
+                                ),
+                                dbc.Col(
+                                    html.Button(
+                                        id="case-sensitive",
+                                        n_clicks=1,
+                                        children="Case sensitive",
+                                    ),
+                                    className="align-right",
+                                ),
+                            ],
+                        ),
+                        dbc.Row(
+                            [
+                                dbc.Col(
+                                    dcc.Input(
+                                        start_dir,
+                                        id="path-display",
+                                        debounce=0.2,
+                                        className="expandable-input-left-aligned",
+                                    ),
+                                ),
+                                dbc.Col(
+                                    dcc.Input(
+                                        placeholder="Search for files by substring (use '|' as OR and ',' as AND)...",
+                                        id="filename-filter",
+                                        debounce=0.5,
+                                        className="expandable-input-right-aligned",
+                                    ),
+                                ),
+                            ]
+                        ),
+                        dbc.Row(
+                            html.Div(id="file-list-alert"),
+                        ),
+                        dbc.Row(
+                            dbc.Col(
+                                [
+                                    dbc.Row(
+                                        className="align-right",
+                                    ),
+                                ]
+                            ),
+                        ),
+                        # ],
+                        # ),
+                        html.Br(),
+                        dbc.Row(
+                            html.Div(
+                                html.Table(
+                                    [
+                                        html.Thead(
+                                            html.Tr(
+                                                [
+                                                    html.Th("Load"),
+                                                    html.Th(
+                                                        html.Button(
+                                                            "File Name 🡑🡓",
+                                                            id={
+                                                                "type": "sort_by",
+                                                                "key": "name",
+                                                            },
+                                                            n_clicks=0,
+                                                        )
+                                                    ),
+                                                    html.Th(
+                                                        html.Button(
+                                                            "Timestamp 🡑🡓",
+                                                            id={
+                                                                "type": "sort_by",
+                                                                "key": "updated",
+                                                            },
+                                                            n_clicks=0,
+                                                        )
+                                                    ),
+                                                    html.Th(
+                                                        html.Button(
+                                                            "Size (MB) 🡑🡓",
+                                                            id={
+                                                                "type": "sort_by",
+                                                                "key": "size",
+                                                            },
+                                                            n_clicks=0,
+                                                        )
+                                                    ),
+                                                ]
+                                            )
+                                        ),
+                                        html.Tbody(
+                                            id="file-list",
+                                        ),
+                                    ]
+                                )
+                            ),
+                            style={
+                                "font-size": 12,
+                                "width": "100%",
+                                "height": "70vh",
+                                "overflow": "scroll",
+                            },
+                            className="scroll-container",
+                        ),
+                    ]
+                ),
+            ),
+        ],
+        style={
+            "width": "130vh",
+            # "backgroundColor": OFFWHITE,
+            "border": "1px solid #ccc",
+            "margin-bottom": "7px",
+            "margin-top": "7px",
+            "margin-left": "0px",
+            "margin-right": "0px",
+            "borderRadius": "3px",
+        },
+        className="scroll-container",
+    )
 
 
 class _EmptyColumnContainer:
@@ -709,6 +849,7 @@ class GeoExplorer:
         self,
         start_dir: str = "/buckets",
         port: int = 8055,
+        file_system: AbstractFileSystem | None = None,
         data: list[str] | None = None,
         selected_features: list[str] | None = None,
         column: str | None = None,
@@ -718,13 +859,12 @@ class GeoExplorer:
         nan_color: str = "#969696",
         nan_label: str = "Missing",
         color_dict: dict | None = None,
-        file_system=None,
-        splitted: bool = False,
         max_zoom: int = 40,
         min_zoom: int = 4,
         max_rows: int = 10_000,
         alpha: float = 0.7,
         zoom_animation: bool = False,
+        splitted: bool = False,
     ) -> None:
         """Initialiser."""
         self.start_dir = start_dir
@@ -1061,128 +1201,7 @@ class GeoExplorer:
                             "overflow": "visible",
                         },
                     ),
-                    dbc.Row(
-                        [
-                            dbc.Col(
-                                html.Div(
-                                    [
-                                        html.Br(),
-                                        html.H2("File Browser"),
-                                        dbc.Row(
-                                            [
-                                                dbc.Col(
-                                                    html.Button(
-                                                        "⬆️ Go Up",
-                                                        id="up-button",
-                                                        style={"width": "10%"},
-                                                    )
-                                                ),
-                                                dbc.Col(
-                                                    dcc.Input(
-                                                        self.start_dir,
-                                                        id="path-display",
-                                                        style={
-                                                            "width": "100%",
-                                                        },
-                                                        debounce=0.2,
-                                                    )
-                                                ),
-                                            ]
-                                        ),
-                                        html.Br(),
-                                        dbc.Row(
-                                            html.Div(id="file-list-alert"),
-                                        ),
-                                        dbc.Row(
-                                            [
-                                                dbc.Col(
-                                                    dcc.Input(
-                                                        placeholder="Search for files by substring (use '|' as OR and ',' as AND)...",
-                                                        id="search-bar",
-                                                        debounce=0.5,
-                                                        style={"width": "50%"},
-                                                    ),
-                                                ),
-                                                dbc.Col(
-                                                    html.Button(
-                                                        id="case-sensitive",
-                                                        n_clicks=1,
-                                                        children="Case sensitive",
-                                                        style={"width": "5%"},
-                                                    ),
-                                                ),
-                                                dbc.Col(
-                                                    html.Button(
-                                                        id="recursive",
-                                                        n_clicks=0,
-                                                        children="Recursive",
-                                                        style={"width": "5%"},
-                                                    ),
-                                                ),
-                                            ]
-                                        ),
-                                        html.Br(),
-                                        dbc.Row(
-                                            html.Div(
-                                                html.Table(
-                                                    [
-                                                        html.Thead(
-                                                            html.Tr(
-                                                                [
-                                                                    html.Th("Load"),
-                                                                    html.Th(
-                                                                        html.Button(
-                                                                            "File Name 🡑🡓",
-                                                                            id={
-                                                                                "type": "sort_by",
-                                                                                "key": "name",
-                                                                            },
-                                                                            n_clicks=0,
-                                                                        )
-                                                                    ),
-                                                                    html.Th(
-                                                                        html.Button(
-                                                                            "Timestamp 🡑🡓",
-                                                                            id={
-                                                                                "type": "sort_by",
-                                                                                "key": "updated",
-                                                                            },
-                                                                            n_clicks=0,
-                                                                        )
-                                                                    ),
-                                                                    html.Th(
-                                                                        html.Button(
-                                                                            "Size (MB) 🡑🡓",
-                                                                            id={
-                                                                                "type": "sort_by",
-                                                                                "key": "size",
-                                                                            },
-                                                                            n_clicks=0,
-                                                                        )
-                                                                    ),
-                                                                ]
-                                                            )
-                                                        ),
-                                                        html.Tbody(
-                                                            id="file-list",
-                                                        ),
-                                                    ]
-                                                )
-                                            ),
-                                            style={
-                                                "font-size": 12,
-                                                "width": "100%",
-                                                "height": "70vh",
-                                                "overflow": "scroll",
-                                            },
-                                            className="scroll-container",
-                                        ),
-                                    ]
-                                ),
-                            ),
-                        ],
-                        style={"width": "120vh"},
-                    ),
+                    get_file_browser_container(self.start_dir),
                     dcc.Store(id="is_splitted", data=False),
                     dcc.Input(
                         id="debounced_bounds",
@@ -1423,7 +1442,7 @@ class GeoExplorer:
             Output("file-list-alert", "children"),
             Output({"type": "sort_by", "key": dash.ALL}, "n_clicks"),
             Input("current-path", "data"),
-            Input("search-bar", "value"),
+            Input("filename-filter", "value"),
             Input("case-sensitive", "n_clicks"),
             Input("recursive", "n_clicks"),
             Input({"type": "sort_by", "key": dash.ALL}, "n_clicks"),
@@ -1773,7 +1792,6 @@ class GeoExplorer:
             Input({"type": "load-parquet", "index": dash.ALL}, "id"),
             Input("is_splitted", "data"),
             State({"type": "file-path", "index": dash.ALL}, "id"),
-            # prevent_initial_call=True,
         )
         def append_path(load_parquet, load_parquet_ids, is_splitted, ids):
             triggered = dash.callback_context.triggered_id
@@ -1909,6 +1927,17 @@ class GeoExplorer:
             )
 
             return new_data_read, missing, disabled
+
+        @callback(
+            Output("loading", "children", allow_duplicate=True),
+            Input("missing", "children"),
+            prevent_initial_call=True,
+        )
+        def update_loading_text(missing):
+            if missing:
+                return dash.no_update
+            else:
+                return "Processing data..."
 
         @callback(
             Output("column-dropdown", "options"),
