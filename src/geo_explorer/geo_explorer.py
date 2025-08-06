@@ -20,6 +20,7 @@ from typing import ClassVar
 import dash
 import dash_bootstrap_components as dbc
 import dash_leaflet as dl
+from fsspec.spec import AbstractFileSystem
 import joblib
 import matplotlib
 import numpy as np
@@ -709,6 +710,7 @@ class GeoExplorer:
         self,
         start_dir: str = "/buckets",
         port: int = 8055,
+        file_system: AbstractFileSystem | None = None,
         data: list[str] | None = None,
         selected_features: list[str] | None = None,
         column: str | None = None,
@@ -718,13 +720,12 @@ class GeoExplorer:
         nan_color: str = "#969696",
         nan_label: str = "Missing",
         color_dict: dict | None = None,
-        file_system=None,
-        splitted: bool = False,
         max_zoom: int = 40,
         min_zoom: int = 4,
         max_rows: int = 10_000,
         alpha: float = 0.7,
         zoom_animation: bool = False,
+        splitted: bool = False,
     ) -> None:
         """Initialiser."""
         self.start_dir = start_dir
