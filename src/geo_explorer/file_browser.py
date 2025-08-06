@@ -89,8 +89,6 @@ class FileBrowser:
                                         ]
                                     ),
                                 ),
-                                # ],
-                                # ),
                                 html.Br(),
                                 dbc.Row(
                                     html.Div(
