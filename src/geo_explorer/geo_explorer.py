@@ -46,6 +46,7 @@ from shapely.errors import GEOSException
 from shapely.geometry import Polygon
 
 from .fs import LocalFileSystem
+from .file_browser import FileBrowser
 
 OFFWHITE = "#ebebeb"
 DEBUG = 1
@@ -469,7 +470,7 @@ def _read_files(explorer, paths: list[str]) -> None:
         explorer.loaded_data[path] = df
 
 
-def _standardize_path(path: str | PurePosixPath) -> str:
+def _standardize_path(path: str | Path) -> str:
     """Make sure delimiter is '/' and path ends without '/'."""
     return str(path).replace("\\", "/").replace(r"\"", "/").replace("//", "/")
 
@@ -900,6 +901,8 @@ class GeoExplorer:
         self.tile_names: list[str] = []
         self.currently_in_bounds: list[str] = []
 
+        self.file_browser = FileBrowser(start_dir, file_system)
+
         self.app = Dash(
             __name__,
             suppress_callback_exceptions=True,
@@ -1201,7 +1204,7 @@ class GeoExplorer:
                             "overflow": "visible",
                         },
                     ),
-                    get_file_browser_container(self.start_dir),
+                    *self.file_browser.get_file_browser_components(),
                     dcc.Store(id="is_splitted", data=False),
                     dcc.Input(
                         id="debounced_bounds",
@@ -1210,7 +1213,6 @@ class GeoExplorer:
                         debounce=0.25,
                     ),
                     dcc.Store(id="viewport-container", data=None),
-                    dcc.Store(id="file-data-dict", data=None),
                     html.Div(id="currently-in-bounds", style={"display": "none"}),
                     html.Div(id="missing", style={"display": "none"}),
                     html.Div(id="currently-in-bounds2", style={"display": "none"}),
@@ -1230,7 +1232,6 @@ class GeoExplorer:
                     dcc.Store(id="map-center", data=None),
                     dcc.Store(id="clicked-features", data=clicked_features),
                     dcc.Store(id="clicked-ids", data=self.selected_features),
-                    dcc.Store(id="current-path", data=self.start_dir),
                     dcc.Interval(
                         id="interval-component",
                         interval=2000,
@@ -1416,112 +1417,112 @@ class GeoExplorer:
             content.append(html.Span(").run()"))
             return (html.Div(content), True)
 
-        @callback(
-            Output("case-sensitive", "style"),
-            Input("case-sensitive", "n_clicks"),
-        )
-        def update_case_button(n_clicks):
-            if (n_clicks or 0) % 2 == 1:
-                return _clicked_button_style()
-            else:
-                return _unclicked_button_style()
+        # @callback(
+        #     Output("case-sensitive", "style"),
+        #     Input("case-sensitive", "n_clicks"),
+        # )
+        # def update_case_button(n_clicks):
+        #     if (n_clicks or 0) % 2 == 1:
+        #         return _clicked_button_style()
+        #     else:
+        #         return _unclicked_button_style()
 
-        @callback(
-            Output("recursive", "style"),
-            Input("recursive", "n_clicks"),
-        )
-        def update_recursive_button(n_clicks):
-            if (n_clicks or 0) % 2 == 1:
-                return _clicked_button_style()
-            else:
-                return _unclicked_button_style()
+        # @callback(
+        #     Output("recursive", "style"),
+        #     Input("recursive", "n_clicks"),
+        # )
+        # def update_recursive_button(n_clicks):
+        #     if (n_clicks or 0) % 2 == 1:
+        #         return _clicked_button_style()
+        #     else:
+        #         return _unclicked_button_style()
 
-        @callback(
-            Output("file-data-dict", "data"),
-            Output("file-list", "children"),
-            Output("file-list-alert", "children"),
-            Output({"type": "sort_by", "key": dash.ALL}, "n_clicks"),
-            Input("current-path", "data"),
-            Input("filename-filter", "value"),
-            Input("case-sensitive", "n_clicks"),
-            Input("recursive", "n_clicks"),
-            Input({"type": "sort_by", "key": dash.ALL}, "n_clicks"),
-            Input({"type": "sort_by", "key": dash.ALL}, "id"),
-            State("file-list", "children"),
-            State("file-data-dict", "data"),
-        )
-        def update_file_list(
-            path,
-            search_word,
-            case_sensitive,
-            recursive,
-            sort_by_clicks,
-            sort_by_ids,
-            file_list,
-            file_data_dict,
-        ):
-            triggered = dash.callback_context.triggered_id
-            if isinstance(triggered, dict) and triggered["type"] == "sort_by":
-                sort_by_key = triggered["key"]
-                sort_by_clicks = [
-                    clicks if x["key"] == sort_by_key else 0
-                    for x, clicks in zip(sort_by_ids, sort_by_clicks, strict=True)
-                ]
-                alert = None
-            else:
-                file_data_dict, file_list, alert = _list_dir(
-                    path, search_word, case_sensitive, recursive, self.file_system
-                )
-                if sum(sort_by_clicks):
-                    sort_by_key = next(
-                        iter(
-                            x["key"]
-                            for x, clicks in zip(
-                                sort_by_ids, sort_by_clicks, strict=True
-                            )
-                            if clicks
-                        )
-                    )
-            if sum(sort_by_clicks):
-                sorted_pairs = sorted(
-                    zip(file_data_dict, file_list, strict=False),
-                    key=lambda x: x[0][sort_by_key],
-                )
-                if sum(sort_by_clicks) % 2 == 0:
-                    sorted_pairs = list(reversed(sorted_pairs))
-                file_data_dict = [x[0] for x in sorted_pairs]
-                file_list = [x[1] for x in sorted_pairs]
+        # @callback(
+        #     Output("current-path", "data"),
+        #     Output("path-display", "value"),
+        #     Input({"type": "file-path", "index": dash.ALL}, "n_clicks"),
+        #     Input("up-button", "n_clicks"),
+        #     Input("path-display", "value"),
+        #     State({"type": "file-path", "index": dash.ALL}, "id"),
+        #     State("current-path", "data"),
+        #     # prevent_initial_call=True,
+        # )
+        # def handle_click(load_parquet, up_button_clicks, path, ids, current_path):
+        #     triggered = dash.callback_context.triggered_id
+        #     path = _standardize_path(path)
+        #     if triggered == "path-display":
+        #         return path, path
+        #     if triggered == "up-button":
+        #         current_path = str(Path(current_path).parent)
+        #         return current_path, current_path
+        #     elif not any(load_parquet) or not triggered:
+        #         return dash.no_update, dash.no_update
+        #     selected_path = triggered["index"]
+        #     selected_path = _standardize_path(selected_path)
+        #     return selected_path, selected_path
 
-            return (
-                file_data_dict,
-                file_list,
-                alert,
-                sort_by_clicks,
-            )
+        # @callback(
+        #     Output("file-data-dict", "data"),
+        #     Output("file-list", "children"),
+        #     Output("file-list-alert", "children"),
+        #     Output({"type": "sort_by", "key": dash.ALL}, "n_clicks"),
+        #     Input("current-path", "data"),
+        #     Input("filename-filter", "value"),
+        #     Input("case-sensitive", "n_clicks"),
+        #     Input("recursive", "n_clicks"),
+        #     Input({"type": "sort_by", "key": dash.ALL}, "n_clicks"),
+        #     Input({"type": "sort_by", "key": dash.ALL}, "id"),
+        #     State("file-list", "children"),
+        #     State("file-data-dict", "data"),
+        # )
+        # def update_file_list(
+        #     path,
+        #     search_word,
+        #     case_sensitive,
+        #     recursive,
+        #     sort_by_clicks,
+        #     sort_by_ids,
+        #     file_list,
+        #     file_data_dict,
+        # ):
+        #     triggered = dash.callback_context.triggered_id
+        #     if isinstance(triggered, dict) and triggered["type"] == "sort_by":
+        #         sort_by_key = triggered["key"]
+        #         sort_by_clicks = [
+        #             clicks if x["key"] == sort_by_key else 0
+        #             for x, clicks in zip(sort_by_ids, sort_by_clicks, strict=True)
+        #         ]
+        #         alert = None
+        #     else:
+        #         file_data_dict, file_list, alert = _list_dir(
+        #             path, search_word, case_sensitive, recursive, self.file_system
+        #         )
+        #         if sum(sort_by_clicks):
+        #             sort_by_key = next(
+        #                 iter(
+        #                     x["key"]
+        #                     for x, clicks in zip(
+        #                         sort_by_ids, sort_by_clicks, strict=True
+        #                     )
+        #                     if clicks
+        #                 )
+        #             )
+        #     if sum(sort_by_clicks):
+        #         sorted_pairs = sorted(
+        #             zip(file_data_dict, file_list, strict=False),
+        #             key=lambda x: x[0][sort_by_key],
+        #         )
+        #         if sum(sort_by_clicks) % 2 == 0:
+        #             sorted_pairs = list(reversed(sorted_pairs))
+        #         file_data_dict = [x[0] for x in sorted_pairs]
+        #         file_list = [x[1] for x in sorted_pairs]
 
-        @callback(
-            Output("current-path", "data"),
-            Output("path-display", "value"),
-            Input({"type": "file-path", "index": dash.ALL}, "n_clicks"),
-            Input("up-button", "n_clicks"),
-            Input("path-display", "value"),
-            State({"type": "file-path", "index": dash.ALL}, "id"),
-            State("current-path", "data"),
-            # prevent_initial_call=True,
-        )
-        def handle_click(load_parquet, up_button_clicks, path, ids, current_path):
-            triggered = dash.callback_context.triggered_id
-            path = _standardize_path(path)
-            if triggered == "path-display":
-                return path, path
-            if triggered == "up-button":
-                current_path = str(Path(current_path).parent)
-                return current_path, current_path
-            elif not any(load_parquet) or not triggered:
-                return dash.no_update, dash.no_update
-            selected_path = triggered["index"]
-            selected_path = _standardize_path(selected_path)
-            return selected_path, selected_path
+        #     return (
+        #         file_data_dict,
+        #         file_list,
+        #         alert,
+        #         sort_by_clicks,
+        #     )
 
         @callback(
             Output("remove-buttons", "children", allow_duplicate=True),

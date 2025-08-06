@@ -5,7 +5,6 @@ from pathlib import Path
 
 
 src = str(Path(__file__).parent).replace("tests", "") + "src"
-testdata = str(Path(__file__).parent.parent) + "/tests/testdata/raster"
 
 sys.path.insert(0, src)
 
