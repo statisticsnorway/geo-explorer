@@ -1,9 +1,8 @@
 # %%
+import os
 import sys
 from pathlib import Path
-import os
 
-import sgis as sg
 
 src = str(Path(__file__).parent).replace("tests", "") + "src"
 testdata = str(Path(__file__).parent.parent) + "/tests/testdata/raster"
