@@ -1,8 +1,6 @@
 window.onEachFeatureToggleHighlight = Object.assign({}, window.dashExtensions, {
     default: {
         yellowIfHighlighted: function (feature, layer) {
-            window.selectedFeatureIds = window.selectedFeatureIds || [];
-            const featureId = feature.properties._unique_id; 
             const geomType = feature.geometry.type;
 
             // Store original style ON THE LAYER
@@ -13,49 +11,46 @@ window.onEachFeatureToggleHighlight = Object.assign({}, window.dashExtensions, {
                 fillOpacity: layer.options.fillOpacity
             };
 
-            // Always check if feature is selected and apply highlight
-            if (window.selectedFeatureIds.includes(featureId)) {
-                if (geomType === "LineString" || geomType === "MultiLineString" || geomType === "LinearRing") {
-                    layer.setStyle({
-                        fillColor: "#ffff00",
-                        color: "#ffff00",
-                        weight: 3,
-                        fillOpacity: 1
-                    });
-                } else {
-                    layer.setStyle({
-                        fillColor: "#ffff00",
-                        color: "#000000",
-                        weight: 3,
-                        fillOpacity: 1
-                    });
-                }
-            }
-
             layer.on("click", function () {
-                const idx = window.selectedFeatureIds.indexOf(featureId);
-                if (idx === -1) {
-                    window.selectedFeatureIds.push(featureId);
+                // Highlight yellow
+                let start = null;
+                let duration = 700; // ms
+                let initialFillOpacity = layer.options.fillOpacity;
+                let initialWeight = layer.options.weight;
+
+                function animateFade(timestamp) {
+                    if (!start) start = timestamp;
+                    let elapsed = timestamp - start;
+                    let progress = Math.min(elapsed / duration, 1);
+
+                    // Interpolate fillOpacity and weight
+                    let fillOpacity = 0.9 * (1 - progress) + initialFillOpacity * progress;
+                    let weight = 3 * (1 - progress) + initialWeight * progress;
+
                     if (geomType === "LineString" || geomType === "MultiLineString" || geomType === "LinearRing") {
                         layer.setStyle({
                             fillColor: "#ffff00",
                             color: "#ffff00",
-                            weight: 3,
-                            fillOpacity: 1
+                            weight: weight,
+                            fillOpacity: fillOpacity
                         });
                     } else {
                         layer.setStyle({
                             fillColor: "#ffff00",
                             color: "#000000",
-                            weight: 3,
-                            fillOpacity: 1
+                            weight: weight,
+                            fillOpacity: fillOpacity
                         });
                     }
-                } else {
-                    window.selectedFeatureIds.splice(idx, 1);
-                    layer.setStyle(layer._originalStyle);
+
+                    if (progress < 1) {
+                        window.requestAnimationFrame(animateFade);
+                    } else {
+                        layer.setStyle(layer._originalStyle);
+                    }
                 }
-                console.log(window.selectedFeatureIds);
+
+                window.requestAnimationFrame(animateFade);
             });
         },
         pointToLayerCircle: function(feature, latlng, context) {
