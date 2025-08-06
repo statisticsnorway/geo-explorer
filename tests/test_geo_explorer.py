@@ -3,7 +3,6 @@ import os
 import sys
 from pathlib import Path
 
-
 src = str(Path(__file__).parent).replace("tests", "") + "src"
 
 sys.path.insert(0, src)

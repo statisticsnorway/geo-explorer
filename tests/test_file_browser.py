@@ -3,16 +3,16 @@ import os
 import sys
 from pathlib import Path
 
-
 src = str(Path(__file__).parent).replace("tests", "") + "src"
 
 sys.path.insert(0, src)
 
 
+import dash_bootstrap_components as dbc
+from dash import Dash
+
 from geo_explorer import FileBrowser
 from geo_explorer import LocalFileSystem
-from dash import Dash
-import dash_bootstrap_components as dbc
 
 
 def not_test_file_browser_locally():
@@ -21,12 +21,10 @@ def not_test_file_browser_locally():
         start_dir="C:/users/ort/OneDrive - Statistisk sentralbyrå/data",
         file_system=LocalFileSystem(),
     )
-    # port = 8050
     app = Dash(
         __name__,
         suppress_callback_exceptions=True,
         external_stylesheets=[dbc.themes.SOLAR],
-        # requests_pathname_prefix=f"/proxy/{port}/",
         serve_locally=True,
         assets_folder="assets",
     )

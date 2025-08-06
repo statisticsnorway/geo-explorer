@@ -2,20 +2,18 @@ from pathlib import Path
 
 import dash
 import dash_bootstrap_components as dbc
-import dash_leaflet as dl
-from fsspec.spec import AbstractFileSystem
-from dash import Dash
 from dash import Input
 from dash import Output
 from dash import State
 from dash import callback
-from dash import dash_table
 from dash import dcc
-from dash.development.base_component import Component
 from dash import html
 from dash.development.base_component import Component
+from fsspec.spec import AbstractFileSystem
 
-OFFWHITE = "#ebebeb"
+from .utils import _clicked_button_style
+from .utils import _standardize_path
+from .utils import _unclicked_button_style
 
 
 class FileBrowser:
@@ -155,7 +153,6 @@ class FileBrowser:
                 ],
                 style={
                     "width": "130vh",
-                    # "backgroundColor": OFFWHITE,
                     "border": "1px solid #ccc",
                     "margin-bottom": "7px",
                     "margin-top": "7px",
@@ -401,7 +398,7 @@ def _get_file_list_row(path, timestamp, size, isdir: bool, current_path, file_sy
                         "fillColor": "rgba(0, 0, 0, 0)",
                         "width": "80vh",
                     }
-                    | ({"color": OFFWHITE} if not isdir else {"color": "#78b3e7"}),
+                    | ({"color": "white"} if not isdir else {"color": "#78b3e7"}),
                     n_clicks=0,
                     disabled=False if isdir else True,
                 )
@@ -420,22 +417,3 @@ def _get_file_list_row(path, timestamp, size, isdir: bool, current_path, file_sy
             ),
         ]
     )
-
-
-def _clicked_button_style():
-    return {
-        "color": "#e4e4e4",
-        "background": "#2F3034",
-    }
-
-
-def _unclicked_button_style():
-    return {
-        "background": "#e4e4e4",
-        "color": "black",
-    }
-
-
-def _standardize_path(path: str | Path) -> str:
-    """Make sure delimiter is '/' and path ends without '/'."""
-    return str(path).replace("\\", "/").replace(r"\"", "/").replace("//", "/")
