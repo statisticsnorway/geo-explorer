@@ -57,3 +57,8 @@
 .scroll-container::-webkit-scrollbar-thumb {
     border-radius: 5px;
 }
+
+.show-hide {
+    display: none
+}
+
