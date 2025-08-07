@@ -423,6 +423,9 @@ def filter_by_bounds(df: pl.DataFrame, bounds: tuple[float]) -> pl.DataFrame:
 
 def _read_and_to_4326(path: str, file_system) -> GeoDataFrame:
     df = sg.read_geopandas(path, file_system=file_system)
+    df["area"] = df.area
+    if df["area"].median() > 10:
+        df["area"] = df["area"].astype(int)
     if len(df):
         df = df.to_crs(4326)
     bounds = df.geometry.bounds.astype("float32[pyarrow]")
@@ -855,44 +858,13 @@ class GeoExplorer:
                     dbc.Row(html.Div(id="loading", style={"height": "3vh"})),
                     dbc.Row(
                         [
-                            dbc.Col(
-                                html.Button(
-                                    "❌ Clear table",
-                                    id="clear-table",
-                                    style={
-                                        "color": "red",
-                                        "border": "none",
-                                        "background": "none",
-                                        "cursor": "pointer",
-                                    },
-                                ),
-                                width=1,
+                            get_data_table(
+                                table_id="feature-table-rows-clicked",
+                                div_id="feature-table-container-clicked",
                             ),
-                            dbc.Col(
-                                html.Div(
-                                    dash_table.DataTable(
-                                        id="feature-table-rows",
-                                        style_header={
-                                            "backgroundColor": "#2f2f2f",
-                                            "color": "white",
-                                            "fontWeight": "bold",
-                                        },
-                                        style_data={
-                                            "backgroundColor": OFFWHITE,
-                                            "color": "black",
-                                        },
-                                        style_table={
-                                            "overflowX": "show",
-                                            "overflowY": "scroll",
-                                            "height": "1vh",
-                                        },
-                                        sort_action="native",
-                                        row_deletable=True,
-                                    ),
-                                    id="feature-table-container",
-                                ),
-                                style={"width": "100%", "height": "auto"},
-                                width=11,
+                            get_data_table(
+                                table_id="feature-table-rows",
+                                div_id="feature-table-container",
                             ),
                         ],
                         style={
@@ -1427,12 +1399,14 @@ class GeoExplorer:
             return 1, {"display": "none"}
 
         @callback(
-            Output("debounced_bounds", "value", allow_duplicate=True),
+            Output("debounced_bounds", "value"),
             Input("map", "bounds"),
             Input("map", "zoom"),
+            State("map-bounds", "data"),
             prevent_initial_call=True,
         )
-        def update_bounds(bounds, zoom):
+        def update_bounds(bounds, zoom, bounds2):
+            print("update_bounds", bounds, bounds2)
             if bounds is None:
                 return dash.no_update
             self.bounds = bounds
@@ -2073,11 +2047,13 @@ class GeoExplorer:
 
             if isinstance(triggered, dict) and triggered["type"] == "table-btn":
                 clicked_path = get_index_if_clicks(table_btn_n_clicks, table_btn_ids)
+                print(clicked_path)
                 if clicked_path is None:
                     return dash.no_update
                 data = self.concatted_data.filter(
                     pl.col("__file_path").str.contains(clicked_path)
                 )
+                print(data)
                 clicked_ids = list(data["_unique_id"])
                 clicked_features = data.drop("geometry").to_dicts()
                 self.selected_features = dict(
@@ -2150,20 +2126,21 @@ class GeoExplorer:
             )
 
         @callback(
-            Output("map", "zoom"),
             Output("map", "bounds"),
+            Output("map", "zoom"),
             Output("map", "center"),
-            Input("map-zoom", "data"),
             State("map-bounds", "data"),
+            Input("map-zoom", "data"),
             State("map-center", "data"),
             prevent_initial_call=True,
         )
-        def intermediate_update_bounds(zoom, bounds, center):
+        def intermediate_update_bounds(bounds, zoom, center):
             """Update map bounds after short sleep because otherwise it's buggy."""
             time.sleep(0.1)
-            if not zoom:
+            if not zoom and not bounds and not center:
                 return dash.no_update, dash.no_update, dash.no_update
-            return zoom, bounds, center
+            print("intermediate_update_bounds", zoom, bounds, center)
+            return bounds, zoom, center
 
         @callback(
             Output("map-bounds", "data"),
@@ -2480,3 +2457,50 @@ def get_index_if_clicks(n_clicks_list, ids) -> str | None:
     if n_clicks == 0:
         return None
     return ids[index]["index"]
+
+
+def get_data_table(title: str, table_id: str, div_id: str):
+    return dbc.Col(
+        html.Div(
+            dbc.Row(
+                [
+                    dbc.Col(html.B(title)),
+                    dbc.Col(
+                        html.Button(
+                            "❌ Clear table",
+                            id="clear-table",
+                            style={
+                                "color": "red",
+                                "border": "none",
+                                "background": "none",
+                                "cursor": "pointer",
+                            },
+                        ),
+                        width=1,
+                    ),
+                ]
+            ),
+            dash_table.DataTable(
+                id=table_id,  # "feature-table-rows",
+                style_header={
+                    "backgroundColor": "#2f2f2f",
+                    "color": "white",
+                    "fontWeight": "bold",
+                },
+                style_data={
+                    "backgroundColor": OFFWHITE,
+                    "color": "black",
+                },
+                style_table={
+                    "overflowX": "show",
+                    "overflowY": "scroll",
+                    "height": "1vh",
+                },
+                sort_action="native",
+                row_deletable=True,
+            ),
+            id=div_id,  # "feature-table-container",
+        ),
+        style={"width": "100%", "height": "auto"},
+        width=11,
+    )
