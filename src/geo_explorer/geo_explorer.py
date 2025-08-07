@@ -638,12 +638,11 @@ class GeoExplorer:
                                         zoomAnimation=zoom_animation,
                                         id="map",
                                         style={
-                                            "width": "130vh",
                                             "height": "90vh",
                                         },
                                     ),
                                 ],
-                                width=8,
+                                width=9,
                             ),
                             dbc.Col(
                                 [
@@ -846,6 +845,7 @@ class GeoExplorer:
                                 ],
                                 style={
                                     "height": "90vh",
+                                    "width": "2vh",
                                     "overflow": "scroll",
                                 },
                                 className="scroll-container",

@@ -49,6 +49,7 @@ class LocalFileSystem(AbstractFileSystem):
 
 
 def get_file_info(path) -> dict[str, str | float]:
+    # local_tz = tzlocal.get_localzone()
     return {
         "updated": datetime.datetime.fromtimestamp(os.path.getmtime(path)),
         "size": os.path.getsize(path),
