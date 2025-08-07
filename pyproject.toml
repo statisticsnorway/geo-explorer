@@ -179,11 +179,6 @@ classmethod-decorators = ["classmethod", "validator", "root_validator", "pydanti
     "S101",    # asserts are encouraged in pytest
 ]
 
-[tool.jupytext]
-formats = "ipynb,auto:percent"
-notebook_metadata_filter = "jupytext.text_representation,-jupytext.text_representation.jupytext_version,-widgets,-varInspector,-kernelspec"
-cell_metadata_filter = "-all"
-
 [tool.isort]
 profile = "black"
 force_single_line = true

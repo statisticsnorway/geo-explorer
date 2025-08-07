@@ -51,7 +51,7 @@ from .utils import _standardize_path
 from .utils import _unclicked_button_style
 
 OFFWHITE = "#ebebeb"
-DEBUG = 1
+DEBUG = False
 
 if DEBUG:
 
@@ -1403,7 +1403,7 @@ class GeoExplorer:
             prevent_initial_call=True,
         )
         def update_bounds(bounds, zoom, bounds2):
-            print("update_bounds", bounds, bounds2)
+            debug_print("update_bounds", bounds, bounds2)
             if bounds is None:
                 return dash.no_update
             self.bounds = bounds
@@ -2062,10 +2062,10 @@ class GeoExplorer:
                 for key, value in feature["properties"].items()
                 if key in columns
             }
-            print(filename_id)
-            print(index)
-            print(columns, path)
-            print(list(props))
+            debug_print(filename_id)
+            debug_print(index)
+            debug_print(columns, path)
+            debug_print(list(props))
             clicked_ids = [x["_unique_id"] for x in clicked_features]
             if props["_unique_id"] not in clicked_ids:
                 clicked_features.append(props)
@@ -2110,7 +2110,7 @@ class GeoExplorer:
                 return dash.no_update
 
             clicked_path = get_index_if_clicks(table_btn_n_clicks, table_btn_ids)
-            print(clicked_path)
+            debug_print(clicked_path)
             if clicked_path is None:
                 return dash.no_update
             data = self.concatted_data.filter(
@@ -2165,7 +2165,7 @@ class GeoExplorer:
             time.sleep(0.1)
             if not zoom and not bounds and not center:
                 return dash.no_update, dash.no_update, dash.no_update
-            print("intermediate_update_bounds", zoom, bounds, center)
+            debug_print("intermediate_update_bounds", zoom, bounds, center)
             return bounds, zoom, center
 
         @callback(
@@ -2471,7 +2471,7 @@ def lat_lon_bounds_to_zoom(
     Returns:
         Approximate zoom level (can be float)
     """
-    print(map_width_px, map_height_px)
+    debug_print(map_width_px, map_height_px)
 
     # Earth's circumference in meters (WGS 84)
     C = 40075016.686
