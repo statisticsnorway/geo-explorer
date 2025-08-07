@@ -22,7 +22,7 @@ class FileBrowser:
         self.file_system = file_system
         self._register_callbacks()
 
-    def get_file_browser_components(self) -> list[Component]:
+    def get_file_browser_components(self, width: str = "140vh") -> list[Component]:
         return [
             dbc.Row(
                 [
@@ -150,7 +150,7 @@ class FileBrowser:
                     ),
                 ],
                 style={
-                    "width": "130vh",
+                    "width": width,
                     "border": "1px solid #ccc",
                     "margin-bottom": "7px",
                     "margin-top": "7px",

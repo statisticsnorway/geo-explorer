@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "geo-explorer"
-version = "0.3.1"
+version = "0.3.2"
 description = "Explore geodata interactively."
 authors = ["Morten Letnes <morten.letnes@ssb.no>"]
 license = "MIT"
@@ -178,11 +178,6 @@ classmethod-decorators = ["classmethod", "validator", "root_validator", "pydanti
     "D103",
     "S101",    # asserts are encouraged in pytest
 ]
-
-[tool.jupytext]
-formats = "ipynb,auto:percent"
-notebook_metadata_filter = "jupytext.text_representation,-jupytext.text_representation.jupytext_version,-widgets,-varInspector,-kernelspec"
-cell_metadata_filter = "-all"
 
 [tool.isort]
 profile = "black"

@@ -51,7 +51,7 @@ from .utils import _standardize_path
 from .utils import _unclicked_button_style
 
 OFFWHITE = "#ebebeb"
-DEBUG = 1
+DEBUG = False
 
 if DEBUG:
 
@@ -423,6 +423,9 @@ def filter_by_bounds(df: pl.DataFrame, bounds: tuple[float]) -> pl.DataFrame:
 
 def _read_and_to_4326(path: str, file_system) -> GeoDataFrame:
     df = sg.read_geopandas(path, file_system=file_system)
+    df["area"] = df.area
+    if df["area"].median() > 10:
+        df["area"] = df["area"].astype(int)
     if len(df):
         df = df.to_crs(4326)
     bounds = df.geometry.bounds.astype("float32[pyarrow]")
@@ -638,12 +641,11 @@ class GeoExplorer:
                                         zoomAnimation=zoom_animation,
                                         id="map",
                                         style={
-                                            "width": "130vh",
                                             "height": "90vh",
                                         },
                                     ),
                                 ],
-                                width=8,
+                                width=9,
                             ),
                             dbc.Col(
                                 [
@@ -846,6 +848,7 @@ class GeoExplorer:
                                 ],
                                 style={
                                     "height": "90vh",
+                                    "width": "2vh",
                                     "overflow": "scroll",
                                 },
                                 className="scroll-container",
@@ -853,52 +856,17 @@ class GeoExplorer:
                         ],
                     ),
                     dbc.Row(html.Div(id="loading", style={"height": "3vh"})),
-                    dbc.Row(
-                        [
-                            dbc.Col(
-                                html.Button(
-                                    "❌ Clear table",
-                                    id="clear-table",
-                                    style={
-                                        "color": "red",
-                                        "border": "none",
-                                        "background": "none",
-                                        "cursor": "pointer",
-                                    },
-                                ),
-                                width=1,
-                            ),
-                            dbc.Col(
-                                html.Div(
-                                    dash_table.DataTable(
-                                        id="feature-table-rows",
-                                        style_header={
-                                            "backgroundColor": "#2f2f2f",
-                                            "color": "white",
-                                            "fontWeight": "bold",
-                                        },
-                                        style_data={
-                                            "backgroundColor": OFFWHITE,
-                                            "color": "black",
-                                        },
-                                        style_table={
-                                            "overflowX": "show",
-                                            "overflowY": "scroll",
-                                            "height": "1vh",
-                                        },
-                                        sort_action="native",
-                                        row_deletable=True,
-                                    ),
-                                    id="feature-table-container",
-                                ),
-                                style={"width": "100%", "height": "auto"},
-                                width=11,
-                            ),
-                        ],
-                        style={
-                            "height": "auto",
-                            "overflow": "visible",
-                        },
+                    get_data_table(
+                        title="Clicked features",
+                        table_id="feature-table-rows-clicked",
+                        div_id="feature-table-container-clicked",
+                        clear_id="clear-table-clicked",
+                    ),
+                    get_data_table(
+                        title="All features",
+                        table_id="feature-table-rows",
+                        div_id="feature-table-container",
+                        clear_id="clear-table",
                     ),
                     *self.file_browser.get_file_browser_components(),
                     dcc.Store(id="is_splitted", data=False),
@@ -927,6 +895,7 @@ class GeoExplorer:
                     dcc.Store(id="map-zoom", data=None),
                     dcc.Store(id="map-center", data=None),
                     dcc.Store(id="clicked-features", data=clicked_features),
+                    dcc.Store(id="all-features", data=clicked_features),
                     dcc.Store(id="clicked-ids", data=self.selected_features),
                     dcc.Interval(
                         id="interval-component",
@@ -1427,12 +1396,14 @@ class GeoExplorer:
             return 1, {"display": "none"}
 
         @callback(
-            Output("debounced_bounds", "value", allow_duplicate=True),
+            Output("debounced_bounds", "value"),
             Input("map", "bounds"),
             Input("map", "zoom"),
+            State("map-bounds", "data"),
             prevent_initial_call=True,
         )
-        def update_bounds(bounds, zoom):
+        def update_bounds(bounds, zoom, bounds2):
+            debug_print("update_bounds", bounds, bounds2)
             if bounds is None:
                 return dash.no_update
             self.bounds = bounds
@@ -1649,17 +1620,25 @@ class GeoExplorer:
             return 1, 1
 
         @callback(
+            Output("force-categorical", "n_clicks"),
+            Input("column-dropdown", "value"),
+            prevent_initial_call=True,
+        )
+        def reset_force_categorical(_):
+            return 0
+
+        @callback(
             Output("colorpicker-container", "children"),
             Output("bins", "children"),
             Output("is-numeric", "children"),
             Output("force-categorical", "children"),
             Output("currently-in-bounds2", "children"),
-            Input("column-dropdown", "value"),
             Input("cmap-placeholder", "value"),
             Input("k", "value"),
             Input("force-categorical", "n_clicks"),
             Input("data-was-concatted", "children"),
             Input("alert2", "children"),
+            State("column-dropdown", "value"),
             State("debounced_bounds", "value"),
             State({"type": "colorpicker", "column_value": dash.ALL}, "value"),
             State({"type": "colorpicker", "column_value": dash.ALL}, "id"),
@@ -1667,12 +1646,12 @@ class GeoExplorer:
             State("is_splitted", "data"),
         )
         def get_column_value_color_dict(
-            column,
             cmap: str,
             k: int,
             force_categorical_clicks: int,
             data_was_concatted,
             alert2,
+            column,
             bounds,
             colorpicker_values_list,
             colorpicker_ids,
@@ -2033,49 +2012,30 @@ class GeoExplorer:
             Output("clicked-features", "data"),
             Output("clicked-ids", "data"),
             Output("alert4", "children"),
-            Input("clicked-ids", "data"),
-            Input("clear-table", "n_clicks"),
+            Input("clear-table-clicked", "n_clicks"),
             Input({"type": "geojson", "filename": dash.ALL}, "n_clicks"),
-            Input({"type": "table-btn", "index": dash.ALL}, "n_clicks"),
-            State({"type": "table-btn", "index": dash.ALL}, "id"),
             State({"type": "geojson", "filename": dash.ALL}, "clickData"),
             State({"type": "geojson", "filename": dash.ALL}, "id"),
             State("clicked-features", "data"),
-            # prevent_initial_call=True,
+            State("clicked-ids", "data"),
         )
-        def display_feature_attributes(
-            clicked_ids,
+        def display_clicked_feature_attributes(
             clear_table,
             geojson_n_clicks,
-            table_btn_n_clicks,
-            table_btn_ids,
             features,
             feature_ids,
             clicked_features,
+            clicked_ids,
         ):
             triggered = dash.callback_context.triggered_id
-            debug_print("display_feature_attributes", triggered)
+            debug_print("display_clicked_feature_attributes", triggered)
             if triggered is None:
                 clicked_ids = list(self.selected_features)
                 clicked_features = list(self.selected_features.values())
                 return clicked_features, clicked_ids, None
-            if triggered == "clear-table":
+            if triggered == "clear-table-clicked":
                 self.selected_features = {}
                 return [], [], None
-
-            if isinstance(triggered, dict) and triggered["type"] == "table-btn":
-                clicked_path = get_index_if_clicks(table_btn_n_clicks, table_btn_ids)
-                if clicked_path is None:
-                    return dash.no_update
-                data = self.concatted_data.filter(
-                    pl.col("__file_path").str.contains(clicked_path)
-                )
-                clicked_ids = list(data["_unique_id"])
-                clicked_features = data.drop("geometry").to_dicts()
-                self.selected_features = dict(
-                    zip(clicked_ids, clicked_features, strict=True)
-                )
-                return clicked_features, [], None
 
             if not features or not any(features):
                 return dash.no_update, dash.no_update, None
@@ -2088,89 +2048,146 @@ class GeoExplorer:
                     if id_["filename"] == filename_id
                 )
             )
+
+            for path in self.loaded_data:
+                if filename_id in path:
+                    columns = set(self.loaded_data[path].columns).difference(
+                        {"geometry"}
+                    )
+                    break
+
             feature = features[index]
-            props = feature["properties"]
+            props = {
+                key: value
+                for key, value in feature["properties"].items()
+                if key in columns
+            }
+            debug_print(filename_id)
+            debug_print(index)
+            debug_print(columns, path)
+            debug_print(list(props))
             clicked_ids = [x["_unique_id"] for x in clicked_features]
             if props["_unique_id"] not in clicked_ids:
                 clicked_features.append(props)
                 clicked_ids.append(props["_unique_id"])
-                # else:
-                #     pop_index = next(
-                #         iter(
-                #             i
-                #             for i, x in enumerate(clicked_features)
-                #             if x["_unique_id"] == props["_unique_id"]
-                #         )
-                #     )
-                #     clicked_features.pop(pop_index)
-                #     clicked_ids.pop(pop_index)
                 self.selected_features = dict(
                     zip(clicked_ids, clicked_features, strict=True)
                 )
             return clicked_features, clicked_ids, None
 
         @callback(
+            Output("feature-table-container-clicked", "style"),
+            Input("clicked-features", "data"),
+        )
+        def hide_show_table_clicked(features):
+            if not features or not len(features):
+                return {"display": "none"}
+            return None
+
+        @callback(
+            Output("feature-table-container", "style"),
+            Input("all-features", "data"),
+        )
+        def hide_show_table_all(features):
+            if not features or not len(features):
+                return {"display": "none"}
+            return None
+
+        @callback(
+            Output("all-features", "data"),
+            Input("clear-table", "n_clicks"),
+            Input({"type": "table-btn", "index": dash.ALL}, "n_clicks"),
+            State({"type": "table-btn", "index": dash.ALL}, "id"),
+        )
+        def display_all_feature_attributes(
+            clear_table, table_btn_n_clicks, table_btn_ids
+        ):
+            triggered = dash.callback_context.triggered_id
+            debug_print("display_all_feature_attributes", triggered)
+            if triggered == "clear-table":
+                return []
+            if triggered is None:
+                return dash.no_update
+
+            clicked_path = get_index_if_clicks(table_btn_n_clicks, table_btn_ids)
+            debug_print(clicked_path)
+            if clicked_path is None:
+                return dash.no_update
+            data = self.concatted_data.filter(
+                pl.col("__file_path").str.contains(clicked_path)
+            )
+            for path in self.loaded_data:
+                if clicked_path in path:
+                    columns = set(self.loaded_data[path].columns).difference(
+                        {"geometry"}
+                    )
+                    break
+            clicked_features = data[list(columns)].to_dicts()
+            return clicked_features
+
+        @callback(
             Output("feature-table-rows", "columns"),
             Output("feature-table-rows", "data"),
             Output("feature-table-rows", "style_table"),
             Output("feature-table-rows", "hidden_columns"),
-            Input("clicked-features", "data"),
+            Input("all-features", "data"),
             State("column-dropdown", "options"),
             State("feature-table-rows", "style_table"),
             # prevent_initial_call=True,
         )
         def update_table(data, column_dropdown, style_table):
-            debug_print("update_table")
-            if not data:
-                return None, None, style_table | {"height": "1vh"}, None
-            if column_dropdown is None:
-                column_dropdown = self._get_column_dropdown_options(
-                    list(self.loaded_data)
-                )
-            all_columns = {x["label"] for x in column_dropdown}
-            if not self.splitted:
-                all_columns = all_columns.difference({"split_index"})
-            height = min(40, len(data) * 5 + 5)
-            for x in data:
-                x["id"] = x.pop("_unique_id")
-            columns = [{"name": k, "id": k} for k in data[0].keys() if k in all_columns]
-            return (
-                columns,
-                data,
-                style_table | {"height": f"{height}vh"},
-                ["id"],
-            )
+            return self._update_table(data, column_dropdown, style_table)
 
         @callback(
-            Output("map", "zoom"),
+            Output("feature-table-rows-clicked", "columns"),
+            Output("feature-table-rows-clicked", "data"),
+            Output("feature-table-rows-clicked", "style_table"),
+            Output("feature-table-rows-clicked", "hidden_columns"),
+            Input("clicked-features", "data"),
+            State("column-dropdown", "options"),
+            State("feature-table-rows-clicked", "style_table"),
+            # prevent_initial_call=True,
+        )
+        def update_table_clicked(data, column_dropdown, style_table):
+            return self._update_table(data, column_dropdown, style_table)
+
+        @callback(
             Output("map", "bounds"),
+            Output("map", "zoom"),
             Output("map", "center"),
-            Input("map-zoom", "data"),
             State("map-bounds", "data"),
+            Input("map-zoom", "data"),
             State("map-center", "data"),
             prevent_initial_call=True,
         )
-        def intermediate_update_bounds(zoom, bounds, center):
+        def intermediate_update_bounds(bounds, zoom, center):
             """Update map bounds after short sleep because otherwise it's buggy."""
             time.sleep(0.1)
-            if not zoom:
+            if not zoom and not bounds and not center:
                 return dash.no_update, dash.no_update, dash.no_update
-            return zoom, bounds, center
+            debug_print("intermediate_update_bounds", zoom, bounds, center)
+            return bounds, zoom, center
 
         @callback(
             Output("map-bounds", "data"),
             Output("map-zoom", "data"),
             Output("map-center", "data"),
             Input("feature-table-rows", "active_cell"),
+            Input("feature-table-rows-clicked", "active_cell"),
             State("viewport-container", "data"),
             prevent_initial_call=True,
         )
-        def zoom_to_feature(active: dict, viewport):
+        def zoom_to_feature(active: dict, active_clicked: dict, viewport):
             width = int(viewport["width"] * 0.7)
             height = int(viewport["height"] * 0.7)
-            if active is None:
+            if active is None and active_clicked is None:
                 return dash.no_update, dash.no_update, dash.no_update
-            unique_id = active["row_id"]
+
+            triggered = dash.callback_context.triggered_id
+            if triggered == "feature-table-rows":
+                unique_id = active["row_id"]
+            else:
+                unique_id = active_clicked["row_id"]
             debug_print("\nzoom_to_feature")
             debug_print(unique_id)
             debug_print(self.concatted_data.filter(pl.col("_unique_id") == unique_id))
@@ -2368,6 +2385,29 @@ class GeoExplorer:
         )
         return [{"label": col, "value": col} for col in sorted(columns)]
 
+    def _update_table(self, data, column_dropdown, style_table):
+        debug_print("update_table")
+        if not data:
+            return None, None, style_table | {"height": "1vh"}, None
+        if column_dropdown is None:
+            column_dropdown = self._get_column_dropdown_options(list(self.loaded_data))
+        all_columns = {x["label"] for x in column_dropdown}
+        if not self.splitted:
+            all_columns = all_columns.difference({"split_index"})
+        height = min(40, len(data) * 5 + 5)
+        for x in data:
+            x["id"] = x.pop("_unique_id")
+        columns_union = set()
+        for x in data:
+            columns_union |= set(x)
+        columns = [{"name": k, "id": k} for k in columns_union if k in all_columns]
+        return (
+            columns,
+            data,
+            style_table | {"height": f"{height}vh"},
+            ["id"],
+        )
+
     def _nested_bounds_to_bounds(
         self,
         bounds: list[list[float]],
@@ -2431,7 +2471,7 @@ def lat_lon_bounds_to_zoom(
     Returns:
         Approximate zoom level (can be float)
     """
-    print(map_width_px, map_height_px)
+    debug_print(map_width_px, map_height_px)
 
     # Earth's circumference in meters (WGS 84)
     C = 40075016.686
@@ -2472,3 +2512,52 @@ def get_index_if_clicks(n_clicks_list, ids) -> str | None:
     if n_clicks == 0:
         return None
     return ids[index]["index"]
+
+
+def get_data_table(title: str, table_id: str, div_id: str, clear_id: str):
+    return dbc.Col(
+        [
+            # html.Div(
+            dbc.Row(
+                [
+                    dbc.Col(html.B(title)),
+                    dbc.Col(
+                        html.Button(
+                            "❌ Clear table",
+                            id=clear_id,
+                            style={
+                                "color": "red",
+                                "border": "none",
+                                "background": "none",
+                                "cursor": "pointer",
+                            },
+                        ),
+                        width=1,
+                    ),
+                ]
+            ),
+            dbc.Row(
+                dash_table.DataTable(
+                    id=table_id,
+                    style_header={
+                        "backgroundColor": "#2f2f2f",
+                        "color": "white",
+                        "fontWeight": "bold",
+                    },
+                    style_data={
+                        "backgroundColor": OFFWHITE,
+                        "color": "black",
+                    },
+                    style_table={
+                        "overflowX": "show",
+                        "overflowY": "scroll",
+                        "height": "1vh",
+                    },
+                    sort_action="native",
+                    row_deletable=True,
+                ),
+            ),
+        ],
+        style={"display": "none"},
+        id=div_id,
+    )
