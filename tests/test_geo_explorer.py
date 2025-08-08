@@ -99,5 +99,3 @@ if __name__ == "__main__":
         not_test_geo_explorer_dapla()
     else:
         not_test_geo_explorer_locally()
-
-poetry run python /home/onyxia/work/giskurs/.venv/lib/python3.12/site-packages/geo_explorer/tests/test_geo_explorer.py

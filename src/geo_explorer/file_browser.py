@@ -357,6 +357,7 @@ def _list_dir(
     try:
         paths = _ls(path)
     except Exception as e:
+        time.sleep(2)
         return (
             [],
             [],

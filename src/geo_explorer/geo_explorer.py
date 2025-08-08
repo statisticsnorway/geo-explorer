@@ -578,7 +578,7 @@ class GeoExplorer:
         self.bounds = None
         self.column = column
         self.color_dict = color_dict or {}
-        self.color_dict2 = {}
+        self._color_dict2 = {}
         self.wms = wms or {}
         self.file_system = file_system or LocalFileSystem()
         self.nan_color = nan_color
@@ -598,6 +598,7 @@ class GeoExplorer:
         self._file_browser = FileBrowser(
             start_dir, file_system=file_system, favorites=favorites
         )
+        self.selected_features = {}
 
         self.app = Dash(
             __name__,
@@ -684,20 +685,12 @@ class GeoExplorer:
                                                             [
                                                                 dbc.ModalHeader(
                                                                     dbc.ModalTitle(
-                                                                        "Code to reproduce explore view."
+                                                                        "Code to reproduce explore view"
                                                                     ),
                                                                     close_button=False,
                                                                 ),
                                                                 dbc.ModalBody(
                                                                     id="export-text"
-                                                                ),
-                                                                dbc.ModalFooter(
-                                                                    dbc.Button(
-                                                                        "Copy code",
-                                                                        id="copy-export",
-                                                                        className="ms-auto",
-                                                                        n_clicks=0,
-                                                                    )
                                                                 ),
                                                             ],
                                                             id="export-view",
@@ -854,13 +847,13 @@ class GeoExplorer:
                     ),
                     dbc.Row(html.Div(id="loading", style={"height": "3vh"})),
                     get_data_table(
-                        title="Clicked features",
+                        title="Clicked features (NOTE: to zoom to a feature, you need to click on two separate cells in the row's values)",
                         table_id="feature-table-rows-clicked",
                         div_id="feature-table-container-clicked",
                         clear_id="clear-table-clicked",
                     ),
                     get_data_table(
-                        title="All features",
+                        title="All features (NOTE: to zoom to a feature, you need to click on two separate cells in the row's values)",
                         table_id="feature-table-rows",
                         div_id="feature-table-container",
                         clear_id="clear-table",
@@ -918,9 +911,9 @@ class GeoExplorer:
                     bounds_series_dict[key] = shapely.box(*df.total_bounds)
                     df = pl.from_pandas(df.assign(geometry=df.geometry.to_wkb()))
                     self.loaded_data[key] = df
-                    self.selected_files[key] = 0
+                    self.selected_files[key] = True
             elif isinstance(x, (str | os.PathLike | PurePath)):
-                self.selected_files[_standardize_path(x)] = 0
+                self.selected_files[_standardize_path(x)] = True
             else:
                 raise ValueError(error_mess)
 
@@ -928,6 +921,7 @@ class GeoExplorer:
 
         if not self.selected_files:
             self._register_callbacks()
+            return
 
         child_paths = _get_child_paths(
             [x for x in self.selected_files if x not in bounds_series_dict],
@@ -951,7 +945,7 @@ class GeoExplorer:
         # dataframe dicts as input data are currently sorted first because they were added to loaded_data first.
         # now to get back original order
         loaded_data_sorted = {}
-        for x in data:
+        for x in data or []:
             if isinstance(x, dict):
                 for key in x:
                     key = _standardize_path(key)
@@ -968,7 +962,6 @@ class GeoExplorer:
 
         self.loaded_data = loaded_data_sorted
 
-        self.selected_features = {}
         for idx in selected_features if selected_features is not None else []:
             i = int(idx)
             df = list(self.loaded_data.values())[i]
@@ -1007,103 +1000,46 @@ class GeoExplorer:
             Output("export-view", "is_open"),
             Input("export", "n_clicks"),
             Input("file-removed", "children"),
-            State("debounced_bounds", "value"),
-            State("map", "zoom"),
-            State({"type": "colorpicker", "column_value": dash.ALL}, "value"),
-            State({"type": "colorpicker", "column_value": dash.ALL}, "id"),
             prevent_initial_call=True,
         )
         def export(
             export_clicks,
-            remove,
-            bounds,
-            zoom,
-            colorpicker_values_list,
-            colorpicker_ids,
+            file_removed,
         ):
             triggered = dash.callback_context.triggered_id
             if triggered in ["file-removed", "close-export"] or not export_clicks:
                 return None, False
-
-            centroid = shapely.box(*self._nested_bounds_to_bounds(bounds)).centroid
-            center = (centroid.y, centroid.x)
-
-            column_values = [x["column_value"] for x in colorpicker_ids]
-            color_dict = dict(zip(column_values, colorpicker_values_list, strict=True))
-
-            def to_string(x):
-                if isinstance(x, str):
-                    return f"'{x}'"
-                return x
-
-            defaults = {
-                arg: default
-                for arg, default in zip(
-                    inspect.getfullargspec(self.__class__).args[1:],
-                    inspect.getfullargspec(self.__class__).defaults,
-                    strict=True,
-                )
-            }
-            data = {
-                k: v
-                for k, v in self.__dict__.items()
-                if k
-                not in [
-                    "paths",
-                    "app",
-                    "currently_in_bounds",
-                    "bounds_series",
-                    "loaded_data",
-                    "center",
-                    "bounds",
-                    "zoom",
-                    "tile_names",
-                    "concatted_data",
-                ]
-                and not k.startswith("_")
-                and not (k in defaults and v == defaults[k])
-            } | {"zoom": zoom, "center": center, "color_dict": color_dict}
-            if self.selected_files:
-                data["data"] = list(data.pop("selected_files"))
-            else:
-                data.pop("selected_files")
-
-            data["selected_features"] = [
-                x["_unique_id"] for x in data["selected_features"].values()
-            ]
-
-            content = [
-                html.Span(f"from geo_explorer import {self.__class__.__name__}"),
-                html.Br(),
-            ]
-            if self.file_system.__module__ == "geo_explorer.fs":
-                content.append(
-                    html.Span(
-                        f"from geo_explorer import {self.file_system.__class__.__name__}"
-                    )
-                )
-                content.append(html.Br())
-
-            content.append(html.Span(f"{self.__class__.__name__}("))
-            content.append(html.Br())
-            for k, v in data.items():
-                content.append(
-                    html.Span(f"{k}={to_string(v)},", style={"padding-left": "4ch"})
-                )
-                content.append(html.Br())
-            content.append(html.Span(").run()"))
-            return (html.Div(content), True)
+            return html.Div(f"{self}.run()"), True
 
         @callback(
-            Output("remove-buttons", "children", allow_duplicate=True),
+            Output("remove-buttons", "children"),  # , allow_duplicate=True),
+            Output("order-was-changed", "data"),
             # Input("new-file-added", "children"),
             Input("alert", "children"),
+            #     Output("order-was-changed", "data"),
             Input("file-removed", "children"),
+            Input({"type": "order-button-up", "index": dash.ALL}, "n_clicks"),
+            Input({"type": "order-button-down", "index": dash.ALL}, "n_clicks"),
             State({"type": "filter", "index": dash.ALL}, "value"),
             State({"type": "filter", "index": dash.ALL}, "id"),
-            prevent_initial_call=True,
+            State("remove-buttons", "children"),
+            # prevent_initial_call=True,
         )
-        def render_items(new_file_added, file_removed, filter_functions, filter_ids):
+        def render_items(
+            alert,
+            file_removed,
+            n_clicks_up,
+            n_clicks_down,
+            filter_functions,
+            filter_ids,
+            buttons,
+        ):
+            triggered = dash.callback_context.triggered_id
+            if triggered and triggered["type"] == "order-button-up":
+                return _change_order(self, n_clicks_up, buttons, "up")
+            if triggered and triggered["type"] == "order-button-down":
+                return _change_order(self, n_clicks_down, buttons, "down")
+
             def get_filter_function_if_any(path):
                 try:
                     return get_index(filter_functions, filter_ids, path)
@@ -1141,6 +1077,20 @@ class GeoExplorer:
                             style={
                                 "marginRight": "10px",
                             },
+                        ),
+                        dbc.Col(
+                            html.Button(
+                                "x",
+                                id={
+                                    "type": "checked-btn",
+                                    "index": path,
+                                },
+                                n_clicks=0 if checked else 1,
+                                style={
+                                    "color": "#7795db",
+                                    "backgroundColor": "#7795db",
+                                },
+                            )
                         ),
                         dbc.Col(
                             html.Button(
@@ -1213,23 +1163,53 @@ class GeoExplorer:
                         "marginBottom": "5px",
                     },
                 )
-                for i, path in enumerate(reversed(self.selected_files))
-            ]
+                for i, (path, checked) in enumerate(
+                    reversed(self.selected_files.items())
+                )
+            ], dash.no_update
+
+        # @callback(
+        #     Output("remove-buttons", "children", allow_duplicate=True),
+        #     Output("order-was-changed", "data"),
+        #     Input({"type": "order-button-up", "index": dash.ALL}, "n_clicks"),
+        #     Input({"type": "order-button-down", "index": dash.ALL}, "n_clicks"),
+        #     State("remove-buttons", "children"),
+        #     prevent_initial_call=True,
+        # )
+        # def change_order(n_clicks_up, n_clicks_down, buttons):
+        #     triggered = dash.callback_context.triggered_id
+        #     if triggered and triggered["type"] == "order-button-up":
+        #         return _change_order(self, n_clicks_up, buttons, "up")
+        #     else:
+        #         return _change_order(self, n_clicks_down, buttons, "down")
 
         @callback(
-            Output("remove-buttons", "children", allow_duplicate=True),
-            Output("order-was-changed", "data"),
-            Input({"type": "order-button-up", "index": dash.ALL}, "n_clicks"),
-            Input({"type": "order-button-down", "index": dash.ALL}, "n_clicks"),
-            State("remove-buttons", "children"),
+            Output({"type": "checked-btn", "index": dash.MATCH}, "style"),
+            Output({"type": "checked-btn", "index": dash.MATCH}, "n_clicks"),
+            Input({"type": "checked-btn", "index": dash.ALL}, "n_clicks"),
+            State({"type": "checked-btn", "index": dash.ALL}, "id"),
             prevent_initial_call=True,
         )
-        def change_order(n_clicks_up, n_clicks_down, buttons):
-            triggered = dash.callback_context.triggered_id
-            if triggered and triggered["type"] == "order-button-up":
-                return _change_order(self, n_clicks_up, buttons, "up")
+        def check_or_uncheck(n_clicks_list, delete_ids):
+            path, n_clicks = get_index_if_clicks(n_clicks_list, delete_ids)
+            if not path:
+                return dash.no_update, dash.no_update
+            is_checked = self.selected_files[path]
+            print("\ncheck_or_uncheck")
+            print(path)
+            print(n_clicks)
+            if not is_checked:
+                self.selected_files[path] = True
+                return {
+                    "color": "#7795db",
+                    "backgroundColor": "#7795db",
+                }, 0
             else:
-                return _change_order(self, n_clicks_down, buttons, "down")
+                self.selected_files[path] = False
+                return {
+                    "color": OFFWHITE,
+                    "backgroundColor": OFFWHITE,
+                }, 1
 
         @callback(
             Output("file-removed", "children", allow_duplicate=True),
@@ -1239,10 +1219,15 @@ class GeoExplorer:
             prevent_initial_call=True,
         )
         def delete_item(n_clicks_list, delete_ids):
-            path_to_remove = get_index_if_clicks(n_clicks_list, delete_ids)
+            print("\n\n\n\ndelete_item")
+            path_to_remove, _ = get_index_if_clicks(n_clicks_list, delete_ids)
+            # path_to_remove = triggered["index"]
+            # print(n_clicks_list)
+            # print(delete_ids)
+            # print(path_to_remove)
+            # print(triggered)
             if path_to_remove is None:
                 return dash.no_update
-            debug_print("\n\n\n\n\n\ndelete_item", path_to_remove)
             for path in dict(self.selected_files):
                 if path_to_remove in [path, Path(path).stem]:
                     self.selected_files.pop(path)
@@ -1287,7 +1272,7 @@ class GeoExplorer:
             prevent_initial_call=True,
         )
         def reload_data(n_clicks_list, reload_ids):
-            path_to_reload = get_index_if_clicks(n_clicks_list, reload_ids)
+            path_to_reload, _ = get_index_if_clicks(n_clicks_list, reload_ids)
             if path_to_reload is None:
                 return dash.no_update
             this_data = pl.concat(
@@ -1681,11 +1666,11 @@ class GeoExplorer:
             else:
                 self.column = column
             if triggered is None and self.selected_files:
-                self.color_dict = self.color_dict2
+                self.color_dict = self._color_dict2
 
             debug_print(self.column, column)
             debug_print(self.color_dict)
-            debug_print(self.color_dict2)
+            debug_print(self._color_dict2)
             debug_print(self.selected_files)
             if not is_splitted and self.splitted:
                 colorpicker_ids, colorpicker_values_list = [], []
@@ -1738,7 +1723,7 @@ class GeoExplorer:
                 except ValueError as e:
                     raise ValueError(f"{e}: {new_values} - {new_colors}") from e
 
-                self.color_dict2 = color_dict
+                self._color_dict2 = color_dict
 
                 return (
                     get_colorpicker_container(color_dict),
@@ -1861,7 +1846,7 @@ class GeoExplorer:
             if self.color_dict:
                 color_dict |= self.color_dict
 
-            self.color_dict2 = color_dict
+            self._color_dict2 = color_dict
             return (
                 get_colorpicker_container(color_dict),
                 bins,
@@ -2118,7 +2103,7 @@ class GeoExplorer:
             if triggered is None:
                 return dash.no_update
 
-            clicked_path = get_index_if_clicks(table_btn_n_clicks, table_btn_ids)
+            clicked_path, _ = get_index_if_clicks(table_btn_n_clicks, table_btn_ids)
             debug_print(clicked_path)
             if clicked_path is None:
                 return dash.no_update
@@ -2441,27 +2426,45 @@ class GeoExplorer:
     def __str__(self) -> str:
         """String representation."""
 
-        def to_string(x):
+        def maybe_to_string(x):
             if isinstance(x, str):
                 return f"'{x}'"
             return x
 
-        txt = ", ".join(
-            [
-                f"{k}={to_string(v)}"
-                for k, v in self.__dict__.items()
-                if k
-                not in [
-                    "paths",
-                    "app",
-                    "currently_in_bounds",
-                    "bounds_series",
-                    "data",
-                ]
-                and not k.startswith("_")
+        data = {
+            key: value
+            for key, value in self.__dict__.items()
+            if key
+            not in [
+                "paths",
+                "app",
+                "currently_in_bounds",
+                "bounds_series",
+                "loaded_data",
+                "bounds",
+                "tile_names",
+                "concatted_data",
+                "splitted",
             ]
-        )
-        return f"{self.__class__.__name__}({txt})"
+            and not key.startswith("_")
+            and not (isinstance(value, (dict, list, tuple)) and not value)
+        }
+
+        if self.selected_files:
+            data["data"] = list(data.pop("selected_files"))
+        else:
+            data.pop("selected_files")
+
+        if self._file_browser.favorites:
+            data["favorites"] = self._file_browser.favorites
+
+        if "selected_features" in data:
+            data["selected_features"] = [
+                x["_unique_id"] for x in data["selected_features"].values()
+            ]
+
+        txt = ", ".join(f"{k}={maybe_to_string(v)}" for k, v in data.items())
+        return (f"{self.__class__.__name__}({txt})",)
 
 
 def get_index(values: list[Any], ids: list[Any], index: Any):
@@ -2509,20 +2512,22 @@ def lat_lon_bounds_to_zoom(
     return round(zoom, 2)
 
 
-def get_index_if_clicks(n_clicks_list, ids) -> str | None:
+def get_index_if_clicks(n_clicks_list, ids) -> tuple[str | None, int | None]:
+    print("get_index_if_clicks")
+    print(n_clicks_list)
+    print(ids)
     if not any(n_clicks_list):
-        return None
+        return None, None
     triggered = dash.callback_context.triggered_id
+    print(triggered)
     if not isinstance(triggered, dict):
-        return None
+        return None, None
     triggered_index = triggered["index"]
-    index = next(
-        iter(i for i, id_ in enumerate(ids) if id_["index"] == triggered_index)
-    )
-    n_clicks = n_clicks_list[index]
-    if n_clicks == 0:
-        return None
-    return ids[index]["index"]
+    for index in (i for i, id_ in enumerate(ids) if id_["index"] == triggered_index):
+        n_clicks = n_clicks_list[index]
+        if n_clicks:
+            return ids[index]["index"], n_clicks
+    return None, None
 
 
 def get_data_table(title: str, table_id: str, div_id: str, clear_id: str):
