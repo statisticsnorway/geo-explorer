@@ -1,4 +1,5 @@
 from pathlib import Path
+import time
 
 import dash
 import dash_bootstrap_components as dbc
@@ -10,16 +11,21 @@ from dash import dcc
 from dash import html
 from dash.development.base_component import Component
 from fsspec.spec import AbstractFileSystem
-
 from .utils import _clicked_button_style
 from .utils import _standardize_path
 from .utils import _unclicked_button_style
 
 
 class FileBrowser:
-    def __init__(self, start_dir: str, file_system: AbstractFileSystem | None = None):
+    def __init__(
+        self,
+        start_dir: str,
+        favorites: list[str] | None = None,
+        file_system: AbstractFileSystem | None = None,
+    ) -> None:
         self.start_dir = start_dir
         self.file_system = file_system
+        self.favorites = favorites if favorites is not None else []
         self._register_callbacks()
 
     def get_file_browser_components(self, width: str = "140vh") -> list[Component]:
@@ -29,7 +35,6 @@ class FileBrowser:
                     dbc.Col(
                         html.Div(
                             [
-                                html.Br(),
                                 html.H2("File Browser"),
                                 dbc.Row(
                                     [
@@ -38,14 +43,30 @@ class FileBrowser:
                                                 html.Button(
                                                     "🡑 Go Up",
                                                     id="up-button",
-                                                    style=_unclicked_button_style(),
+                                                    style=_unclicked_button_style()
+                                                    | {"width": "10vh"},
                                                 ),
                                                 html.Button(
                                                     id="recursive",
                                                     n_clicks=0,
                                                     children="Recursive",
                                                 ),
+                                                dcc.Dropdown(
+                                                    id="favorites-dropdown",
+                                                    placeholder="Favorites",
+                                                    options=[
+                                                        _standardize_path(path)
+                                                        for path in self.favorites
+                                                    ],
+                                                    clearable=False,
+                                                    className="expandable-dropdown-left-aligned",
+                                                ),
                                             ],
+                                            style={
+                                                "display": "flex",
+                                                "gap": "0.2rem",
+                                                "alignItems": "center",
+                                            },
                                         ),
                                         dbc.Col(
                                             html.Button(
@@ -62,7 +83,7 @@ class FileBrowser:
                                         dbc.Col(
                                             dcc.Input(
                                                 self.start_dir,
-                                                id="path-display",
+                                                id="current-path",
                                                 debounce=0.2,
                                                 className="expandable-input-left-aligned",
                                             ),
@@ -160,11 +181,26 @@ class FileBrowser:
                 },
                 className="scroll-container",
             ),
-            dcc.Store(id="current-path", data=self.start_dir),
+            # dcc.Store(id="current-path", data=self.start_dir),
             dcc.Store(id="file-data-dict", data=None),
+            html.Div(),
         ]
 
     def _register_callbacks(self):
+
+        @callback(
+            Output("current-path", "value", allow_duplicate=True),
+            Input("favorites-dropdown", "value"),
+            State("current-path", "value"),
+            prevent_initial_call=True,
+        )
+        def update_case_button(clicked_favorite: str | None, current_path: str):
+            if clicked_favorite and clicked_favorite == current_path:
+                return dash.no_update
+            elif clicked_favorite:
+                return clicked_favorite
+            else:
+                return self.start_dir
 
         @callback(
             Output("case-sensitive", "style"),
@@ -187,35 +223,35 @@ class FileBrowser:
                 return _unclicked_button_style()
 
         @callback(
-            Output("current-path", "data"),
-            Output("path-display", "value"),
+            Output("current-path", "value", allow_duplicate=True),
             Input({"type": "file-path", "index": dash.ALL}, "n_clicks"),
             Input("up-button", "n_clicks"),
-            Input("path-display", "value"),
+            Input("current-path", "value"),
             State({"type": "file-path", "index": dash.ALL}, "id"),
-            State("current-path", "data"),
-            # prevent_initial_call=True,
+            prevent_initial_call=True,
         )
-        def handle_click(load_parquet, up_button_clicks, path, ids, current_path):
+        def handle_click(load_parquet, up_button_clicks, current_path, ids):
             triggered = dash.callback_context.triggered_id
-            path = _standardize_path(path)
-            if triggered == "path-display":
-                return path, path
+            current_path = _standardize_path(current_path)
+            if triggered == "current-path" and not current_path:
+                time.sleep(1)
+                return self.start_dir
+            if triggered == "current-path":
+                return current_path
             if triggered == "up-button":
-                current_path = str(Path(current_path).parent)
-                return current_path, current_path
+                return str(Path(current_path).parent)
             elif not any(load_parquet) or not triggered:
-                return dash.no_update, dash.no_update
+                return dash.no_update
             selected_path = triggered["index"]
             selected_path = _standardize_path(selected_path)
-            return selected_path, selected_path
+            return selected_path
 
         @callback(
             Output("file-data-dict", "data"),
             Output("file-list", "children"),
             Output("file-list-alert", "children"),
             Output({"type": "sort_by", "key": dash.ALL}, "n_clicks"),
-            Input("current-path", "data"),
+            Input("current-path", "value"),
             Input("filename-filter", "value"),
             Input("case-sensitive", "n_clicks"),
             Input("recursive", "n_clicks"),
@@ -312,26 +348,42 @@ def _list_dir(
     else:
 
         def _ls(path):
+            path = str(Path(path) / "**")
             try:
-                return file_system.glob(
-                    str(Path(path) / "**"), detail=True, recursive=True
-                )
+                return file_system.glob(path, detail=True, recursive=True)
             except Exception:
-                return file_system.glob(str(Path(path) / "**"), detail=True)
+                return file_system.glob(path, detail=True)
 
-    paths = list(_ls(path))
+    try:
+        paths = _ls(path)
+    except Exception as e:
+        time.sleep(2)
+        return (
+            [],
+            [],
+            dbc.Alert(
+                f"Couldn't list files in {path}. {type(e)}: {e}",
+                color="warning",
+                dismissable=True,
+            ),
+        )
+
     if not paths:
         try:
             paths = file_system.glob(path, recursive=True, detail=True)
         except Exception:
             paths = file_system.glob(path, detail=True)
 
+    if isinstance(paths, dict):
+        paths = list(paths.values())
+
     paths = [
         x
         for x in paths
-        if _contains(x["name"])
+        if isinstance(x, dict)
+        and _contains(x["name"])
         and (
-            file_system.isdir(x["name"])
+            x["type"] == "directory"
             or any(x["name"].endswith(txt) for txt in [".parquet"])
         )
         and Path(path).parts != Path(x["name"]).parts
@@ -344,9 +396,10 @@ def _list_dir(
         paths,
         [
             _get_file_list_row(
-                x["name"], x["updated"], x["size"], isdir, path, file_system
+                x["name"], x.get("updated", None), x["size"], isdir, path, file_system
             )
             for x, isdir in zip(paths, isdir_list, strict=True)
+            if isinstance(x, dict)
         ],
         None,
     )
