@@ -52,7 +52,7 @@ from .utils import _unclicked_button_style
 
 OFFWHITE: str = "#ebebeb"
 FILE_CHECKED_COLOR: str = "#6391ef"
-DEBUG = True
+DEBUG: bool = False
 
 if DEBUG:
 
@@ -172,9 +172,12 @@ def _get_df(path, loaded_data, paths_concatted, override: bool = False):
     # cols_to_keep = ["_unique_id", "minx", "miny", "maxx", "maxy", "geometry"]
 
     t = perf_counter()
+    debug_print("_get_df", path, path in loaded_data, path in paths_concatted)
     if path in loaded_data and not override and path in paths_concatted:
+        debug_print("_get_df", "00000")
         return []
     if path in loaded_data:
+        debug_print("_get_df", 11111)
         df = loaded_data[path].with_columns(__file_path=pl.lit(path))
         return [df]
 
@@ -188,7 +191,7 @@ def _get_df(path, loaded_data, paths_concatted, override: bool = False):
         if matches:
             matches = [
                 loaded_data[key].with_columns(__file_path=pl.lit(key))
-                for key in loaded_data
+                for key in matches
             ]
 
     else:
@@ -1088,7 +1091,6 @@ class GeoExplorer:
                                     "type": "checked-btn",
                                     "index": path,
                                 },
-                                # n_clicks=0 if checked else 1,
                                 style=(
                                     {
                                         "color": FILE_CHECKED_COLOR,
@@ -1178,21 +1180,6 @@ class GeoExplorer:
                 )
             ], dash.no_update
 
-        # @callback(
-        #     Output("remove-buttons", "children", allow_duplicate=True),
-        #     Output("order-was-changed", "data"),
-        #     Input({"type": "order-button-up", "index": dash.ALL}, "n_clicks"),
-        #     Input({"type": "order-button-down", "index": dash.ALL}, "n_clicks"),
-        #     State("remove-buttons", "children"),
-        #     prevent_initial_call=True,
-        # )
-        # def change_order(n_clicks_up, n_clicks_down, buttons):
-        #     triggered = dash.callback_context.triggered_id
-        #     if triggered and triggered["type"] == "order-button-up":
-        #         return _change_order(self, n_clicks_up, buttons, "up")
-        #     else:
-        #         return _change_order(self, n_clicks_down, buttons, "down")
-
         @callback(
             Output({"type": "checked-btn", "index": dash.MATCH}, "style"),
             Output({"type": "checked-btn", "index": dash.MATCH}, "n_clicks"),
@@ -1200,14 +1187,11 @@ class GeoExplorer:
             State({"type": "checked-btn", "index": dash.ALL}, "id"),
             prevent_initial_call=True,
         )
-        def check_or_uncheck(n_clicks_list, delete_ids):
-            path, n_clicks = get_index_if_clicks(n_clicks_list, delete_ids)
+        def check_or_uncheck(n_clicks_list, ids):
+            path = get_index_if_clicks(n_clicks_list, ids)
             if not path:
                 return dash.no_update, dash.no_update
             is_checked = self.selected_files[path]
-            print("\ncheck_or_uncheck")
-            print(path)
-            print(n_clicks)
             if not is_checked:
                 self.selected_files[path] = True
                 return {
@@ -1229,13 +1213,8 @@ class GeoExplorer:
             prevent_initial_call=True,
         )
         def delete_item(n_clicks_list, delete_ids):
-            print("\n\n\n\ndelete_item")
-            path_to_remove, _ = get_index_if_clicks(n_clicks_list, delete_ids)
-            # path_to_remove = triggered["index"]
-            # print(n_clicks_list)
-            # print(delete_ids)
-            # print(path_to_remove)
-            # print(triggered)
+            debug_print("\n\n\n\ndelete_item")
+            path_to_remove = get_index_if_clicks(n_clicks_list, delete_ids)
             if path_to_remove is None:
                 return dash.no_update
             for path in dict(self.selected_files):
@@ -1287,7 +1266,7 @@ class GeoExplorer:
             prevent_initial_call=True,
         )
         def reload_data(n_clicks_list, reload_ids):
-            path_to_reload, _ = get_index_if_clicks(n_clicks_list, reload_ids)
+            path_to_reload = get_index_if_clicks(n_clicks_list, reload_ids)
             if path_to_reload is None:
                 return dash.no_update
             this_data = pl.concat(
@@ -1433,11 +1412,27 @@ class GeoExplorer:
             Input("file-removed", "children"),
             Input("interval-component", "n_intervals"),
             Input("missing", "children"),
+            Input({"type": "checked-btn", "index": dash.ALL}, "n_clicks"),
+            State({"type": "checked-btn", "index": dash.ALL}, "id"),
         )
-        def get_files_in_bounds(bounds, file_added, file_removed, n_intervals, missing):
+        def get_files_in_bounds(
+            bounds,
+            file_added,
+            file_removed,
+            n_intervals,
+            missing,
+            checked_clicks,
+            checked_ids,
+        ):
             t = perf_counter()
+
             triggered = dash.callback_context.triggered_id
             debug_print("get_files_in_bounds", triggered, len(missing or []), bounds)
+
+            if isinstance(triggered, dict) and triggered["type"] == "checked-btn":
+                path = get_index_if_clicks(checked_clicks, checked_ids)
+                if path is None:
+                    return dash.no_update, dash.no_update, dash.no_update
 
             if triggered != "missing":
                 box = shapely.box(*self._nested_bounds_to_bounds(bounds))
@@ -1610,7 +1605,7 @@ class GeoExplorer:
             prevent_initial_call=True,
         )
         def concat_data(new_data_read, bounds):
-            debug_print("concat_data")
+            debug_print("concat_data", self._paths_concatted)
             t = perf_counter()
             if not new_data_read:
                 return dash.no_update, 1
@@ -1634,8 +1629,13 @@ class GeoExplorer:
             if dfs:
                 if self.concatted_data is not None:
                     dfs.append(self.concatted_data)
+
                 self.concatted_data = pl.concat(dfs, how="diagonal_relaxed")
                 self._paths_concatted = set(self.concatted_data["__file_path"].unique())
+
+                assert len(self.concatted_data) == len(
+                    self.concatted_data["_unique_id"].unique()
+                ), self.concatted_data["_unique_id"].value_counts()
 
             debug_print("concat_data finished after", perf_counter() - t)
 
@@ -2001,7 +2001,6 @@ class GeoExplorer:
                 for path, checked in self.selected_files.items()
                 if checked
             ]
-            print(self.selected_files)
             debug_print("add_data2222", perf_counter() - t, len(results))
 
             data = list(itertools.chain.from_iterable([x[0] for x in results if x[0]]))
@@ -2023,11 +2022,6 @@ class GeoExplorer:
                 max_rows_component = None
             else:
                 max_rows_component = _get_max_rows_displayed_component(self.max_rows)
-
-            if self.concatted_data is not None:
-                assert len(self.concatted_data) == len(
-                    self.concatted_data["__file_path"].unique()
-                )
 
             return (
                 dl.LayersControl(self._base_layers + wms_layers + data),
@@ -2140,7 +2134,7 @@ class GeoExplorer:
             if triggered is None:
                 return dash.no_update
 
-            clicked_path, _ = get_index_if_clicks(table_btn_n_clicks, table_btn_ids)
+            clicked_path = get_index_if_clicks(table_btn_n_clicks, table_btn_ids)
             debug_print(clicked_path)
             if clicked_path is None:
                 return dash.no_update
@@ -2501,7 +2495,7 @@ class GeoExplorer:
             ]
 
         txt = ", ".join(f"{k}={maybe_to_string(v)}" for k, v in data.items())
-        return (f"{self.__class__.__name__}({txt})",)
+        return f"{self.__class__.__name__}({txt})"
 
 
 def get_index(values: list[Any], ids: list[Any], index: Any):
@@ -2549,22 +2543,22 @@ def lat_lon_bounds_to_zoom(
     return round(zoom, 2)
 
 
-def get_index_if_clicks(n_clicks_list, ids) -> tuple[str | None, int | None]:
-    print("get_index_if_clicks")
-    print(n_clicks_list)
-    print(ids)
+def get_index_if_clicks(n_clicks_list, ids) -> str | None:
+    debug_print("get_index_if_clicks")
+    debug_print(n_clicks_list)
+    debug_print(ids)
     if not any(n_clicks_list):
-        return None, None
+        return None
     triggered = dash.callback_context.triggered_id
-    print(triggered)
+    debug_print(triggered)
     if not isinstance(triggered, dict):
-        return None, None
+        return None
     triggered_index = triggered["index"]
     for index in (i for i, id_ in enumerate(ids) if id_["index"] == triggered_index):
         n_clicks = n_clicks_list[index]
         if n_clicks:
-            return ids[index]["index"], n_clicks
-    return None, None
+            return ids[index]["index"]
+    return None
 
 
 def get_data_table(title: str, table_id: str, div_id: str, clear_id: str):
