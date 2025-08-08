@@ -51,7 +51,7 @@ from .utils import _standardize_path
 from .utils import _unclicked_button_style
 
 OFFWHITE = "#ebebeb"
-DEBUG = False
+DEBUG = True
 
 if DEBUG:
 
@@ -171,15 +171,7 @@ def _get_df(path, loaded_data, paths_concatted, override: bool = False):
     # cols_to_keep = ["_unique_id", "minx", "miny", "maxx", "maxy", "geometry"]
 
     t = perf_counter()
-    if (
-        path in loaded_data
-        and not override
-        and path in paths_concatted
-        # (
-        #     concatted_data is not None and (concatted_data["__file_path"] == path).any()
-        # )
-    ):
-        # data already loaded and filtered
+    if path in loaded_data and not override and path in paths_concatted:
         return []
     if path in loaded_data:
         df = loaded_data[path].with_columns(__file_path=pl.lit(path))
@@ -187,7 +179,6 @@ def _get_df(path, loaded_data, paths_concatted, override: bool = False):
 
     if paths_concatted:  # is not None and len(concatted_data):
         debug_print("_get_df", 222)
-        # paths_loaded = {x for x in concatted_data["__file_path"].unique() if path in x}
         matches = [
             key
             for key in loaded_data
@@ -423,20 +414,24 @@ def filter_by_bounds(df: pl.DataFrame, bounds: tuple[float]) -> pl.DataFrame:
 
 def _read_and_to_4326(path: str, file_system) -> GeoDataFrame:
     df = sg.read_geopandas(path, file_system=file_system)
+    return _fix_df(df)
+
+
+def _fix_df(df: GeoDataFrame) -> GeoDataFrame:
     df["area"] = df.area
     if df["area"].median() > 10:
         df["area"] = df["area"].astype(int)
     if len(df):
         df = df.to_crs(4326)
     bounds = df.geometry.bounds.astype("float32[pyarrow]")
-    df[bounds.columns] = bounds
+    df[["minx", "miny", "maxx", "maxy"]] = bounds[["minx", "miny", "maxx", "maxy"]]
     return df
 
 
 def _get_unique_id(df, i):
     """Float column of 0.0, 0.01, ..., 3.1211 etc."""
     divider = 10 ** len(str(len(df)))
-    return (pd.Series(range(len(df)), index=df.index) / divider) + i
+    return (np.array(range(len(df))) / divider) + i
 
 
 def _read_files(explorer, paths: list[str]) -> None:
@@ -549,6 +544,7 @@ class GeoExplorer:
     def __init__(
         self,
         start_dir: str = "/buckets",
+        favorites: list[str] | None = None,
         port: int = 8055,
         file_system: AbstractFileSystem | None = None,
         data: list[str] | None = None,
@@ -600,7 +596,9 @@ class GeoExplorer:
         self.concatted_data: pl.DataFrame | None = None
         self.tile_names: list[str] = []
         self.currently_in_bounds: list[str] = []
-        self.file_browser = FileBrowser(start_dir, file_system)
+        self.file_browser = FileBrowser(
+            start_dir, file_system=file_system, favorites=favorites
+        )
 
         self.app = Dash(
             __name__,
@@ -913,17 +911,15 @@ class GeoExplorer:
         bounds_series_dict = {}
         for x in data or []:
             if isinstance(x, dict):
-                for key, value in x.items():
-                    if not isinstance(value, GeoDataFrame):
+                for key, df in x.items():
+                    if not isinstance(df, GeoDataFrame):
                         raise ValueError(error_mess)
                     key = _standardize_path(key)
-                    if len(value):
-                        value = value.to_crs(4326)
-                    self.loaded_data[key] = value
+                    df = _fix_df(df)
+                    bounds_series_dict[key] = shapely.box(*df.total_bounds)
+                    df = pl.from_pandas(df.assign(geometry=df.geometry.to_wkb()))
+                    self.loaded_data[key] = df
                     self.selected_files[key] = 0
-                    bounds_series_dict[key] = shapely.box(
-                        *self.loaded_data[key].total_bounds
-                    )
             elif isinstance(x, (str | os.PathLike | PurePath)):
                 self.selected_files[_standardize_path(x)] = 0
             else:
@@ -931,56 +927,57 @@ class GeoExplorer:
 
         self.bounds_series = GeoSeries(bounds_series_dict)
 
-        if self.selected_files:
-            child_paths = _get_child_paths(
-                [x for x in self.selected_files if x not in bounds_series_dict],
-                self.file_system,
-            )
-            if child_paths:
-                self.bounds_series = pd.concat(
-                    [
-                        self.bounds_series,
-                        sg.get_bounds_series(
-                            child_paths, file_system=self.file_system
-                        ).to_crs(4326),
-                    ]
-                )
-            _read_files(
-                self,
-                [x for x in self.selected_files if x not in bounds_series_dict],
+        if not self.selected_files:
+            self._register_callbacks()
+
+        child_paths = _get_child_paths(
+            [x for x in self.selected_files if x not in bounds_series_dict],
+            self.file_system,
+        )
+        if child_paths:
+            self.bounds_series = pd.concat(
+                [
+                    self.bounds_series,
+                    sg.get_bounds_series(
+                        child_paths, file_system=self.file_system
+                    ).to_crs(4326),
+                ]
             )
 
-            # dataframe dicts as input data will now be sorted first because they were added to loaded_data first.
-            # now to get back original order
-            loaded_data_sorted = {}
-            for x in data:
-                if isinstance(x, dict):
-                    for key in x:
-                        key = _standardize_path(key)
-                        loaded_data_sorted[key] = self.loaded_data[key].assign(
-                            _unique_id=lambda df: _get_unique_id(
-                                df, len(loaded_data_sorted)
-                            )
-                        )
-                else:
-                    x = _standardize_path(x)
-                    loaded_data_sorted[x] = self.loaded_data[x].assign(
-                        _unique_id=lambda df: _get_unique_id(
-                            df, len(loaded_data_sorted)
-                        )
+        _read_files(
+            self,
+            [x for x in self.selected_files if x not in bounds_series_dict],
+        )
+
+        # dataframe dicts as input data are currently sorted first because they were added to loaded_data first.
+        # now to get back original order
+        loaded_data_sorted = {}
+        for x in data:
+            if isinstance(x, dict):
+                for key in x:
+                    key = _standardize_path(key)
+                    df = self.loaded_data[key]
+                    loaded_data_sorted[key] = df.with_columns(
+                        _unique_id=_get_unique_id(df, len(loaded_data_sorted))
                     )
+            else:
+                x = _standardize_path(x)
+                df = self.loaded_data[key]
+                loaded_data_sorted[x] = df.with_columns(
+                    _unique_id=_get_unique_id(df, len(loaded_data_sorted))
+                )
 
-            self.loaded_data = loaded_data_sorted
+        self.loaded_data = loaded_data_sorted
 
-            for idx in self.selected_features:
-                i = int(idx[0])
-                df = list(self.loaded_data.values())[i]
-                row = df[lambda x: x["_unique_id"] == idx]
-                assert len(row) == 1, (len(row), df)
-                features = row.__geo_interface__["features"]
-                assert len(features) == 1
-                feature = next(iter(features))
-                clicked_features.append(feature["properties"])
+        for idx in self.selected_features:
+            i = int(idx[0])
+            df = list(self.loaded_data.values())[i]
+            row = df[lambda x: x["_unique_id"] == idx]
+            assert len(row) == 1, (len(row), df)
+            features = row.__geo_interface__["features"]
+            assert len(features) == 1
+            feature = next(iter(features))
+            clicked_features.append(feature["properties"])
 
         self._register_callbacks()
 

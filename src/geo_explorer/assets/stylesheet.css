@@ -101,3 +101,15 @@
     margin-right: auto;
     margin-left: 0;
 }
+
+.expandable-dropdown-left-aligned {
+    width: 20%;
+    margin-right: auto;
+    margin-left: 0;
+    transition: width 0.3s ease;
+    display: block;
+}
+
+.expandable-dropdown-left-aligned:focus-within {
+    width: 100%;
+}

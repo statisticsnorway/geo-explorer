@@ -17,9 +17,15 @@ from .utils import _unclicked_button_style
 
 
 class FileBrowser:
-    def __init__(self, start_dir: str, file_system: AbstractFileSystem | None = None):
+    def __init__(
+        self,
+        start_dir: str,
+        favorites: list[str] | None = None,
+        file_system: AbstractFileSystem | None = None,
+    ) -> None:
         self.start_dir = start_dir
         self.file_system = file_system
+        self.favorites = favorites if favorites is not None else []
         self._register_callbacks()
 
     def get_file_browser_components(self, width: str = "140vh") -> list[Component]:
@@ -29,7 +35,6 @@ class FileBrowser:
                     dbc.Col(
                         html.Div(
                             [
-                                html.Br(),
                                 html.H2("File Browser"),
                                 dbc.Row(
                                     [
@@ -44,6 +49,16 @@ class FileBrowser:
                                                     id="recursive",
                                                     n_clicks=0,
                                                     children="Recursive",
+                                                ),
+                                                dcc.Dropdown(
+                                                    id="favorites-dropdown",
+                                                    placeholder="Favorites",
+                                                    options=[
+                                                        _standardize_path(path)
+                                                        for path in self.favorites
+                                                    ],
+                                                    clearable=True,
+                                                    className="expandable-dropdown-left-aligned",
                                                 ),
                                             ],
                                         ),
@@ -162,9 +177,25 @@ class FileBrowser:
             ),
             dcc.Store(id="current-path", data=self.start_dir),
             dcc.Store(id="file-data-dict", data=None),
+            html.Div(),
         ]
 
     def _register_callbacks(self):
+
+        @callback(
+            Output("current-path", "data", allow_duplicate=True),
+            Output("favorites-dropdown", "value"),
+            Input("favorites-dropdown", "value"),
+            State("current-path", "data"),
+            prevent_initial_call=True,
+        )
+        def update_case_button(clicked_favorite: str | None, current_path: str):
+            if clicked_favorite and clicked_favorite == current_path:
+                return dash.no_update, None
+            elif clicked_favorite:
+                return clicked_favorite, None
+            else:
+                return self.start_dir, None
 
         @callback(
             Output("case-sensitive", "style"),
@@ -187,14 +218,14 @@ class FileBrowser:
                 return _unclicked_button_style()
 
         @callback(
-            Output("current-path", "data"),
+            Output("current-path", "data", allow_duplicate=True),
             Output("path-display", "value"),
             Input({"type": "file-path", "index": dash.ALL}, "n_clicks"),
             Input("up-button", "n_clicks"),
             Input("path-display", "value"),
             State({"type": "file-path", "index": dash.ALL}, "id"),
             State("current-path", "data"),
-            # prevent_initial_call=True,
+            prevent_initial_call=True,
         )
         def handle_click(load_parquet, up_button_clicks, path, ids, current_path):
             triggered = dash.callback_context.triggered_id
