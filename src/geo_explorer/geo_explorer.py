@@ -50,7 +50,8 @@ from .utils import _clicked_button_style
 from .utils import _standardize_path
 from .utils import _unclicked_button_style
 
-OFFWHITE = "#ebebeb"
+OFFWHITE: str = "#ebebeb"
+FILE_CHECKED_COLOR: str = "#6391ef"
 DEBUG = True
 
 if DEBUG:
@@ -225,6 +226,9 @@ def _add_data_one_path(
         df = concatted_data.filter(pl.col("__file_path").str.contains(path))
     except Exception as e:
         raise type(e)(f"{e}: {path} - {concatted_data['__file_path']}")
+
+    debug_print(len(df))
+
     if not len(df):
         return [None], None, False
 
@@ -1014,19 +1018,18 @@ class GeoExplorer:
         @callback(
             Output("remove-buttons", "children"),  # , allow_duplicate=True),
             Output("order-was-changed", "data"),
-            # Input("new-file-added", "children"),
-            Input("alert", "children"),
-            #     Output("order-was-changed", "data"),
+            Input("data-was-changed", "children"),
+            # Input("map", "bounds"),
             Input("file-removed", "children"),
             Input({"type": "order-button-up", "index": dash.ALL}, "n_clicks"),
             Input({"type": "order-button-down", "index": dash.ALL}, "n_clicks"),
             State({"type": "filter", "index": dash.ALL}, "value"),
             State({"type": "filter", "index": dash.ALL}, "id"),
             State("remove-buttons", "children"),
-            # prevent_initial_call=True,
+            prevent_initial_call=True,
         )
         def render_items(
-            alert,
+            _,
             file_removed,
             n_clicks_up,
             n_clicks_down,
@@ -1035,9 +1038,9 @@ class GeoExplorer:
             buttons,
         ):
             triggered = dash.callback_context.triggered_id
-            if triggered and triggered["type"] == "order-button-up":
+            if isinstance(triggered, dict) and triggered["type"] == "order-button-up":
                 return _change_order(self, n_clicks_up, buttons, "up")
-            if triggered and triggered["type"] == "order-button-down":
+            if isinstance(triggered, dict) and triggered["type"] == "order-button-down":
                 return _change_order(self, n_clicks_down, buttons, "down")
 
             def get_filter_function_if_any(path):
@@ -1085,11 +1088,18 @@ class GeoExplorer:
                                     "type": "checked-btn",
                                     "index": path,
                                 },
-                                n_clicks=0 if checked else 1,
-                                style={
-                                    "color": "#7795db",
-                                    "backgroundColor": "#7795db",
-                                },
+                                # n_clicks=0 if checked else 1,
+                                style=(
+                                    {
+                                        "color": FILE_CHECKED_COLOR,
+                                        "backgroundColor": FILE_CHECKED_COLOR,
+                                    }
+                                    if checked
+                                    else {
+                                        "color": OFFWHITE,
+                                        "backgroundColor": OFFWHITE,
+                                    }
+                                ),
                             )
                         ),
                         dbc.Col(
@@ -1201,8 +1211,8 @@ class GeoExplorer:
             if not is_checked:
                 self.selected_files[path] = True
                 return {
-                    "color": "#7795db",
-                    "backgroundColor": "#7795db",
+                    "color": FILE_CHECKED_COLOR,
+                    "backgroundColor": FILE_CHECKED_COLOR,
                 }, 0
             else:
                 self.selected_files[path] = False
@@ -1231,6 +1241,11 @@ class GeoExplorer:
             for path in dict(self.selected_files):
                 if path_to_remove in [path, Path(path).stem]:
                     self.selected_files.pop(path)
+
+            self._paths_concatted = {
+                path for path in self._paths_concatted if path == path_to_remove
+            }
+
             any_removed = False
             for path in list(self.loaded_data):
                 if path_to_remove in path:
@@ -1383,7 +1398,7 @@ class GeoExplorer:
                     ),
                     None,
                 )
-            self.selected_files[selected_path] = 0
+            self.selected_files[selected_path] = True
             self.bounds_series = pd.concat(
                 [
                     self.bounds_series,
@@ -1428,11 +1443,21 @@ class GeoExplorer:
                 box = shapely.box(*self._nested_bounds_to_bounds(bounds))
                 files_in_bounds = sg.sfilter(self.bounds_series, box)
                 self.currently_in_bounds = list(set(files_in_bounds.index))
+
+                def is_checked(path):
+                    return next(
+                        iter(
+                            is_checked
+                            for sel_path, is_checked in self.selected_files.items()
+                            if sel_path in path
+                        )
+                    )
+
                 missing = list(
                     {
                         path
                         for path in files_in_bounds.index
-                        if path not in self.loaded_data
+                        if path not in self.loaded_data and is_checked(path)
                     }
                 )
             if missing:
@@ -1890,6 +1915,7 @@ class GeoExplorer:
             Input("data-was-changed", "children"),
             Input("order-was-changed", "data"),
             Input("alpha", "value"),
+            Input({"type": "checked-btn", "index": dash.ALL}, "n_clicks"),
             State("debounced_bounds", "value"),
             State("map", "zoom"),
             State("column-dropdown", "value"),
@@ -1910,6 +1936,7 @@ class GeoExplorer:
             data_was_changed,
             order_was_changed,
             alpha,
+            checked_clicks,
             bounds,
             zoom,
             column,
@@ -1969,8 +1996,13 @@ class GeoExplorer:
             )
             debug_print("add_data111", perf_counter() - t)
 
-            results = [add_data_func(path) for path in self.selected_files]
-            debug_print("add_data2222", perf_counter() - t)
+            results = [
+                add_data_func(path)
+                for path, checked in self.selected_files.items()
+                if checked
+            ]
+            print(self.selected_files)
+            debug_print("add_data2222", perf_counter() - t, len(results))
 
             data = list(itertools.chain.from_iterable([x[0] for x in results if x[0]]))
             out_alert = [x[1] for x in results if x[1]]
@@ -1991,6 +2023,11 @@ class GeoExplorer:
                 max_rows_component = None
             else:
                 max_rows_component = _get_max_rows_displayed_component(self.max_rows)
+
+            if self.concatted_data is not None:
+                assert len(self.concatted_data) == len(
+                    self.concatted_data["__file_path"].unique()
+                )
 
             return (
                 dl.LayersControl(self._base_layers + wms_layers + data),
