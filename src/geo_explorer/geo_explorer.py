@@ -435,6 +435,8 @@ def _get_unique_id(df, i):
 
 
 def _read_files(explorer, paths: list[str]) -> None:
+    if not paths:
+        return
     backend = "threading" if len(paths) <= 3 else "loky"
     with joblib.Parallel(len(paths), backend=backend) as parallel:
         more_data = parallel(
@@ -585,18 +587,15 @@ class GeoExplorer:
         self.max_rows = max_rows
         self.alpha = alpha
         self.file_system = file_system
-        self.selected_features: list[str] = (
-            selected_features if selected_features is not None else {}
-        )
         self.bounds_series = GeoSeries()
         self.selected_files: dict[str, int] = {}
-        self.paths_concatted: set[str] = set()
+        self._paths_concatted: set[str] = set()
         self.loaded_data: dict[str, pl.DataFrame] = {}
         self._loaded_data_sizes: dict[str, int] = {}
         self.concatted_data: pl.DataFrame | None = None
         self.tile_names: list[str] = []
         self.currently_in_bounds: list[str] = []
-        self.file_browser = FileBrowser(
+        self._file_browser = FileBrowser(
             start_dir, file_system=file_system, favorites=favorites
         )
 
@@ -609,7 +608,7 @@ class GeoExplorer:
             assets_folder="assets",
         )
 
-        clicked_features = []
+        # clicked_features = []
 
         def get_layout():
             debug_print("\n\n\n\n\nget_layout", self.bounds)
@@ -866,7 +865,7 @@ class GeoExplorer:
                         div_id="feature-table-container",
                         clear_id="clear-table",
                     ),
-                    *self.file_browser.get_file_browser_components(),
+                    *self._file_browser.get_file_browser_components(),
                     dcc.Store(id="is_splitted", data=False),
                     dcc.Input(
                         id="debounced_bounds",
@@ -892,9 +891,9 @@ class GeoExplorer:
                     dcc.Store(id="map-bounds", data=None),
                     dcc.Store(id="map-zoom", data=None),
                     dcc.Store(id="map-center", data=None),
-                    dcc.Store(id="clicked-features", data=clicked_features),
-                    dcc.Store(id="all-features", data=clicked_features),
-                    dcc.Store(id="clicked-ids", data=self.selected_features),
+                    dcc.Store(id="clicked-features", data=[]),
+                    dcc.Store(id="all-features", data=[]),
+                    dcc.Store(id="clicked-ids", data=None),
                     dcc.Interval(
                         id="interval-component",
                         interval=2000,
@@ -962,22 +961,33 @@ class GeoExplorer:
                     )
             else:
                 x = _standardize_path(x)
-                df = self.loaded_data[key]
+                df = self.loaded_data[x]
                 loaded_data_sorted[x] = df.with_columns(
                     _unique_id=_get_unique_id(df, len(loaded_data_sorted))
                 )
 
         self.loaded_data = loaded_data_sorted
 
-        for idx in self.selected_features:
-            i = int(idx[0])
+        self.selected_features = {}
+        for idx in selected_features if selected_features is not None else []:
+            i = int(idx)
             df = list(self.loaded_data.values())[i]
-            row = df[lambda x: x["_unique_id"] == idx]
+            row = df.filter(pl.col("_unique_id") == idx)
             assert len(row) == 1, (len(row), df)
-            features = row.__geo_interface__["features"]
+            columns = [col for col in row.columns if col != "geometry"]
+            features = GeoDataFrame(
+                row.drop("geometry"),
+                geometry=shapely.from_wkb(row["geometry"]),
+                crs=4326,
+            ).__geo_interface__["features"]
             assert len(features) == 1
             feature = next(iter(features))
-            clicked_features.append(feature["properties"])
+            self.selected_features[idx] = {
+                col: value
+                for col, value in zip(
+                    columns, feature["properties"].values(), strict=True
+                )
+            }
 
         self._register_callbacks()
 
@@ -1050,12 +1060,17 @@ class GeoExplorer:
                     "tile_names",
                     "concatted_data",
                 ]
+                and not k.startswith("_")
                 and not (k in defaults and v == defaults[k])
             } | {"zoom": zoom, "center": center, "color_dict": color_dict}
             if self.selected_files:
                 data["data"] = list(data.pop("selected_files"))
             else:
                 data.pop("selected_files")
+
+            data["selected_features"] = [
+                x["_unique_id"] for x in data["selected_features"].values()
+            ]
 
             content = [
                 html.Span(f"from geo_explorer import {self.__class__.__name__}"),
@@ -1279,7 +1294,7 @@ class GeoExplorer:
                 _get_df(
                     path_to_reload,
                     self.loaded_data,
-                    self.paths_concatted,
+                    self._paths_concatted,
                     override=True,
                 )
             )
@@ -1535,7 +1550,7 @@ class GeoExplorer:
             )
             # constructing dataset to be filtered from the full dataset, in case it has already been filtered on another query
             this_data = pl.concat(
-                _get_df(path, self.loaded_data, self.paths_concatted, override=True)
+                _get_df(path, self.loaded_data, self._paths_concatted, override=True)
             )
 
             out_alert = None
@@ -1594,7 +1609,7 @@ class GeoExplorer:
                 _get_df(
                     path,
                     loaded_data=self.loaded_data,
-                    paths_concatted=self.paths_concatted,
+                    paths_concatted=self._paths_concatted,
                 )
                 for path in self.selected_files
             ]
@@ -1610,7 +1625,7 @@ class GeoExplorer:
                 if self.concatted_data is not None:
                     dfs.append(self.concatted_data)
                 self.concatted_data = pl.concat(dfs, how="diagonal_relaxed")
-                self.paths_concatted = set(self.concatted_data["__file_path"].unique())
+                self._paths_concatted = set(self.concatted_data["__file_path"].unique())
 
             debug_print("concat_data finished after", perf_counter() - t)
 
@@ -2047,7 +2062,8 @@ class GeoExplorer:
             )
 
             for path in self.loaded_data:
-                if filename_id in path:
+                selected_path = next(iter(x for x in self.selected_files if x in path))
+                if selected_path in filename_id:
                     columns = set(self.loaded_data[path].columns).difference(
                         {"geometry"}
                     )
@@ -2059,10 +2075,6 @@ class GeoExplorer:
                 for key, value in feature["properties"].items()
                 if key in columns
             }
-            debug_print(filename_id)
-            debug_print(index)
-            debug_print(columns, path)
-            debug_print(list(props))
             clicked_ids = [x["_unique_id"] for x in clicked_features]
             if props["_unique_id"] not in clicked_ids:
                 clicked_features.append(props)
@@ -2113,6 +2125,7 @@ class GeoExplorer:
             data = self.concatted_data.filter(
                 pl.col("__file_path").str.contains(clicked_path)
             )
+            debug_print(data)
             for path in self.loaded_data:
                 if clicked_path in path:
                     columns = set(self.loaded_data[path].columns).difference(
@@ -2177,13 +2190,14 @@ class GeoExplorer:
         def zoom_to_feature(active: dict, active_clicked: dict, viewport):
             width = int(viewport["width"] * 0.7)
             height = int(viewport["height"] * 0.7)
-            if active is None and active_clicked is None:
-                return dash.no_update, dash.no_update, dash.no_update
-
             triggered = dash.callback_context.triggered_id
             if triggered == "feature-table-rows":
+                if active is None:
+                    return dash.no_update, dash.no_update, dash.no_update
                 unique_id = active["row_id"]
             else:
+                if active is None:
+                    return dash.no_update, dash.no_update, dash.no_update
                 unique_id = active_clicked["row_id"]
             debug_print("\nzoom_to_feature")
             debug_print(unique_id)

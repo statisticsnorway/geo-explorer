@@ -103,13 +103,12 @@
 }
 
 .expandable-dropdown-left-aligned {
-    width: 20%;
-    margin-right: auto;
+    width: 13vh;
     margin-left: 0;
+    margin-right: auto;
     transition: width 0.3s ease;
-    display: block;
 }
 
 .expandable-dropdown-left-aligned:focus-within {
-    width: 100%;
+    width: 60vh;
 }

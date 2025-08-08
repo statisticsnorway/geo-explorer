@@ -29,7 +29,6 @@ def test_geo_explorer():
 
 
 def not_test_geo_explorer_locally():
-
     explorer = GeoExplorer(
         start_dir="C:/users/ort/OneDrive - Statistisk sentralbyrå/data",
         favorites=[
@@ -52,7 +51,7 @@ def not_test_geo_explorer_locally():
                 .assign(num_col=10000),
             },
         ],
-        # selected_features=["0_0", "0_2", "1_0"],
+        selected_features=[1, 1.05],
         column="FYLKE",
         zoom=13,
         center=(59.91740845, 10.71394444),
@@ -63,31 +62,34 @@ def not_test_geo_explorer_locally():
 
 
 def not_test_geo_explorer_dapla():
-
     explorer = GeoExplorer(
         start_dir="/buckets/delt-kart/analyse_data/klargjorte-data/2025",
-        data=[
-            # "/buckets/delt-kart/analyse_data/klargjorte-data/2025/FKB_arealressurs_flate_p2025_v1.parquet",
+        favorites=[
+            "/buckets/delt-kart/analyse_data/klargjorte-data/2025",
+            "/buckets/produkt",
         ],
-        # column="arealtype",
-        zoom=13,
-        center=(59.91740845, 10.71394444),
-        file_system=LocalFileSystem(),
-        port=8055,
-    )
-    explorer.run(debug=True)
-
-    explorer = GeoExplorer(
-        start_dir="/buckets",
         data=[
             "/buckets/delt-kart/analyse_data/klargjorte-data/2025/FKB_arealbruk_flate_p2025_v1.parquet",
             "/buckets/delt-kart/analyse_data/klargjorte-data/2025/FKB_anlegg_flate_p2025_v1.parquet",
+            {
+                "df1": sg.to_gdf((10.8, 59.9), 4326).assign(num_col=100),
+                "df2": sg.to_gdf((10.8, 59.9), 4326)
+                .to_crs(3035)
+                .pipe(sg.buff, 1000)
+                .assign(num_col=1000),
+                "df3": sg.to_gdf((10.8, 59.9), 4326)
+                .to_crs(3035)
+                .pipe(sg.buff, 1000)
+                .pipe(sg.to_lines)
+                .assign(num_col=10000),
+            },
         ],
-        column="objtype",
+        selected_features=[1, 1.05],
+        column="arealtype",
         zoom=13,
         center=(59.91740845, 10.71394444),
         file_system=LocalFileSystem(),
-        port=8055,
+        port=3000,
     )
     explorer.run(debug=True)
 
@@ -97,3 +99,5 @@ if __name__ == "__main__":
         not_test_geo_explorer_dapla()
     else:
         not_test_geo_explorer_locally()
+
+poetry run python /home/onyxia/work/giskurs/.venv/lib/python3.12/site-packages/geo_explorer/tests/test_geo_explorer.py
