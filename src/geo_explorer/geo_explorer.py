@@ -977,14 +977,12 @@ class GeoExplorer:
             i = int(idx)
             df = list(self.loaded_data.values())[i]
             row = df.filter(pl.col("_unique_id") == idx)
-            assert len(row) == 1, (len(row), df)
             columns = [col for col in row.columns if col != "geometry"]
             features = GeoDataFrame(
                 row.drop("geometry"),
                 geometry=shapely.from_wkb(row["geometry"]),
                 crs=4326,
             ).__geo_interface__["features"]
-            assert len(features) == 1
             feature = next(iter(features))
             self.selected_features[idx] = {
                 col: value
@@ -1637,16 +1635,14 @@ class GeoExplorer:
             if dfs:
                 if self.concatted_data is not None:
                     dfs.append(self.concatted_data)
-                    assert len(self.concatted_data) == len(
-                        self.concatted_data["_unique_id"].unique()
-                    ), (111, self.concatted_data["_unique_id"].value_counts())
 
                 self.concatted_data = pl.concat(dfs, how="diagonal_relaxed")
                 self._paths_concatted = set(self.concatted_data["__file_path"].unique())
 
+            if DEBUG:
                 assert len(self.concatted_data) == len(
                     self.concatted_data["_unique_id"].unique()
-                ), (222, self.concatted_data["_unique_id"].value_counts())
+                )
 
             debug_print("concat_data finished after", perf_counter() - t)
 
@@ -2276,10 +2272,6 @@ class GeoExplorer:
                         self.wms.pop(wms_name)
                 return
             wms_name = triggered["index"]
-            assert len(from_year) == 1
-            assert len(to_year) == 1
-            assert len(not_contains) == 1
-            assert len(checked) == 1
             from_year = next(iter(from_year))
             to_year = next(iter(to_year))
             not_contains = next(iter(not_contains)) or None
@@ -2320,7 +2312,6 @@ class GeoExplorer:
             if not checklist_items:
                 return items
             for wms_name in checklist_items:
-                assert isinstance(wms_name, str), type(wms_name)
                 defaults = {
                     arg: default
                     for arg, default in zip(
