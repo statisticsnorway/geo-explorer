@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from fsspec.spec import AbstractFileSystem
+import tzlocal
 
 
 class LocalFileSystem(AbstractFileSystem):
@@ -49,8 +50,9 @@ class LocalFileSystem(AbstractFileSystem):
 
 
 def get_file_info(path) -> dict[str, str | float]:
+    tz = tzlocal.get_localzone()
     return {
-        "updated": datetime.datetime.fromtimestamp(os.path.getmtime(path)),
+        "updated": datetime.datetime.fromtimestamp(os.path.getmtime(path), tz=tz),
         "size": os.path.getsize(path),
         "name": path,
         "type": "directory" if os.path.isdir(path) else "file",

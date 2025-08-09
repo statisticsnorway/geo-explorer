@@ -87,13 +87,13 @@ def _get_max_rows_displayed_component(max_rows: int):
     ]
 
 
-def _change_order(explorer, n_clicks_list, buttons, what: str):
+def _change_order(explorer, n_clicks_list, ids, buttons, what: str):
     if what not in ["up", "down"]:
         raise ValueError(what)
-    if not any(n_clicks_list) or not buttons:
+    path = get_index_if_clicks(n_clicks_list, ids)
+    if path is None or not buttons:
         return dash.no_update, dash.no_update
-    triggered = dash.callback_context.triggered_id
-    i = triggered["index"]
+    i = list(reversed(explorer.selected_files)).index(path)
     if (what == "up" and i == 0) or (what == "down" and i == len(buttons) - 1):
         return dash.no_update, dash.no_update
     if what == "up":
@@ -177,12 +177,12 @@ def _get_df(path, loaded_data, paths_concatted, override: bool = False):
         debug_print("_get_df", "00000")
         return []
     if path in loaded_data:
-        debug_print("_get_df", 11111)
+        debug_print("_get_df", "11111")
         df = loaded_data[path].with_columns(__file_path=pl.lit(path))
         return [df]
 
     if paths_concatted:  # is not None and len(concatted_data):
-        debug_print("_get_df", 222)
+        debug_print("_get_df", "222")
         matches = [
             key
             for key in loaded_data
@@ -195,7 +195,7 @@ def _get_df(path, loaded_data, paths_concatted, override: bool = False):
             ]
 
     else:
-        debug_print("_get_df", 333)
+        debug_print("_get_df", "333")
         matches = [
             df.with_columns(__file_path=pl.lit(key))
             for key, df in loaded_data.items()
@@ -826,7 +826,7 @@ class GeoExplorer:
                                     dbc.Row(
                                         [
                                             html.Div(html.B("Layers")),
-                                            dbc.Col(id="remove-buttons"),
+                                            dbc.Col(id="file-control-panel"),
                                         ],
                                         style={
                                             "display": "flex",
@@ -883,7 +883,7 @@ class GeoExplorer:
                     dcc.Store(id="order-was-changed", data=None),
                     html.Div(id="new-data-read", style={"display": "none"}),
                     html.Div(id="max_rows_was_changed", style={"display": "none"}),
-                    html.Div(id="file-removed", style={"display": "none"}),
+                    html.Div(id="file-deleted", style={"display": "none"}),
                     dcc.Store(id="dummy-output", data=None),
                     dcc.Store(id="dummy-output2", data=None),
                     html.Div(id="bins", style={"display": "none"}),
@@ -1006,45 +1006,49 @@ class GeoExplorer:
             Output("export-text", "children"),
             Output("export-view", "is_open"),
             Input("export", "n_clicks"),
-            Input("file-removed", "children"),
+            Input("file-deleted", "children"),
             prevent_initial_call=True,
         )
         def export(
             export_clicks,
-            file_removed,
+            file_deleted,
         ):
             triggered = dash.callback_context.triggered_id
-            if triggered in ["file-removed", "close-export"] or not export_clicks:
+            if triggered in ["file-deleted", "close-export"] or not export_clicks:
                 return None, False
             return html.Div(f"{self}.run()"), True
 
         @callback(
-            Output("remove-buttons", "children"),  # , allow_duplicate=True),
+            Output("file-control-panel", "children"),  # , allow_duplicate=True),
             Output("order-was-changed", "data"),
             Input("data-was-changed", "children"),
             # Input("map", "bounds"),
-            Input("file-removed", "children"),
+            Input("file-deleted", "children"),
             Input({"type": "order-button-up", "index": dash.ALL}, "n_clicks"),
             Input({"type": "order-button-down", "index": dash.ALL}, "n_clicks"),
+            State({"type": "order-button-up", "index": dash.ALL}, "id"),
+            State({"type": "order-button-down", "index": dash.ALL}, "id"),
             State({"type": "filter", "index": dash.ALL}, "value"),
             State({"type": "filter", "index": dash.ALL}, "id"),
-            State("remove-buttons", "children"),
+            State("file-control-panel", "children"),
             prevent_initial_call=True,
         )
         def render_items(
             _,
-            file_removed,
+            file_deleted,
             n_clicks_up,
             n_clicks_down,
+            ids_up,
+            ids_down,
             filter_functions,
             filter_ids,
             buttons,
         ):
             triggered = dash.callback_context.triggered_id
             if isinstance(triggered, dict) and triggered["type"] == "order-button-up":
-                return _change_order(self, n_clicks_up, buttons, "up")
+                return _change_order(self, n_clicks_up, ids_up, buttons, "up")
             if isinstance(triggered, dict) and triggered["type"] == "order-button-down":
-                return _change_order(self, n_clicks_down, buttons, "down")
+                return _change_order(self, n_clicks_down, ids_down, buttons, "down")
 
             def get_filter_function_if_any(path):
                 try:
@@ -1062,7 +1066,7 @@ class GeoExplorer:
                                         "🡑",
                                         id={
                                             "type": "order-button-up",
-                                            "index": i,
+                                            "index": path,
                                         },
                                         n_clicks=0,
                                         style={"width": "1vh"},
@@ -1073,7 +1077,7 @@ class GeoExplorer:
                                         "🡓",
                                         id={
                                             "type": "order-button-down",
-                                            "index": i,
+                                            "index": path,
                                         },
                                         n_clicks=0,
                                         style={"width": "1vh"},
@@ -1138,7 +1142,6 @@ class GeoExplorer:
                                 },
                             )
                         ),
-                        dbc.Col(html.Span(path)),
                         dbc.Col(
                             html.Button(
                                 "❌",
@@ -1156,6 +1159,7 @@ class GeoExplorer:
                                 },
                             )
                         ),
+                        dbc.Col(html.Span(path)),
                         dbc.Row(
                             dcc.Input(
                                 get_filter_function_if_any(path),
@@ -1206,7 +1210,7 @@ class GeoExplorer:
                 }, 1
 
         @callback(
-            Output("file-removed", "children", allow_duplicate=True),
+            Output("file-deleted", "children", allow_duplicate=True),
             Output("alert3", "children"),
             Input({"type": "delete-btn", "index": dash.ALL}, "n_clicks"),
             State({"type": "delete-btn", "index": dash.ALL}, "id"),
@@ -1214,28 +1218,28 @@ class GeoExplorer:
         )
         def delete_item(n_clicks_list, delete_ids):
             debug_print("\n\n\n\ndelete_item")
-            path_to_remove = get_index_if_clicks(n_clicks_list, delete_ids)
-            if path_to_remove is None:
+            path_to_delete = get_index_if_clicks(n_clicks_list, delete_ids)
+            if path_to_delete is None:
                 return dash.no_update
             for path in dict(self.selected_files):
-                if path_to_remove in [path, Path(path).stem]:
+                if path_to_delete in [path, Path(path).stem]:
                     self.selected_files.pop(path)
 
             self._paths_concatted = {
-                path for path in self._paths_concatted if path == path_to_remove
+                path for path in self._paths_concatted if path != path_to_delete
             }
 
-            any_removed = False
+            any_deleted = False
             for path in list(self.loaded_data):
-                if path_to_remove in path:
+                if path_to_delete in path:
                     del self.loaded_data[path]
                     self.concatted_data = self.concatted_data.filter(
                         pl.col("__file_path").str.contains(path) == False
                     )
-                    any_removed = True
-            if not any_removed and self.column:
+                    any_deleted = True
+            if not any_deleted and self.column:
                 debug_print(
-                    "not any_removed and self.column", self.column, path_to_remove
+                    "not any_deleted and self.column", self.column, path_to_delete
                 )
                 if self.concatted_data[self.column].dtype.is_numeric():
                     return dash.no_update, dbc.Alert(
@@ -1243,10 +1247,10 @@ class GeoExplorer:
                         color="warning",
                         dismissable=True,
                     )
-                if path_to_remove == self.nan_label:
+                if path_to_delete == self.nan_label:
                     expression = pl.col(self.column).is_not_null()
                 else:
-                    expression = pl.col(self.column) != path_to_remove
+                    expression = pl.col(self.column) != path_to_delete
 
                 debug_print(self.concatted_data[self.column].value_counts())
                 debug_print(len(self.concatted_data))
@@ -1255,12 +1259,12 @@ class GeoExplorer:
                 debug_print(self.concatted_data[self.column].value_counts())
             else:
                 self.bounds_series = self.bounds_series[
-                    lambda x: ~x.index.str.contains(path_to_remove)
+                    lambda x: ~x.index.str.contains(path_to_delete)
                 ]
             return 1, None
 
         @callback(
-            Output("file-removed", "children", allow_duplicate=True),
+            Output("file-deleted", "children", allow_duplicate=True),
             Input({"type": "reload-btn", "index": dash.ALL}, "n_clicks"),
             State({"type": "reload-btn", "index": dash.ALL}, "id"),
             prevent_initial_call=True,
@@ -1287,7 +1291,7 @@ class GeoExplorer:
 
         @callback(
             Output("column-dropdown", "value", allow_duplicate=True),
-            Input("file-removed", "children"),
+            Input("file-deleted", "children"),
             prevent_initial_call=True,
         )
         def reset_columns(_):
@@ -1302,7 +1306,7 @@ class GeoExplorer:
             Output("column-dropdown", "value", allow_duplicate=True),
             Input("splitter", "n_clicks"),
             Input("column-dropdown", "value"),
-            # Input("remove-buttons", "children"),
+            # Input("file-control-panel", "children"),
             prevent_initial_call=True,
         )
         def is_splitted(n_clicks: int, column):
@@ -1409,7 +1413,7 @@ class GeoExplorer:
             Output("interval-component", "disabled"),
             Input("debounced_bounds", "value"),
             Input("new-file-added", "children"),
-            Input("file-removed", "children"),
+            Input("file-deleted", "children"),
             Input("interval-component", "n_intervals"),
             Input("missing", "children"),
             Input({"type": "checked-btn", "index": dash.ALL}, "n_clicks"),
@@ -1418,7 +1422,7 @@ class GeoExplorer:
         def get_files_in_bounds(
             bounds,
             file_added,
-            file_removed,
+            file_deleted,
             n_intervals,
             missing,
             checked_clicks,
@@ -1629,13 +1633,16 @@ class GeoExplorer:
             if dfs:
                 if self.concatted_data is not None:
                     dfs.append(self.concatted_data)
+                    assert len(self.concatted_data) == len(
+                        self.concatted_data["_unique_id"].unique()
+                    ), (111, self.concatted_data["_unique_id"].value_counts())
 
                 self.concatted_data = pl.concat(dfs, how="diagonal_relaxed")
                 self._paths_concatted = set(self.concatted_data["__file_path"].unique())
 
                 assert len(self.concatted_data) == len(
                     self.concatted_data["_unique_id"].unique()
-                ), self.concatted_data["_unique_id"].value_counts()
+                ), (222, self.concatted_data["_unique_id"].value_counts())
 
             debug_print("concat_data finished after", perf_counter() - t)
 
@@ -1907,7 +1914,7 @@ class GeoExplorer:
             Input("currently-in-bounds2", "children"),
             Input({"type": "colorpicker", "column_value": dash.ALL}, "value"),
             Input("is-numeric", "children"),
-            Input("file-removed", "children"),
+            Input("file-deleted", "children"),
             Input("wms-items", "children"),
             Input("wms-checklist", "value"),
             Input("new-file-added2", "children"),
@@ -1928,7 +1935,7 @@ class GeoExplorer:
             currently_in_bounds2,
             colorpicker_values_list,
             is_numeric,
-            file_removed,
+            file_deleted,
             wms,
             wms_checked,
             new_file_added2,
