@@ -52,6 +52,10 @@ from .utils import _unclicked_button_style
 
 OFFWHITE: str = "#ebebeb"
 FILE_CHECKED_COLOR: str = "#3e82ff"
+TABLE_TITLE_SUFFIX: str = (
+    " (NOTE: to zoom to a feature, you need to click on two separate cells of the row's values)"
+)
+
 DEBUG: bool = False
 
 if DEBUG:
@@ -854,14 +858,13 @@ class GeoExplorer:
                     ),
                     dbc.Row(html.Div(id="loading", style={"height": "3vh"})),
                     get_data_table(
-                        title_id="clicked-features-title",  # Clicked features (NOTE: to zoom to a feature, you need to click on two separate cells in the row's values)",
+                        title_id="clicked-features-title",
                         table_id="feature-table-rows-clicked",
                         div_id="feature-table-container-clicked",
                         clear_id="clear-table-clicked",
                     ),
                     get_data_table(
-                        title_id="all-features-title",  # Clicked features (NOTE: to zoom to a feature, you need to click on two separate cells in the row's values)",
-                        # title="All features (NOTE: to zoom to a feature, you need to click on two separate cells in the row's values)",
+                        title_id="all-features-title",
                         table_id="feature-table-rows",
                         div_id="feature-table-container",
                         clear_id="clear-table",
@@ -2049,18 +2052,14 @@ class GeoExplorer:
             Input("clicked-features", "data"),
         )
         def update_clicked_features_title(features):
-            return (
-                f"Clicked features (n={len(features)})) (NOTE: to zoom to a feature, you need to click on two separate cells in the row's values)",
-            )
+            return (f"Clicked features (n={len(features)})){TABLE_TITLE_SUFFIX}",)
 
         @callback(
             Output("all-features-title", "children"),
             Input("all-features", "data"),
         )
         def update_all_features_title(features):
-            return (
-                f"All features (n={len(features)})) (NOTE: to zoom to a feature, you need to click on two separate cells in the row's values)",
-            )
+            return (f"All features (n={len(features)})){TABLE_TITLE_SUFFIX}",)
 
         @callback(
             Output("clicked-features", "data"),
