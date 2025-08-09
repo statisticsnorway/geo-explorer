@@ -6,8 +6,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-from fsspec.spec import AbstractFileSystem
 import tzlocal
+from fsspec.spec import AbstractFileSystem
 
 
 class LocalFileSystem(AbstractFileSystem):

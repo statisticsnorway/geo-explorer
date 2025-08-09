@@ -51,7 +51,7 @@ from .utils import _standardize_path
 from .utils import _unclicked_button_style
 
 OFFWHITE: str = "#ebebeb"
-FILE_CHECKED_COLOR: str = "#6391ef"
+FILE_CHECKED_COLOR: str = "#3e82ff"
 DEBUG: bool = False
 
 if DEBUG:
@@ -2211,8 +2211,6 @@ class GeoExplorer:
             prevent_initial_call=True,
         )
         def zoom_to_feature(active: dict, active_clicked: dict, viewport):
-            width = int(viewport["width"] * 0.7)
-            height = int(viewport["height"] * 0.7)
             triggered = dash.callback_context.triggered_id
             if triggered == "feature-table-rows":
                 if active is None:
@@ -2222,20 +2220,22 @@ class GeoExplorer:
                 if active is None:
                     return dash.no_update, dash.no_update, dash.no_update
                 unique_id = active_clicked["row_id"]
-            debug_print("\nzoom_to_feature")
-            debug_print(unique_id)
-            debug_print(self.concatted_data.filter(pl.col("_unique_id") == unique_id))
-            minx, miny, maxx, maxy = (
+            matches = (
                 self.concatted_data.lazy()
                 .filter(pl.col("_unique_id") == unique_id)
                 .select("minx", "miny", "maxx", "maxy")
                 .collect()
-                .row(0)
             )
+            if not len(matches):
+                return dash.no_update, dash.no_update, dash.no_update
+            minx, miny, maxx, maxy = matches.row(0)
             center = ((miny + maxy) / 2, (minx + maxx) / 2)
             debug_print(center)
             bounds = [[miny, minx], [maxy, maxx]]
             debug_print(bounds)
+
+            width = int(viewport["width"] * 0.7)
+            height = int(viewport["height"] * 0.7)
             zoom_level = lat_lon_bounds_to_zoom(minx, miny, maxx, maxy, width, height)
             zoom_level = min(zoom_level, self.max_zoom)
             zoom_level = max(zoom_level, self.min_zoom)
