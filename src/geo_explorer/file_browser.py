@@ -1,5 +1,5 @@
-from pathlib import Path
 import time
+from pathlib import Path
 
 import dash
 import dash_bootstrap_components as dbc
@@ -11,6 +11,7 @@ from dash import dcc
 from dash import html
 from dash.development.base_component import Component
 from fsspec.spec import AbstractFileSystem
+
 from .utils import _clicked_button_style
 from .utils import _standardize_path
 from .utils import _unclicked_button_style
