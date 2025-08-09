@@ -82,7 +82,7 @@ def _get_max_rows_displayed_component(max_rows: int):
                 type="number",
                 debounce=1,
             ),
-            style={"width": "10vh"},
+            style={"width": "13vh"},
         ),
     ]
 
@@ -854,13 +854,14 @@ class GeoExplorer:
                     ),
                     dbc.Row(html.Div(id="loading", style={"height": "3vh"})),
                     get_data_table(
-                        title="Clicked features (NOTE: to zoom to a feature, you need to click on two separate cells in the row's values)",
+                        title_id="clicked-features-title",  # Clicked features (NOTE: to zoom to a feature, you need to click on two separate cells in the row's values)",
                         table_id="feature-table-rows-clicked",
                         div_id="feature-table-container-clicked",
                         clear_id="clear-table-clicked",
                     ),
                     get_data_table(
-                        title="All features (NOTE: to zoom to a feature, you need to click on two separate cells in the row's values)",
+                        title_id="all-features-title",  # Clicked features (NOTE: to zoom to a feature, you need to click on two separate cells in the row's values)",
+                        # title="All features (NOTE: to zoom to a feature, you need to click on two separate cells in the row's values)",
                         table_id="feature-table-rows",
                         div_id="feature-table-container",
                         clear_id="clear-table",
@@ -2044,6 +2045,24 @@ class GeoExplorer:
             self.alpha = alpha
 
         @callback(
+            Output("clicked-features-title", "children"),
+            Input("clicked-features", "data"),
+        )
+        def update_clicked_features_title(features):
+            return (
+                f"Clicked features (n={len(features)})) (NOTE: to zoom to a feature, you need to click on two separate cells in the row's values)",
+            )
+
+        @callback(
+            Output("all-features-title", "children"),
+            Input("all-features", "data"),
+        )
+        def update_all_features_title(features):
+            return (
+                f"All features (n={len(features)})) (NOTE: to zoom to a feature, you need to click on two separate cells in the row's values)",
+            )
+
+        @callback(
             Output("clicked-features", "data"),
             Output("clicked-ids", "data"),
             Output("alert4", "children"),
@@ -2568,13 +2587,12 @@ def get_index_if_clicks(n_clicks_list, ids) -> str | None:
     return None
 
 
-def get_data_table(title: str, table_id: str, div_id: str, clear_id: str):
+def get_data_table(title_id: str, table_id: str, div_id: str, clear_id: str):
     return dbc.Col(
         [
-            # html.Div(
             dbc.Row(
                 [
-                    dbc.Col(html.B(title)),
+                    dbc.Col(html.B(id=title_id)),
                     dbc.Col(
                         html.Button(
                             "❌ Clear table",
@@ -2586,7 +2604,7 @@ def get_data_table(title: str, table_id: str, div_id: str, clear_id: str):
                                 "cursor": "pointer",
                             },
                         ),
-                        width=1,
+                        width=2,
                     ),
                 ]
             ),
