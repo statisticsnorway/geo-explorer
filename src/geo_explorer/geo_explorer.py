@@ -1019,8 +1019,11 @@ class GeoExplorer:
                 Path(os.environ["JUPYTERHUB_HTTP_REFERER"])
                 / os.environ["JUPYTERHUB_SERVICE_PREFIX"].strip("/")
             )
-            display_url = f"{kwargs['jupyter_server_url']}/proxy/{self.port}/".replace(
-                "https:/", "https://"
+            display_url = f"{kwargs['jupyter_server_url']}/proxy/{self.port}/"
+            # make sure there's two slashes to make link clickable in print
+            # (env variable might only have one slash, which redirects to two-slash-url)
+            display_url = display_url.replace("https:/", "https://").replace(
+                "https:///", "https://"
             )
             self.logger.info(f"\n\nDash is running on {display_url}\n\n")
 
