@@ -53,7 +53,7 @@ from .utils import _unclicked_button_style
 OFFWHITE: str = "#ebebeb"
 FILE_CHECKED_COLOR: str = "#3e82ff"
 TABLE_TITLE_SUFFIX: str = (
-    " (NOTE: to zoom to a feature, you need to click on two separate cells of the row's values)"
+    "(NOTE: to properly zoom to a feature, you may need to click on two separate cells on the same row)"
 )
 
 DEBUG: bool = False
@@ -611,11 +611,27 @@ class GeoExplorer:
         )
         self.selected_features = {}
 
+        if (
+            "JUPYTERHUB_SERVICE_PREFIX" in os.environ
+            and "JUPYTERHUB_HTTP_REFERER" in os.environ
+        ):
+            service_prefix = os.environ["JUPYTERHUB_SERVICE_PREFIX"]
+            requests_pathname_prefix = (
+                f"{service_prefix}proxy/{port}/" if (service_prefix and port) else None
+            )
+            print(service_prefix)
+            service_prefix = os.getenv("JUPYTERHUB_SERVICE_PREFIX", "/")
+            print(service_prefix)
+            domain = os.getenv("JUPYTERHUB_HTTP_REFERER", None)
+            print(domain)
+        else:
+            requests_pathname_prefix = f"/proxy/{self.port}/" if self.port else None
+
         self.app = Dash(
             __name__,
             suppress_callback_exceptions=True,
             external_stylesheets=[dbc.themes.SOLAR],
-            requests_pathname_prefix=f"/proxy/{self.port}/" if self.port else None,
+            requests_pathname_prefix=requests_pathname_prefix,
             serve_locally=True,
             assets_folder="assets",
         )
@@ -632,6 +648,7 @@ class GeoExplorer:
                     dbc.Row(html.Div(id="alert3")),
                     dbc.Row(html.Div(id="alert4")),
                     dbc.Row(html.Div(id="new-file-added")),
+                    dbc.Row(html.Div(id="loading", style={"height": "3vh"})),
                     dbc.Row(
                         [
                             dbc.Col(
@@ -856,7 +873,6 @@ class GeoExplorer:
                             ),
                         ],
                     ),
-                    dbc.Row(html.Div(id="loading", style={"height": "3vh"})),
                     get_data_table(
                         title_id="clicked-features-title",
                         table_id="feature-table-rows-clicked",
@@ -993,11 +1009,26 @@ class GeoExplorer:
 
         self._register_callbacks()
 
-    def run(self, debug: bool = False, jupyter_mode: str = "external") -> None:
+    def run(
+        self, debug: bool = False, jupyter_mode: str = "external", **kwargs
+    ) -> None:
         """Run the app."""
+
+        if (
+            "JUPYTERHUB_SERVICE_PREFIX" in os.environ
+            and "JUPYTERHUB_HTTP_REFERER" in os.environ
+        ):
+            kwargs["jupyter_server_url"] = os.environ["JUPYTERHUB_HTTP_REFERER"]
+
+        print(kwargs)
+
         try:
             self.app.run(
-                debug=debug, port=self.port, jupyter_mode=jupyter_mode, threaded=False
+                debug=debug,
+                port=self.port,
+                jupyter_mode=jupyter_mode,
+                threaded=False,
+                **kwargs,
             )
         except KeyboardInterrupt:
             os.kill(os.getpid(), signal.SIGTERM)
@@ -1578,10 +1609,18 @@ class GeoExplorer:
                             this_data.to_pandas().loc[filter_function]
                         )
                     except Exception as e2:
+                        e_name = type(e).__name__
+                        e2_name = type(e2).__name__
+                        e = str(e)
+                        e2 = str(e2)
+                        if len(e) > 1000:
+                            e = e[:997] + "... "
+                        if len(e2) > 1000:
+                            e2 = e2[:997] + "... "
                         out_alert = dbc.Alert(
                             (
-                                f"Filter function failed with polars ({type(e).__name__}: {e!s}) "
-                                f"and pandas: ({type(e2).__name__}: {e2!s})"
+                                f"Filter function failed with polars ({e_name}: {e}) "
+                                f"and pandas: ({e2_name}: {e2})"
                             ),
                             color="warning",
                             dismissable=True,
@@ -1905,7 +1944,7 @@ class GeoExplorer:
         def update_loading(_):
             if self.concatted_data is None or not len(self.concatted_data):
                 return None
-            return "Finished loading. (Tip: change the map bounds slightly if not all geometries are loaded after a few seconds)"
+            return "Finished loading. (If not all geometries are rendering, move the map bounds slightly)"
 
         @callback(
             Output("lc", "children"),
@@ -2048,14 +2087,14 @@ class GeoExplorer:
             Input("clicked-features", "data"),
         )
         def update_clicked_features_title(features):
-            return (f"Clicked features (n={len(features)})){TABLE_TITLE_SUFFIX}",)
+            return (f"Clicked features (n={len(features)}) {TABLE_TITLE_SUFFIX}",)
 
         @callback(
             Output("all-features-title", "children"),
             Input("all-features", "data"),
         )
         def update_all_features_title(features):
-            return (f"All features (n={len(features)})){TABLE_TITLE_SUFFIX}",)
+            return (f"All features (n={len(features)}) {TABLE_TITLE_SUFFIX}",)
 
         @callback(
             Output("clicked-features", "data"),

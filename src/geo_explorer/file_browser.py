@@ -391,7 +391,7 @@ def _list_dir(
     ]
 
     paths.sort(key=lambda x: x["name"])
-    isdir_list = [file_system.isdir(x["name"]) for x in paths]
+    isdir_list = [x["type"] == "directory" for x in paths]
 
     return (
         paths,
@@ -410,7 +410,7 @@ def _get_file_list_row(path, timestamp, size, isdir: bool, current_path, file_sy
     path = _standardize_path(path)
     timestamp = str(timestamp)[:19]
     mb = str(round(size / 1_000_000, 2))
-    is_loadable = not file_system.isdir(path) or (
+    is_loadable = not isdir or (
         path.endswith(".parquet")
         or all(x.endswith(".parquet") for x in file_system.ls(path))
     )
