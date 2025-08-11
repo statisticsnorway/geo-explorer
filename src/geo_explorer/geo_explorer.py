@@ -611,11 +611,27 @@ class GeoExplorer:
         )
         self.selected_features = {}
 
+        if (
+            "JUPYTERHUB_SERVICE_PREFIX" in os.environ
+            and "JUPYTERHUB_HTTP_REFERER" in os.environ
+        ):
+            service_prefix = os.environ["JUPYTERHUB_SERVICE_PREFIX"]
+            requests_pathname_prefix = (
+                f"{service_prefix}proxy/{port}/" if (service_prefix and port) else None
+            )
+            print(service_prefix)
+            service_prefix = os.getenv("JUPYTERHUB_SERVICE_PREFIX", "/")
+            print(service_prefix)
+            domain = os.getenv("JUPYTERHUB_HTTP_REFERER", None)
+            print(domain)
+        else:
+            requests_pathname_prefix = f"/proxy/{self.port}/" if self.port else None
+
         self.app = Dash(
             __name__,
             suppress_callback_exceptions=True,
             external_stylesheets=[dbc.themes.SOLAR],
-            requests_pathname_prefix=f"/proxy/{self.port}/" if self.port else None,
+            requests_pathname_prefix=requests_pathname_prefix,
             serve_locally=True,
             assets_folder="assets",
         )
@@ -993,11 +1009,26 @@ class GeoExplorer:
 
         self._register_callbacks()
 
-    def run(self, debug: bool = False, jupyter_mode: str = "external") -> None:
+    def run(
+        self, debug: bool = False, jupyter_mode: str = "external", **kwargs
+    ) -> None:
         """Run the app."""
+
+        if (
+            "JUPYTERHUB_SERVICE_PREFIX" in os.environ
+            and "JUPYTERHUB_HTTP_REFERER" in os.environ
+        ):
+            kwargs["jupyter_server_url"] = os.environ["JUPYTERHUB_HTTP_REFERER"]
+
+        print(kwargs)
+
         try:
             self.app.run(
-                debug=debug, port=self.port, jupyter_mode=jupyter_mode, threaded=False
+                debug=debug,
+                port=self.port,
+                jupyter_mode=jupyter_mode,
+                threaded=False,
+                **kwargs,
             )
         except KeyboardInterrupt:
             os.kill(os.getpid(), signal.SIGTERM)
