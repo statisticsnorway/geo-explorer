@@ -58,7 +58,7 @@ TABLE_TITLE_SUFFIX: str = (
     "(NOTE: to properly zoom to a feature, you may need to click on two separate cells on the same row)"
 )
 
-DEBUG: bool = False
+DEBUG: bool = True
 
 if DEBUG:
 
@@ -147,7 +147,7 @@ def get_colorpicker_container(color_dict: dict[str, str]) -> html.Div:
                         html.Button(
                             "❌",
                             id={
-                                "type": "delete-btn",
+                                "type": "delete-cat-btn",
                                 "index": value,
                             },
                             n_clicks=0,
@@ -465,9 +465,9 @@ def _read_files(explorer, paths: list[str]) -> None:
                     df = df.drop(col, axis=1)
         df["__file_path"] = path
         df["_unique_id"] = _get_unique_id(df, len(explorer.loaded_data))
-        if explorer.splitted:
-            df["split_index"] = [f"{_get_name(path)} {i}" for i in range(len(df))]
         df = pl.from_pandas(df.assign(geometry=df.geometry.to_wkb()))
+        if explorer.splitted:
+            df = get_split_index(df)
         explorer.loaded_data[path] = df
 
 
@@ -684,7 +684,6 @@ class GeoExplorer:
                                                     id="splitter",
                                                     n_clicks=1 if self.splitted else 0,
                                                 ),
-                                                style={"display": "none"},
                                             ),
                                             dbc.Col(
                                                 html.Div(
@@ -904,6 +903,7 @@ class GeoExplorer:
                     dcc.Store(id="order-was-changed", data=None),
                     html.Div(id="new-data-read", style={"display": "none"}),
                     html.Div(id="max_rows_was_changed", style={"display": "none"}),
+                    dbc.Input(id="max_rows_value", style={"display": "none"}),
                     html.Div(id="file-deleted", style={"display": "none"}),
                     dcc.Store(id="dummy-output", data=None),
                     dcc.Store(id="dummy-output2", data=None),
@@ -1019,8 +1019,11 @@ class GeoExplorer:
                 Path(os.environ["JUPYTERHUB_HTTP_REFERER"])
                 / os.environ["JUPYTERHUB_SERVICE_PREFIX"].strip("/")
             )
-            display_url = f"{kwargs['jupyter_server_url']}/proxy/{self.port}/".replace(
-                "https:/", "https://"
+            display_url = f"{kwargs['jupyter_server_url']}/proxy/{self.port}/"
+            # make sure there's two slashes to make link clickable in print
+            # (env variable might only have one slash, which redirects to two-slash-url)
+            display_url = display_url.replace("https:/", "https://").replace(
+                "https:///", "https://"
             )
             self.logger.info(f"\n\nDash is running on {display_url}\n\n")
 
@@ -1246,36 +1249,37 @@ class GeoExplorer:
 
         @callback(
             Output("file-deleted", "children", allow_duplicate=True),
-            Output("alert3", "children"),
+            Output("alert3", "children", allow_duplicate=True),
             Input({"type": "delete-btn", "index": dash.ALL}, "n_clicks"),
             State({"type": "delete-btn", "index": dash.ALL}, "id"),
             prevent_initial_call=True,
         )
-        def delete_item(n_clicks_list, delete_ids):
-            debug_print("\n\n\n\ndelete_item")
+        def delete_file(n_clicks_list, delete_ids):
+            return self._delete_file(n_clicks_list, delete_ids)
+
+        @callback(
+            Output("file-deleted", "children", allow_duplicate=True),
+            Output("alert3", "children", allow_duplicate=True),
+            Input({"type": "delete-cat-btn", "index": dash.ALL}, "n_clicks"),
+            State({"type": "delete-cat-btn", "index": dash.ALL}, "id"),
+            prevent_initial_call=True,
+        )
+        def delete_category(n_clicks_list, delete_ids):
+            debug_print("\n\n\n\ndelete_category")
             path_to_delete = get_index_if_clicks(n_clicks_list, delete_ids)
             if path_to_delete is None:
+                print("no path to delete\n\n\n\n\n\n\n")
                 return dash.no_update
-            for path in dict(self.selected_files):
-                if path_to_delete in [path, Path(path).stem]:
-                    self.selected_files.pop(path)
+            print(f"path to delete: {path_to_delete}")
 
-            self._paths_concatted = {
-                path for path in self._paths_concatted if path != path_to_delete
-            }
-
-            any_deleted = False
-            for path in list(self.loaded_data):
-                if path_to_delete in path:
-                    del self.loaded_data[path]
-                    self.concatted_data = self.concatted_data.filter(
-                        pl.col("__file_path").str.contains(path) == False
-                    )
-                    any_deleted = True
-            if not any_deleted and self.column:
-                debug_print(
-                    "not any_deleted and self.column", self.column, path_to_delete
-                )
+            if not self.column:
+                self._paths_concatted = {
+                    path
+                    for path in self._paths_concatted
+                    if Path(path).stem != path_to_delete
+                }
+                return self._delete_file(n_clicks_list, delete_ids)
+            else:
                 if self.concatted_data[self.column].dtype.is_numeric():
                     return dash.no_update, dbc.Alert(
                         "Removing categories in numeric columns is not supported",
@@ -1292,10 +1296,10 @@ class GeoExplorer:
                 self.concatted_data = self.concatted_data.filter(expression)
                 debug_print(len(self.concatted_data))
                 debug_print(self.concatted_data[self.column].value_counts())
-            else:
-                self.bounds_series = self.bounds_series[
-                    lambda x: ~x.index.str.contains(path_to_delete)
-                ]
+                self._paths_concatted = set(self.concatted_data["__file_path"].unique())
+                print("pop", self._color_dict2.pop(path_to_delete, None))
+                self._color_dict2.pop(path_to_delete, None)
+
             return 1, None
 
         @callback(
@@ -1393,6 +1397,7 @@ class GeoExplorer:
                     self.loaded_data[key] = self.loaded_data[key].with_columns(
                         split_index=[f"{_get_name(key)} {i}" for i in range(len(df))]
                     )
+                self.concatted_data = get_split_index(self.concatted_data)
                 return 1, {"display": "none"}
             if not any(load_parquet) or not triggered:
                 return dash.no_update, dash.no_update
@@ -1677,13 +1682,14 @@ class GeoExplorer:
                 if self.concatted_data is not None:
                     dfs.append(self.concatted_data)
 
+                debug_print(dfs)
                 self.concatted_data = pl.concat(dfs, how="diagonal_relaxed")
                 self._paths_concatted = set(self.concatted_data["__file_path"].unique())
 
-            if DEBUG:
+            if DEBUG and self.concatted_data is not None:
                 assert len(self.concatted_data) == len(
                     self.concatted_data["_unique_id"].unique()
-                )
+                ), self.concatted_data.filter(pl.col("_unique_id").is_duplicated())
 
             debug_print("concat_data finished after", perf_counter() - t)
 
@@ -1708,12 +1714,12 @@ class GeoExplorer:
             Input("force-categorical", "n_clicks"),
             Input("data-was-concatted", "children"),
             Input("alert2", "children"),
+            Input("is_splitted", "data"),
             State("column-dropdown", "value"),
             State("debounced_bounds", "value"),
             State({"type": "colorpicker", "column_value": dash.ALL}, "value"),
             State({"type": "colorpicker", "column_value": dash.ALL}, "id"),
             State("bins", "children"),
-            State("is_splitted", "data"),
         )
         def get_column_value_color_dict(
             cmap: str,
@@ -1721,12 +1727,12 @@ class GeoExplorer:
             force_categorical_clicks: int,
             data_was_concatted,
             alert2,
+            is_splitted,
             column,
             bounds,
             colorpicker_values_list,
             colorpicker_ids,
             bins,
-            is_splitted,
         ):
             triggered = dash.callback_context.triggered_id
             debug_print("\nget_column_value_color_dict", column, triggered)
@@ -1970,7 +1976,6 @@ class GeoExplorer:
             State("bins", "children"),
             State({"type": "colorpicker", "column_value": dash.ALL}, "id"),
             State("max_rows", "children"),
-            State({"type": "delete-btn", "index": dash.ALL}, "id"),
         )
         def add_data(
             currently_in_bounds2,
@@ -1991,7 +1996,6 @@ class GeoExplorer:
             bins,
             colorpicker_ids,
             max_rows_component,
-            delete_buttons,
         ):
             debug_print("\n\nadd_data", len(self.loaded_data))
             debug_print(bounds)
@@ -2058,7 +2062,9 @@ class GeoExplorer:
             debug_print(
                 "add_data ferdig etter",
                 perf_counter() - t,
+                "loaded_data:",
                 len(self.loaded_data),
+                "concatted_data:",
                 len(self.concatted_data if self.concatted_data is not None else []),
                 len(
                     {x for x in self.concatted_data["__file_path"]}
@@ -2066,6 +2072,9 @@ class GeoExplorer:
                     else []
                 ),
             )
+            if self.splitted:
+                print(self.concatted_data["split_index"])
+
             if rows_are_not_hidden:
                 max_rows_component = None
             else:
@@ -2492,6 +2501,32 @@ class GeoExplorer:
             ["id"],
         )
 
+    def _delete_file(self, n_clicks_list, delete_ids):
+        debug_print("\n\n\n\ndelete_file")
+        path_to_delete = get_index_if_clicks(n_clicks_list, delete_ids)
+        if path_to_delete is None:
+            print("no path to delete\n\n\n\n\n\n\n")
+            return dash.no_update
+        print(f"path to delete: {path_to_delete}")
+        for path in dict(self.selected_files):
+            if path_to_delete in [path, Path(path).stem]:
+                self.selected_files.pop(path)
+
+        self._paths_concatted = {
+            path for path in self._paths_concatted if path != path_to_delete
+        }
+
+        for path in list(self.loaded_data):
+            if path_to_delete in path:
+                del self.loaded_data[path]
+                self.concatted_data = self.concatted_data.filter(
+                    pl.col("__file_path").str.contains(path) == False
+                )
+        self.bounds_series = self.bounds_series[
+            lambda x: ~x.index.str.contains(path_to_delete)
+        ]
+        return 1, None
+
     def _nested_bounds_to_bounds(
         self,
         bounds: list[list[float]],
@@ -2607,7 +2642,7 @@ def get_index_if_clicks(n_clicks_list, ids) -> str | None:
     if not any(n_clicks_list):
         return None
     triggered = dash.callback_context.triggered_id
-    debug_print(triggered)
+    debug_print("get_index_if_clicks", triggered)
     if not isinstance(triggered, dict):
         return None
     triggered_index = triggered["index"]
@@ -2670,4 +2705,26 @@ def is_jupyter():
     return (
         "JUPYTERHUB_SERVICE_PREFIX" in os.environ
         and "JUPYTERHUB_HTTP_REFERER" in os.environ
+    )
+
+
+def get_split_index(df: pl.DataFrame) -> pl.DataFrame:
+    # int_col_as_str = pl.int_range(0, len(df), eager=True).cast(pl.Utf8)
+
+    # print(
+    #     df.with_columns(
+    #         pl.col("__file_path").cum_count().over("__file_path").alias("cumulative_count")
+    #     ).with_columns((pl.col("cumulative_count") + 1).alias("cumulative_count"))
+    # )
+
+    # df = df.with_columns(
+    #     pl.col("__file_path").cum_count().over("__file_path").alias("cumulative_count")
+    # ).with_columns((pl.col("cumulative_count") + 1).alias("cumulative_count"))
+
+    return df.with_columns(
+        (
+            pl.col("__file_path").map_elements(_get_name, return_dtype=pl.Utf8)
+            + " "
+            + pl.col("__file_path").cum_count().over("__file_path").cast(pl.Utf8)
+        ).alias("split_index")
     )

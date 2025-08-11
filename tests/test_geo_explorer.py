@@ -41,7 +41,7 @@ def not_test_geo_explorer_locally():
             "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/N5000_fylke_flate_2024.parquet",
             {
                 "df1": sg.to_gdf((10.8, 59.9), 4326).assign(num_col=100),
-                "df2": sg.to_gdf((10.8, 59.9), 4326)
+                "df2": sg.to_gdf([(10.8, 59.9), (10.8001, 59.9001)], 4326)
                 .to_crs(3035)
                 .pipe(sg.buff, 1000)
                 .assign(num_col=1000),
