@@ -1,3 +1,4 @@
+import sys
 import inspect
 import itertools
 import json
@@ -15,6 +16,7 @@ from pathlib import PurePath
 from time import perf_counter
 from typing import Any
 from typing import ClassVar
+import logging
 
 import dash
 import dash_bootstrap_components as dbc
@@ -611,32 +613,31 @@ class GeoExplorer:
         )
         self.selected_features = {}
 
-        if (
-            "JUPYTERHUB_SERVICE_PREFIX" in os.environ
-            and "JUPYTERHUB_HTTP_REFERER" in os.environ
-        ):
-            service_prefix = os.environ["JUPYTERHUB_SERVICE_PREFIX"]
+        if is_jupyter():
+            service_prefix = os.environ["JUPYTERHUB_SERVICE_PREFIX"].strip("/")
             requests_pathname_prefix = (
-                f"{service_prefix}proxy/{port}/" if (service_prefix and port) else None
+                f"/{service_prefix}/proxy/{port}/" if port else None
             )
-            print(service_prefix)
-            service_prefix = os.getenv("JUPYTERHUB_SERVICE_PREFIX", "/")
-            print(service_prefix)
-            domain = os.getenv("JUPYTERHUB_HTTP_REFERER", None)
-            print(domain)
         else:
             requests_pathname_prefix = f"/proxy/{self.port}/" if self.port else None
 
         self.app = Dash(
             __name__,
-            suppress_callback_exceptions=True,
+            suppress_callback_exceptions=DEBUG is False,
             external_stylesheets=[dbc.themes.SOLAR],
             requests_pathname_prefix=requests_pathname_prefix,
             serve_locally=True,
             assets_folder="assets",
         )
 
-        # clicked_features = []
+        if is_jupyter():
+            self.app.logger.setLevel(logging.ERROR)
+
+        self.logger = logging.getLogger(__name__)
+        self.logger.setLevel(logging.INFO)
+
+        if not self.logger.handlers:
+            self.logger.addHandler(logging.StreamHandler(stream=sys.stdout))
 
         def get_layout():
             debug_print("\n\n\n\n\nget_layout", self.bounds)
@@ -1014,13 +1015,15 @@ class GeoExplorer:
     ) -> None:
         """Run the app."""
 
-        if (
-            "JUPYTERHUB_SERVICE_PREFIX" in os.environ
-            and "JUPYTERHUB_HTTP_REFERER" in os.environ
-        ):
-            kwargs["jupyter_server_url"] = os.environ["JUPYTERHUB_HTTP_REFERER"]
-
-        print(kwargs)
+        if is_jupyter():
+            kwargs["jupyter_server_url"] = str(
+                Path(os.environ["JUPYTERHUB_HTTP_REFERER"])
+                / os.environ["JUPYTERHUB_SERVICE_PREFIX"].strip("/")
+            )
+            display_url = f"{kwargs['jupyter_server_url']}/proxy/{self.port}/"
+            self.logger.info(
+                f"\n\nDash is running on {display_url.rstrip('/').replace('https:/', 'https://')}\n\n"
+            )
 
         try:
             self.app.run(
@@ -2661,4 +2664,11 @@ def get_data_table(title_id: str, table_id: str, div_id: str, clear_id: str):
         ],
         style={"display": "none"},
         id=div_id,
+    )
+
+
+def is_jupyter():
+    return (
+        "JUPYTERHUB_SERVICE_PREFIX" in os.environ
+        and "JUPYTERHUB_HTTP_REFERER" in os.environ
     )
