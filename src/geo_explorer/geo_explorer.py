@@ -1,10 +1,11 @@
-import sys
 import inspect
 import itertools
 import json
+import logging
 import math
 import os
 import signal
+import sys
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -16,7 +17,6 @@ from pathlib import PurePath
 from time import perf_counter
 from typing import Any
 from typing import ClassVar
-import logging
 
 import dash
 import dash_bootstrap_components as dbc
@@ -1014,7 +1014,6 @@ class GeoExplorer:
         self, debug: bool = False, jupyter_mode: str = "external", **kwargs
     ) -> None:
         """Run the app."""
-
         if is_jupyter():
             kwargs["jupyter_server_url"] = str(
                 Path(os.environ["JUPYTERHUB_HTTP_REFERER"])
