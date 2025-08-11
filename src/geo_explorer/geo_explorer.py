@@ -53,7 +53,7 @@ from .utils import _unclicked_button_style
 OFFWHITE: str = "#ebebeb"
 FILE_CHECKED_COLOR: str = "#3e82ff"
 TABLE_TITLE_SUFFIX: str = (
-    " (NOTE: to zoom to a feature, you need to click on two separate cells of the row's values)"
+    "(NOTE: to properly zoom to a feature, you may need to click on two separate cells on the same row)"
 )
 
 DEBUG: bool = False
@@ -632,6 +632,7 @@ class GeoExplorer:
                     dbc.Row(html.Div(id="alert3")),
                     dbc.Row(html.Div(id="alert4")),
                     dbc.Row(html.Div(id="new-file-added")),
+                    dbc.Row(html.Div(id="loading", style={"height": "3vh"})),
                     dbc.Row(
                         [
                             dbc.Col(
@@ -856,7 +857,6 @@ class GeoExplorer:
                             ),
                         ],
                     ),
-                    dbc.Row(html.Div(id="loading", style={"height": "3vh"})),
                     get_data_table(
                         title_id="clicked-features-title",
                         table_id="feature-table-rows-clicked",
@@ -1578,10 +1578,18 @@ class GeoExplorer:
                             this_data.to_pandas().loc[filter_function]
                         )
                     except Exception as e2:
+                        e_name = type(e).__name__
+                        e2_name = type(e2).__name__
+                        e = str(e)
+                        e2 = str(e2)
+                        if len(e) > 1000:
+                            e = e[:997] + "... "
+                        if len(e2) > 1000:
+                            e2 = e2[:997] + "... "
                         out_alert = dbc.Alert(
                             (
-                                f"Filter function failed with polars ({type(e).__name__}: {e!s}) "
-                                f"and pandas: ({type(e2).__name__}: {e2!s})"
+                                f"Filter function failed with polars ({e_name}: {e}) "
+                                f"and pandas: ({e2_name}: {e2})"
                             ),
                             color="warning",
                             dismissable=True,
@@ -1905,7 +1913,7 @@ class GeoExplorer:
         def update_loading(_):
             if self.concatted_data is None or not len(self.concatted_data):
                 return None
-            return "Finished loading. (Tip: change the map bounds slightly if not all geometries are loaded after a few seconds)"
+            return "Finished loading. (If not all geometries are rendering, move the map bounds slightly)"
 
         @callback(
             Output("lc", "children"),
@@ -2048,14 +2056,14 @@ class GeoExplorer:
             Input("clicked-features", "data"),
         )
         def update_clicked_features_title(features):
-            return (f"Clicked features (n={len(features)})){TABLE_TITLE_SUFFIX}",)
+            return (f"Clicked features (n={len(features)}) {TABLE_TITLE_SUFFIX}",)
 
         @callback(
             Output("all-features-title", "children"),
             Input("all-features", "data"),
         )
         def update_all_features_title(features):
-            return (f"All features (n={len(features)})){TABLE_TITLE_SUFFIX}",)
+            return (f"All features (n={len(features)}) {TABLE_TITLE_SUFFIX}",)
 
         @callback(
             Output("clicked-features", "data"),

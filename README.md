@@ -1,46 +1,69 @@
 # geo-explorer
 
-Explore geodata interactively.
+Explore geodata interactively in an app.
 
 Opprettet av:
 ort <ort@ssb.no>
 
 ---
 
-To install, use one of:
+To install, use either:
 
 ```shell
-poetry add ssb-sgis
-pip install ssb-sgis
+poetry add geo-explorer
+```
+
+Or:
+
+```shell
+pip install geo-explorer
 ```
 
 ## GeoExplorer
 
+It's best to run the app in the terminal.
+
+Create a python file like this:
 
 ```python
 from geo_explorer import GeoExplorer
 from geo_explorer import LocalFileSystem
+
 explorer = GeoExplorer(
-    start_dir="C:/users/ort/OneDrive - Statistisk sentralbyrå/data",
+    start_dir="/buckets/delt-kart/analyse_data/klargjorte-data/2025",
+    favorites=[
+        "/buckets/delt-kart/analyse_data/klargjorte-data/2025",
+        "/buckets/delt-kart/visualisering_data/klargjorte-data/2025/parquet",
+    ],
+    zoom=13,
+    center=(59.91740845, 10.71394444),
     file_system=LocalFileSystem(),
-    port=8055,
-)
-explorer.run(debug=True)
+    port=3000,
+).run()
 ```
 
-Run locally:
+And run the file.
+
+You can also use other file systems, for instance GCSFileSystem for Google Cloud Storage:
 
 ```python
 from geo_explorer import GeoExplorer
-from geo_explorer import LocalFileSystem
-explorer = GeoExplorer(
-    start_dir="C:/users/user/data",
-    file_system=LocalFileSystem(),
-    port=None,
-)
-explorer.run()
+from gcsfs import GCSFileSystem
+
+GeoExplorer(
+    start_dir="ssb-areal-data-delt-kart-prod/analyse_data/klargjorte-data/2025",
+    favorites=[
+        "ssb-areal-data-delt-kart-prod/analyse_data/klargjorte-data/2025",
+        "ssb-areal-data-delt-kart-prod/visualisering_data/klargjorte-data/2025/parquet",
+    ],
+    zoom=13,
+    center=(59.91740845, 10.71394444),
+    file_system=GCSFileSystem(),
+    port=3000,
+).run()
 ```
 
+The file system should act like fsspec's AbstractFileSystem and implement the methods *ls* and *glob*.
 
 ## Developer information
 
