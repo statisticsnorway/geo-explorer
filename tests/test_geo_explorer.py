@@ -1,9 +1,3 @@
-print("https:/dsds/dssdsd/")
-print("https:/dsds/dssdsd")
-print("https::/dsds/dssdsd/")
-print("https::/dsds/dssdsd")
-sss
-
 # %%
 import os
 import sys
