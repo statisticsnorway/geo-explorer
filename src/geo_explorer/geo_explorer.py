@@ -1019,10 +1019,10 @@ class GeoExplorer:
                 Path(os.environ["JUPYTERHUB_HTTP_REFERER"])
                 / os.environ["JUPYTERHUB_SERVICE_PREFIX"].strip("/")
             )
-            display_url = f"{kwargs['jupyter_server_url']}/proxy/{self.port}/"
-            self.logger.info(
-                f"\n\nDash is running on {display_url.rstrip('/').replace('https:/', 'https://')}\n\n"
+            display_url = f"{kwargs['jupyter_server_url']}/proxy/{self.port}/".replace(
+                "https:/", "https://"
             )
+            self.logger.info(f"\n\nDash is running on {display_url}\n\n")
 
         try:
             self.app.run(
