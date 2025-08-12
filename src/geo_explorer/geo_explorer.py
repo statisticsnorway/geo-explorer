@@ -171,6 +171,7 @@ def get_colorpicker_container(color_dict: dict[str, str]) -> html.Div:
             )
             for value, color in color_dict.items()
         ],
+        id="color-container",
     )
 
 
@@ -577,6 +578,7 @@ class GeoExplorer:
         alpha: float = 0.7,
         zoom_animation: bool = False,
         splitted: bool = False,
+        hard_click: bool = False,
     ) -> None:
         """Initialiser."""
         self.start_dir = start_dir
@@ -597,6 +599,7 @@ class GeoExplorer:
         self.nan_color = nan_color
         self.nan_label = nan_label
         self.splitted = splitted
+        self.hard_click = hard_click
         self.max_rows = max_rows
         self.alpha = alpha
         self.file_system = file_system
@@ -874,6 +877,16 @@ class GeoExplorer:
                         ],
                     ),
                     get_data_table(
+                        html.Button(
+                            "Hard click",
+                            id="hard-click",
+                            n_clicks=self.hard_click,
+                            style=(
+                                _clicked_button_style()
+                                if self.hard_click
+                                else _unclicked_button_style()
+                            ),
+                        ),
                         title_id="clicked-features-title",
                         table_id="feature-table-rows-clicked",
                         div_id="feature-table-container-clicked",
@@ -915,6 +928,10 @@ class GeoExplorer:
                     dcc.Store(id="clicked-features", data=[]),
                     dcc.Store(id="all-features", data=[]),
                     dcc.Store(id="clicked-ids", data=None),
+                    dbc.Tooltip(
+                        "Make a cl is the info text that appears on hover",
+                        target="hard-click",
+                    )
                     dcc.Interval(
                         id="interval-component",
                         interval=2000,
@@ -1260,16 +1277,18 @@ class GeoExplorer:
         @callback(
             Output("file-deleted", "children", allow_duplicate=True),
             Output("alert3", "children", allow_duplicate=True),
+            Output("color-container", "children", allow_duplicate=True),
             Input({"type": "delete-cat-btn", "index": dash.ALL}, "n_clicks"),
             State({"type": "delete-cat-btn", "index": dash.ALL}, "id"),
+            State("color-container", "children"),
             prevent_initial_call=True,
         )
-        def delete_category(n_clicks_list, delete_ids):
+        def delete_category(n_clicks_list, delete_ids, color_container):
             debug_print("\n\n\n\ndelete_category")
             path_to_delete = get_index_if_clicks(n_clicks_list, delete_ids)
             if path_to_delete is None:
                 print("no path to delete\n\n\n\n\n\n\n")
-                return dash.no_update
+                return dash.no_update, dash.no_update, dash.no_update
             print(f"path to delete: {path_to_delete}")
 
             if not self.column:
@@ -1278,13 +1297,17 @@ class GeoExplorer:
                     for path in self._paths_concatted
                     if Path(path).stem != path_to_delete
                 }
-                return self._delete_file(n_clicks_list, delete_ids)
+                return self._delete_file(n_clicks_list, delete_ids), dash.no_update
             else:
                 if self.concatted_data[self.column].dtype.is_numeric():
-                    return dash.no_update, dbc.Alert(
-                        "Removing categories in numeric columns is not supported",
-                        color="warning",
-                        dismissable=True,
+                    return (
+                        dash.no_update,
+                        dbc.Alert(
+                            "Removing categories in numeric columns is not supported",
+                            color="warning",
+                            dismissable=True,
+                        ),
+                        dash.no_update,
                     )
                 if path_to_delete == self.nan_label:
                     expression = pl.col(self.column).is_not_null()
@@ -1299,8 +1322,9 @@ class GeoExplorer:
                 self._paths_concatted = set(self.concatted_data["__file_path"].unique())
                 print("pop", self._color_dict2.pop(path_to_delete, None))
                 self._color_dict2.pop(path_to_delete, None)
+                color_container.pop(color_container.index(path_to_delete))
 
-            return 1, None
+            return 1, None, color_container
 
         @callback(
             Output("file-deleted", "children", allow_duplicate=True),
@@ -1367,6 +1391,18 @@ class GeoExplorer:
                 column = dash.no_update
             n_clicks = 1 if is_splitted else 0
             return n_clicks, style, is_splitted, column
+
+        @callback(
+            Output("hard-click", "style"),
+            Input("hard-click", "n_clicks"),
+        )
+        def update_hard_click_button_style(n_clicks):
+            if (n_clicks or 0) % 2 == 1:
+                self.hard_click = True
+                return _clicked_button_style()
+            else:
+                self.hard_click = False
+                return _unclicked_button_style()
 
         @callback(
             Output("loading", "children", allow_duplicate=True),
@@ -2653,12 +2689,13 @@ def get_index_if_clicks(n_clicks_list, ids) -> str | None:
     return None
 
 
-def get_data_table(title_id: str, table_id: str, div_id: str, clear_id: str):
+def get_data_table(*data, title_id: str, table_id: str, div_id: str, clear_id: str):
     return dbc.Col(
         [
             dbc.Row(
                 [
                     dbc.Col(html.B(id=title_id)),
+                    *[dbc.Col(x) for x in data],
                     dbc.Col(
                         html.Button(
                             "❌ Clear table",
