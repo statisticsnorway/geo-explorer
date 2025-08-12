@@ -171,6 +171,7 @@ def get_colorpicker_container(color_dict: dict[str, str]) -> html.Div:
             )
             for value, color in color_dict.items()
         ],
+        id="color-container",
     )
 
 
@@ -443,6 +444,7 @@ def _fix_df(df: GeoDataFrame) -> GeoDataFrame:
 
 def _get_unique_id(df, i):
     """Float column of 0.0, 0.01, ..., 3.1211 etc."""
+    print("_get_unique_id", i)
     divider = 10 ** len(str(len(df)))
     return (np.array(range(len(df))) / divider) + i
 
@@ -464,7 +466,10 @@ def _read_files(explorer, paths: list[str]) -> None:
                 except Exception:
                     df = df.drop(col, axis=1)
         df["__file_path"] = path
-        df["_unique_id"] = _get_unique_id(df, len(explorer.loaded_data))
+        explorer._max_unique_id_int += 1
+        df["_unique_id"] = _get_unique_id(
+            df, explorer._max_unique_id_int
+        )  # len(explorer.loaded_data))
         df = pl.from_pandas(df.assign(geometry=df.geometry.to_wkb()))
         if explorer.splitted:
             df = get_split_index(df)
@@ -577,6 +582,7 @@ class GeoExplorer:
         alpha: float = 0.7,
         zoom_animation: bool = False,
         splitted: bool = False,
+        hard_click: bool = False,
     ) -> None:
         """Initialiser."""
         self.start_dir = start_dir
@@ -597,6 +603,7 @@ class GeoExplorer:
         self.nan_color = nan_color
         self.nan_label = nan_label
         self.splitted = splitted
+        self.hard_click = hard_click
         self.max_rows = max_rows
         self.alpha = alpha
         self.file_system = file_system
@@ -604,6 +611,7 @@ class GeoExplorer:
         self.selected_files: dict[str, int] = {}
         self._paths_concatted: set[str] = set()
         self.loaded_data: dict[str, pl.DataFrame] = {}
+        self._max_unique_id_int: int = -1
         self._loaded_data_sizes: dict[str, int] = {}
         self.concatted_data: pl.DataFrame | None = None
         self.tile_names: list[str] = []
@@ -873,6 +881,11 @@ class GeoExplorer:
                             ),
                         ],
                     ),
+                    html.Button(
+                        "Hard click",
+                        id="hard-click",
+                        n_clicks=int(self.hard_click),
+                    ),
                     get_data_table(
                         title_id="clicked-features-title",
                         table_id="feature-table-rows-clicked",
@@ -894,6 +907,7 @@ class GeoExplorer:
                         debounce=0.25,
                     ),
                     dcc.Store(id="viewport-container", data=None),
+                    html.Div(id="color-container", style={"display": "none"}),
                     html.Div(id="currently-in-bounds", style={"display": "none"}),
                     html.Div(id="missing", style={"display": "none"}),
                     html.Div(id="currently-in-bounds2", style={"display": "none"}),
@@ -915,6 +929,14 @@ class GeoExplorer:
                     dcc.Store(id="clicked-features", data=[]),
                     dcc.Store(id="all-features", data=[]),
                     dcc.Store(id="clicked-ids", data=None),
+                    dbc.Tooltip(
+                        "'Hard' click means that clicking on a geometry triggers all overlapping geometries to be marked",
+                        target="hard-click",
+                    ),
+                    dbc.Tooltip(
+                        "Split all data into separate colors.",
+                        target="split-rows",
+                    ),
                     dcc.Interval(
                         id="interval-component",
                         interval=2000,
@@ -973,27 +995,38 @@ class GeoExplorer:
         # dataframe dicts as input data are currently sorted first because they were added to loaded_data first.
         # now to get back original order
         loaded_data_sorted = {}
+        self._max_unique_id_int: int = -1
         for x in data or []:
             if isinstance(x, dict):
                 for key in x:
                     key = _standardize_path(key)
                     df = self.loaded_data[key]
+                    self._max_unique_id_int += 1
                     loaded_data_sorted[key] = df.with_columns(
-                        _unique_id=_get_unique_id(df, len(loaded_data_sorted))
+                        _unique_id=_get_unique_id(
+                            df, self._max_unique_id_int
+                        )  # len(loaded_data_sorted))
                     )
             else:
                 x = _standardize_path(x)
                 df = self.loaded_data[x]
+                self._max_unique_id_int += 1
                 loaded_data_sorted[x] = df.with_columns(
-                    _unique_id=_get_unique_id(df, len(loaded_data_sorted))
+                    _unique_id=_get_unique_id(
+                        df, self._max_unique_id_int
+                    )  # len(loaded_data_sorted))
                 )
 
         self.loaded_data = loaded_data_sorted
 
+        print(self.loaded_data)
+
         for idx in selected_features if selected_features is not None else []:
             i = int(idx)
             df = list(self.loaded_data.values())[i]
+            print(i, idx)
             row = df.filter(pl.col("_unique_id") == idx)
+            print(df)
             columns = [col for col in row.columns if col != "geometry"]
             features = GeoDataFrame(
                 row.drop("geometry"),
@@ -1260,17 +1293,24 @@ class GeoExplorer:
         @callback(
             Output("file-deleted", "children", allow_duplicate=True),
             Output("alert3", "children", allow_duplicate=True),
+            Output("color-container", "children", allow_duplicate=True),
             Input({"type": "delete-cat-btn", "index": dash.ALL}, "n_clicks"),
             State({"type": "delete-cat-btn", "index": dash.ALL}, "id"),
+            State("color-container", "children"),
             prevent_initial_call=True,
         )
-        def delete_category(n_clicks_list, delete_ids):
+        def delete_category(n_clicks_list, delete_ids, color_container):
             debug_print("\n\n\n\ndelete_category")
             path_to_delete = get_index_if_clicks(n_clicks_list, delete_ids)
             if path_to_delete is None:
-                print("no path to delete\n\n\n\n\n\n\n")
-                return dash.no_update
-            print(f"path to delete: {path_to_delete}")
+                debug_print("no path to delete\n\n\n\n\n\n\n")
+                return dash.no_update, dash.no_update, dash.no_update
+            i: int = next(
+                iter(
+                    i for i, x in enumerate(delete_ids) if x["index"] == path_to_delete
+                )
+            )
+            debug_print(f"path to delete: {path_to_delete}")
 
             if not self.column:
                 self._paths_concatted = {
@@ -1278,13 +1318,17 @@ class GeoExplorer:
                     for path in self._paths_concatted
                     if Path(path).stem != path_to_delete
                 }
-                return self._delete_file(n_clicks_list, delete_ids)
+                return self._delete_file(n_clicks_list, delete_ids), dash.no_update
             else:
                 if self.concatted_data[self.column].dtype.is_numeric():
-                    return dash.no_update, dbc.Alert(
-                        "Removing categories in numeric columns is not supported",
-                        color="warning",
-                        dismissable=True,
+                    return (
+                        dash.no_update,
+                        dbc.Alert(
+                            "Removing categories in numeric columns is not supported",
+                            color="warning",
+                            dismissable=True,
+                        ),
+                        dash.no_update,
                     )
                 if path_to_delete == self.nan_label:
                     expression = pl.col(self.column).is_not_null()
@@ -1297,10 +1341,14 @@ class GeoExplorer:
                 debug_print(len(self.concatted_data))
                 debug_print(self.concatted_data[self.column].value_counts())
                 self._paths_concatted = set(self.concatted_data["__file_path"].unique())
-                print("pop", self._color_dict2.pop(path_to_delete, None))
+                debug_print("pop", self._color_dict2.pop(path_to_delete, None))
                 self._color_dict2.pop(path_to_delete, None)
+                color_container.pop(i)
+                for path in list(self.loaded_data):
+                    if path not in self._paths_concatted:
+                        del self.loaded_data[path]
 
-            return 1, None
+            return 1, None, color_container
 
         @callback(
             Output("file-deleted", "children", allow_duplicate=True),
@@ -1349,9 +1397,9 @@ class GeoExplorer:
             prevent_initial_call=True,
         )
         def is_splitted(n_clicks: int, column):
-            if self.concatted_data is None:
-                return dash.no_update, dash.no_update, dash.no_update, dash.no_update
             triggered = dash.callback_context.triggered_id
+            if self.concatted_data is None or triggered is None:
+                return dash.no_update, dash.no_update, dash.no_update, dash.no_update
             is_splitted: bool = n_clicks % 2 == 1 and not (
                 triggered == "column-dropdown" and not column
             )
@@ -1367,6 +1415,18 @@ class GeoExplorer:
                 column = dash.no_update
             n_clicks = 1 if is_splitted else 0
             return n_clicks, style, is_splitted, column
+
+        @callback(
+            Output("hard-click", "style"),
+            Input("hard-click", "n_clicks"),
+        )
+        def update_hard_click_button_style(n_clicks):
+            if (n_clicks or 0) % 2 == 1:
+                self.hard_click = True
+                return _clicked_button_style()
+            else:
+                self.hard_click = False
+                return _unclicked_button_style()
 
         @callback(
             Output("loading", "children", allow_duplicate=True),
@@ -1689,7 +1749,11 @@ class GeoExplorer:
             if DEBUG and self.concatted_data is not None:
                 assert len(self.concatted_data) == len(
                     self.concatted_data["_unique_id"].unique()
-                ), self.concatted_data.filter(pl.col("_unique_id").is_duplicated())
+                ), self.concatted_data.filter(
+                    pl.col("_unique_id").is_duplicated()
+                ).select(
+                    "_unique_id", "__file_path"
+                )
 
             debug_print("concat_data finished after", perf_counter() - t)
 
@@ -2073,7 +2137,7 @@ class GeoExplorer:
                 ),
             )
             if self.splitted:
-                print(self.concatted_data["split_index"])
+                debug_print(self.concatted_data["split_index"])
 
             if rows_are_not_hidden:
                 max_rows_component = None
@@ -2148,27 +2212,65 @@ class GeoExplorer:
                 )
             )
 
+            _used_file_paths = set()
             for path in self.loaded_data:
                 selected_path = next(iter(x for x in self.selected_files if x in path))
                 if selected_path in filename_id:
-                    columns = set(self.loaded_data[path].columns).difference(
-                        {"geometry"}
-                    )
+                    _used_file_paths.add(selected_path)
                     break
 
             feature = features[index]
-            props = {
-                key: value
-                for key, value in feature["properties"].items()
-                if key in columns
-            }
-            clicked_ids = [x["_unique_id"] for x in clicked_features]
-            if props["_unique_id"] not in clicked_ids:
-                clicked_features.append(props)
-                clicked_ids.append(props["_unique_id"])
-                self.selected_features = dict(
-                    zip(clicked_ids, clicked_features, strict=True)
+            unique_id = next(
+                iter(
+                    value
+                    for key, value in feature["properties"].items()
+                    if key == "_unique_id"
                 )
+            )
+            if self.hard_click:
+                geom = shapely.geometry.shape(feature["geometry"])
+
+                def geoms_relate(wkb: bytes) -> bool:
+                    this_geom = shapely.from_wkb(wkb)
+                    try:
+                        intersection = this_geom.intersection(geom)
+                        return (intersection.area / this_geom.area) > 0.01
+                    except (ZeroDivisionError, GEOSException):
+                        return (
+                            this_geom.overlaps(geom)
+                            or this_geom.within(geom)
+                            or geom.covers(this_geom)
+                        )
+
+                intersecting = (
+                    filter_by_bounds(self.concatted_data, geom.bounds)
+                    .filter(pl.col("_unique_id") != unique_id)
+                    .filter(pl.col("geometry").map_elements(geoms_relate))
+                )
+                _used_file_paths |= set(intersecting["__file_path"].unique())
+
+            columns = set()
+            for path in _used_file_paths:
+                columns |= set(self.loaded_data[path].columns).difference({"geometry"})
+
+            props_list = [
+                {
+                    key: value
+                    for key, value in feature["properties"].items()
+                    if key in columns
+                }
+            ]
+
+            if self.hard_click:
+                props_list += intersecting.select(*columns).to_dicts()
+
+            for props in props_list:
+                if props["_unique_id"] not in clicked_ids:
+                    clicked_features.append(props)
+            clicked_ids = [x["_unique_id"] for x in clicked_features]
+            self.selected_features = dict(
+                zip(clicked_ids, clicked_features, strict=True)
+            )
             return clicked_features, clicked_ids, None
 
         @callback(
@@ -2505,11 +2607,11 @@ class GeoExplorer:
         debug_print("\n\n\n\ndelete_file")
         path_to_delete = get_index_if_clicks(n_clicks_list, delete_ids)
         if path_to_delete is None:
-            print("no path to delete\n\n\n\n\n\n\n")
+            debug_print("no path to delete\n\n\n\n\n\n\n")
             return dash.no_update
-        print(f"path to delete: {path_to_delete}")
+        debug_print(f"path to delete: {path_to_delete}")
         for path in dict(self.selected_files):
-            if path_to_delete in [path, Path(path).stem]:
+            if path_to_delete == path:  # in [path, Path(path).stem]:
                 self.selected_files.pop(path)
 
         self._paths_concatted = {
@@ -2653,12 +2755,13 @@ def get_index_if_clicks(n_clicks_list, ids) -> str | None:
     return None
 
 
-def get_data_table(title_id: str, table_id: str, div_id: str, clear_id: str):
+def get_data_table(*data, title_id: str, table_id: str, div_id: str, clear_id: str):
     return dbc.Col(
         [
             dbc.Row(
                 [
                     dbc.Col(html.B(id=title_id)),
+                    *[dbc.Col(x) for x in data],
                     dbc.Col(
                         html.Button(
                             "❌ Clear table",
@@ -2711,7 +2814,7 @@ def is_jupyter():
 def get_split_index(df: pl.DataFrame) -> pl.DataFrame:
     # int_col_as_str = pl.int_range(0, len(df), eager=True).cast(pl.Utf8)
 
-    # print(
+    # debug_print(
     #     df.with_columns(
     #         pl.col("__file_path").cum_count().over("__file_path").alias("cumulative_count")
     #     ).with_columns((pl.col("cumulative_count") + 1).alias("cumulative_count"))

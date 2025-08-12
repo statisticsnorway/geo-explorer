@@ -207,7 +207,7 @@ class FileBrowser:
             Output("case-sensitive", "style"),
             Input("case-sensitive", "n_clicks"),
         )
-        def update_case_button(n_clicks):
+        def update_case_button_style(n_clicks):
             if (n_clicks or 0) % 2 == 1:
                 return _clicked_button_style()
             else:
