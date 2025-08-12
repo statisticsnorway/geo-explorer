@@ -1397,9 +1397,9 @@ class GeoExplorer:
             prevent_initial_call=True,
         )
         def is_splitted(n_clicks: int, column):
-            if self.concatted_data is None:
-                return dash.no_update, dash.no_update, dash.no_update, dash.no_update
             triggered = dash.callback_context.triggered_id
+            if self.concatted_data is None or triggered is None:
+                return dash.no_update, dash.no_update, dash.no_update, dash.no_update
             is_splitted: bool = n_clicks % 2 == 1 and not (
                 triggered == "column-dropdown" and not column
             )
