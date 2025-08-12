@@ -58,7 +58,7 @@ TABLE_TITLE_SUFFIX: str = (
     "(NOTE: to properly zoom to a feature, you may need to click on two separate cells on the same row)"
 )
 
-DEBUG: bool = True
+DEBUG: bool = False
 
 if DEBUG:
 
@@ -1318,7 +1318,7 @@ class GeoExplorer:
                     for path in self._paths_concatted
                     if Path(path).stem != path_to_delete
                 }
-                return self._delete_file(n_clicks_list, delete_ids), dash.no_update
+                return (*self._delete_file(n_clicks_list, delete_ids), dash.no_update)
             else:
                 if self.concatted_data[self.column].dtype.is_numeric():
                     return (
@@ -2608,10 +2608,10 @@ class GeoExplorer:
         path_to_delete = get_index_if_clicks(n_clicks_list, delete_ids)
         if path_to_delete is None:
             debug_print("no path to delete\n\n\n\n\n\n\n")
-            return dash.no_update
+            return dash.no_update, dash.no_update
         debug_print(f"path to delete: {path_to_delete}")
         for path in dict(self.selected_files):
-            if path_to_delete == path:  # in [path, Path(path).stem]:
+            if path_to_delete in [path, Path(path).stem]:
                 self.selected_files.pop(path)
 
         self._paths_concatted = {
