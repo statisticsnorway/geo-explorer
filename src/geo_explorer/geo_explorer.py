@@ -51,6 +51,7 @@ from .fs import LocalFileSystem
 from .utils import _clicked_button_style
 from .utils import _standardize_path
 from .utils import _unclicked_button_style
+from .utils import get_button_with_tooltip
 
 OFFWHITE: str = "#ebebeb"
 FILE_CHECKED_COLOR: str = "#3e82ff"
@@ -144,7 +145,7 @@ def get_colorpicker_container(color_dict: dict[str, str]) -> html.Div:
                         width="auto",
                     ),
                     dbc.Col(
-                        html.Button(
+                        get_button_with_tooltip(
                             "❌",
                             id={
                                 "type": "delete-cat-btn",
@@ -158,6 +159,7 @@ def get_colorpicker_container(color_dict: dict[str, str]) -> html.Div:
                                 "cursor": "pointer",
                                 "marginLeft": "auto",
                             },
+                            tooltip_text="Remove all data in this category",
                         ),
                         width="auto",
                     ),
@@ -444,7 +446,6 @@ def _fix_df(df: GeoDataFrame) -> GeoDataFrame:
 
 def _get_unique_id(df, i):
     """Float column of 0.0, 0.01, ..., 3.1211 etc."""
-    print("_get_unique_id", i)
     divider = 10 ** len(str(len(df)))
     return (np.array(range(len(df))) / divider) + i
 
@@ -687,19 +688,21 @@ class GeoExplorer:
                                     dbc.Row(
                                         [
                                             dbc.Col(
-                                                html.Button(
+                                                get_button_with_tooltip(
                                                     "Split rows",
                                                     id="splitter",
                                                     n_clicks=1 if self.splitted else 0,
+                                                    tooltip_text="Split all data into separate colors",
                                                 ),
                                             ),
                                             dbc.Col(
                                                 html.Div(
                                                     [
-                                                        html.Button(
+                                                        *get_button_with_tooltip(
                                                             "Export as code",
                                                             id="export",
                                                             style={"color": "#285cd4"},
+                                                            tooltip_text="Get code to reproduce current view.",
                                                         ),
                                                         dcc.Dropdown(
                                                             value=self.alpha,
@@ -881,10 +884,11 @@ class GeoExplorer:
                             ),
                         ],
                     ),
-                    html.Button(
+                    *get_button_with_tooltip(
                         "Hard click",
                         id="hard-click",
                         n_clicks=int(self.hard_click),
+                        tooltip_text="'Hard' click means that clicking on a geometry triggers all overlapping geometries to be marked",
                     ),
                     get_data_table(
                         title_id="clicked-features-title",
@@ -929,14 +933,6 @@ class GeoExplorer:
                     dcc.Store(id="clicked-features", data=[]),
                     dcc.Store(id="all-features", data=[]),
                     dcc.Store(id="clicked-ids", data=None),
-                    dbc.Tooltip(
-                        "'Hard' click means that clicking on a geometry triggers all overlapping geometries to be marked",
-                        target="hard-click",
-                    ),
-                    dbc.Tooltip(
-                        "Split all data into separate colors.",
-                        target="split-rows",
-                    ),
                     dcc.Interval(
                         id="interval-component",
                         interval=2000,
@@ -1019,14 +1015,10 @@ class GeoExplorer:
 
         self.loaded_data = loaded_data_sorted
 
-        print(self.loaded_data)
-
         for idx in selected_features if selected_features is not None else []:
             i = int(idx)
             df = list(self.loaded_data.values())[i]
-            print(i, idx)
             row = df.filter(pl.col("_unique_id") == idx)
-            print(df)
             columns = [col for col in row.columns if col != "geometry"]
             features = GeoDataFrame(
                 row.drop("geometry"),
@@ -1133,7 +1125,7 @@ class GeoExplorer:
                         dbc.Col(
                             [
                                 dbc.Row(
-                                    html.Button(
+                                    get_button_with_tooltip(
                                         "🡑",
                                         id={
                                             "type": "order-button-up",
@@ -1141,10 +1133,11 @@ class GeoExplorer:
                                         },
                                         n_clicks=0,
                                         style={"width": "1vh"},
+                                        tooltip_text="Move forwards",
                                     ),
                                 ),
                                 dbc.Row(
-                                    html.Button(
+                                    get_button_with_tooltip(
                                         "🡓",
                                         id={
                                             "type": "order-button-down",
@@ -1152,6 +1145,7 @@ class GeoExplorer:
                                         },
                                         n_clicks=0,
                                         style={"width": "1vh"},
+                                        tooltip_text="Move backwards",
                                     ),
                                 ),
                             ],
@@ -1160,7 +1154,7 @@ class GeoExplorer:
                             },
                         ),
                         dbc.Col(
-                            html.Button(
+                            get_button_with_tooltip(
                                 "x",
                                 id={
                                     "type": "checked-btn",
@@ -1177,10 +1171,11 @@ class GeoExplorer:
                                         "backgroundColor": OFFWHITE,
                                     }
                                 ),
+                                tooltip_text="Show/hide data",
                             )
                         ),
                         dbc.Col(
-                            html.Button(
+                            get_button_with_tooltip(
                                 "Reload",
                                 id={
                                     "type": "reload-btn",
@@ -1194,10 +1189,11 @@ class GeoExplorer:
                                     "cursor": "pointer",
                                     "marginLeft": "auto",
                                 },
+                                tooltip_text="Reload data (in case categories have been X-ed out)",
                             )
                         ),
                         dbc.Col(
-                            html.Button(
+                            get_button_with_tooltip(
                                 "Show table",
                                 id={
                                     "type": "table-btn",
@@ -1211,10 +1207,11 @@ class GeoExplorer:
                                     "cursor": "pointer",
                                     "marginLeft": "auto",
                                 },
+                                tooltip_text="Show all rows",
                             )
                         ),
                         dbc.Col(
-                            html.Button(
+                            get_button_with_tooltip(
                                 "❌",
                                 id={
                                     "type": "delete-btn",
@@ -1228,6 +1225,7 @@ class GeoExplorer:
                                     "cursor": "pointer",
                                     "marginLeft": "auto",
                                 },
+                                tooltip_text="Remove data",
                             )
                         ),
                         dbc.Col(html.Span(path)),
