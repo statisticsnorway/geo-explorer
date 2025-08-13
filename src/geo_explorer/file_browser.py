@@ -15,6 +15,7 @@ from fsspec.spec import AbstractFileSystem
 from .utils import _clicked_button_style
 from .utils import _standardize_path
 from .utils import _unclicked_button_style
+from .utils import get_button_with_tooltip
 
 
 class FileBrowser:
@@ -47,10 +48,11 @@ class FileBrowser:
                                                     style=_unclicked_button_style()
                                                     | {"width": "10vh"},
                                                 ),
-                                                html.Button(
+                                                *get_button_with_tooltip(
+                                                    "Recursive",
                                                     id="recursive",
                                                     n_clicks=0,
-                                                    children="Recursive",
+                                                    tooltip_text="Note that recursive file search might be extremely slow if there are many files and subfolders",
                                                 ),
                                                 dcc.Dropdown(
                                                     id="favorites-dropdown",
@@ -70,10 +72,11 @@ class FileBrowser:
                                             },
                                         ),
                                         dbc.Col(
-                                            html.Button(
+                                            get_button_with_tooltip(
+                                                "Case sensitive",
                                                 id="case-sensitive",
                                                 n_clicks=1,
-                                                children="Case sensitive",
+                                                tooltip_text="Whether lower/upper case matters in subtext search",
                                             ),
                                             className="align-right",
                                         ),
@@ -182,7 +185,6 @@ class FileBrowser:
                 },
                 className="scroll-container",
             ),
-            # dcc.Store(id="current-path", data=self.start_dir),
             dcc.Store(id="file-data-dict", data=None),
             html.Div(),
         ]
