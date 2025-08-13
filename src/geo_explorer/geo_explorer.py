@@ -2214,7 +2214,7 @@ class GeoExplorer:
             for path in self.loaded_data:
                 selected_path = next(iter(x for x in self.selected_files if x in path))
                 if selected_path in filename_id:
-                    _used_file_paths.add(selected_path)
+                    _used_file_paths.add(path)
                     break
 
             feature = features[index]
