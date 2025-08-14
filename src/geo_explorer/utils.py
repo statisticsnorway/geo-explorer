@@ -6,7 +6,7 @@ from dash import html
 
 def _standardize_path(path: str | Path) -> str:
     """Make sure delimiter is '/' and path ends without '/'."""
-    return str(path).replace("\\", "/").replace(r"\"", "/").replace("//", "/")
+    return str(path).replace("\\", "/").replace(r"\"", "/")
 
 
 def _clicked_button_style():

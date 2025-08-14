@@ -58,6 +58,8 @@ FILE_CHECKED_COLOR: str = "#3e82ff"
 TABLE_TITLE_SUFFIX: str = (
     "(NOTE: to properly zoom to a feature, you may need to click on two separate cells on the same row)"
 )
+DEFAULT_ZOOM: int = 10
+DEFAULT_CENTER: tuple[float, float] = (59.91740845, 10.71394444)
 
 DEBUG: bool = False
 
@@ -573,7 +575,7 @@ class GeoExplorer:
         column: str | None = None,
         wms=None,
         center: tuple[float, float] | None = None,
-        zoom: int = 10,
+        zoom: int | None = None,
         nan_color: str = "#969696",
         nan_label: str = "Missing",
         color_dict: dict | None = None,
@@ -588,11 +590,6 @@ class GeoExplorer:
         """Initialiser."""
         self.start_dir = start_dir
         self.port = port
-        if center is not None:
-            self.center = center
-        else:
-            self.center = (59.91740845, 10.71394444)
-        self.zoom = zoom
         self.max_zoom = max_zoom
         self.min_zoom = min_zoom
         self.bounds = None
@@ -943,8 +940,6 @@ class GeoExplorer:
                 fluid=True,
             )
 
-        self.app.layout = get_layout
-
         error_mess = "'data' must be a list of file paths or a dict of GeoDataFrames."
         bounds_series_dict = {}
         for x in data or []:
@@ -965,7 +960,16 @@ class GeoExplorer:
 
         self.bounds_series = GeoSeries(bounds_series_dict)
 
+        # storing bounds here before file paths are loaded. To avoid setting center as the entire map bounds if large data
+        if len(self.bounds_series):
+            minx, miny, maxx, maxy = self.bounds_series.total_bounds
+        else:
+            minx, miny, maxx, maxy = None, None, None, None
+
         if not self.selected_files:
+            self.center = DEFAULT_CENTER
+            self.zoom = DEFAULT_ZOOM
+            self.app.layout = get_layout
             self._register_callbacks()
             return
 
@@ -1015,6 +1019,22 @@ class GeoExplorer:
 
         self.loaded_data = loaded_data_sorted
 
+        if center is not None:
+            self.center = center
+        elif self.loaded_data and all((minx, miny, maxx, maxy)):
+            self.center = ((maxy + miny) / 2, (maxx + minx) / 2)
+        else:
+            self.center = DEFAULT_CENTER
+
+        if zoom is not None:
+            self.zoom = zoom
+        elif self.loaded_data and all((minx, miny, maxx, maxy)):
+            self.zoom = get_zoom_from_bounds(minx, miny, maxx, maxy, 800, 600)
+        else:
+            self.zoom = DEFAULT_ZOOM
+
+        self.app.layout = get_layout
+
         for idx in selected_features if selected_features is not None else []:
             i = int(idx)
             df = list(self.loaded_data.values())[i]
@@ -1050,7 +1070,7 @@ class GeoExplorer:
             display_url = display_url.replace("https:/", "https://").replace(
                 "https:///", "https://"
             )
-            self.logger.info(f"\n\nDash is running on {display_url}\n\n")
+            self.logger.info(f"\nDash is running on {display_url}\n\n")
 
         try:
             self.app.run(
@@ -2400,7 +2420,7 @@ class GeoExplorer:
 
             width = int(viewport["width"] * 0.7)
             height = int(viewport["height"] * 0.7)
-            zoom_level = lat_lon_bounds_to_zoom(minx, miny, maxx, maxy, width, height)
+            zoom_level = get_zoom_from_bounds(minx, miny, maxx, maxy, width, height)
             zoom_level = min(zoom_level, self.max_zoom)
             zoom_level = max(zoom_level, self.min_zoom)
             debug_print(zoom_level)
@@ -2695,7 +2715,7 @@ def get_index(values: list[Any], ids: list[Any], index: Any):
     return values[i]
 
 
-def lat_lon_bounds_to_zoom(
+def get_zoom_from_bounds(
     lon_min, lat_min, lon_max, lat_max, map_width_px, map_height_px
 ):
     """Estimate Leaflet zoom level for a bounding box and viewport size.
@@ -2810,18 +2830,6 @@ def is_jupyter():
 
 
 def get_split_index(df: pl.DataFrame) -> pl.DataFrame:
-    # int_col_as_str = pl.int_range(0, len(df), eager=True).cast(pl.Utf8)
-
-    # debug_print(
-    #     df.with_columns(
-    #         pl.col("__file_path").cum_count().over("__file_path").alias("cumulative_count")
-    #     ).with_columns((pl.col("cumulative_count") + 1).alias("cumulative_count"))
-    # )
-
-    # df = df.with_columns(
-    #     pl.col("__file_path").cum_count().over("__file_path").alias("cumulative_count")
-    # ).with_columns((pl.col("cumulative_count") + 1).alias("cumulative_count"))
-
     return df.with_columns(
         (
             pl.col("__file_path").map_elements(_get_name, return_dtype=pl.Utf8)
