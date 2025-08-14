@@ -88,7 +88,7 @@ class FileBrowser:
                                             dcc.Input(
                                                 self.start_dir,
                                                 id="current-path",
-                                                debounce=0.2,
+                                                debounce=1,
                                                 className="expandable-input-left-aligned",
                                             ),
                                         ),
@@ -360,7 +360,6 @@ def _list_dir(
     try:
         paths = _ls(path)
     except Exception as e:
-        time.sleep(2)
         return (
             [],
             [],
