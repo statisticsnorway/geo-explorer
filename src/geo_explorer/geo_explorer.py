@@ -58,6 +58,8 @@ FILE_CHECKED_COLOR: str = "#3e82ff"
 TABLE_TITLE_SUFFIX: str = (
     "(NOTE: to properly zoom to a feature, you may need to click on two separate cells on the same row)"
 )
+DEFAULT_ZOOM: int = 10
+DEFAULT_CENTER: tuple[float, float] = (59.91740845, 10.71394444)
 
 DEBUG: bool = False
 
@@ -938,8 +940,6 @@ class GeoExplorer:
                 fluid=True,
             )
 
-        self.app.layout = get_layout
-
         error_mess = "'data' must be a list of file paths or a dict of GeoDataFrames."
         bounds_series_dict = {}
         for x in data or []:
@@ -967,6 +967,9 @@ class GeoExplorer:
             minx, miny, maxx, maxy = None, None, None, None
 
         if not self.selected_files:
+            self.center = DEFAULT_CENTER
+            self.zoom = DEFAULT_ZOOM
+            self.app.layout = get_layout
             self._register_callbacks()
             return
 
@@ -1018,17 +1021,19 @@ class GeoExplorer:
 
         if center is not None:
             self.center = center
-        elif self.loaded_data and all(*(minx, miny, maxx, maxy)):
+        elif self.loaded_data and all((minx, miny, maxx, maxy)):
             self.center = ((maxy + miny) / 2, (maxx + minx) / 2)
         else:
-            self.center = (59.91740845, 10.71394444)
+            self.center = DEFAULT_CENTER
 
         if zoom is not None:
             self.zoom = zoom
-        elif self.loaded_data and all(*(minx, miny, maxx, maxy)):
+        elif self.loaded_data and all((minx, miny, maxx, maxy)):
             self.zoom = get_zoom_from_bounds(minx, miny, maxx, maxy, 800, 600)
         else:
-            self.zoom = 10
+            self.zoom = DEFAULT_ZOOM
+
+        self.app.layout = get_layout
 
         for idx in selected_features if selected_features is not None else []:
             i = int(idx)
