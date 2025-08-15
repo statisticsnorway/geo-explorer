@@ -1988,17 +1988,21 @@ class GeoExplorer:
             if not values_no_nans.dtype.is_numeric():
                 force_categorical_button = None
             elif (force_categorical_clicks or 0) % 2 == 0:
-                force_categorical_button = html.Button(
+                force_categorical_button = get_button_with_tooltip(
                     "Force categorical",
+                    id="force-categorical-button",
                     n_clicks=force_categorical_clicks,
+                    tooltip_text="Get all numeric values as a single color group",
                     style={
                         "background": "white",
                         "color": "black",
                     },
                 )
             else:
-                force_categorical_button = html.Button(
+                force_categorical_button = get_button_with_tooltip(
                     "Force categorical",
+                    id="force-categorical-button",
+                    tooltip_text="Back to numeric values",
                     n_clicks=force_categorical_clicks,
                     style={
                         "background": "black",
