@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "geo-explorer"
-version = "0.5.4"
+version = "0.5.5"
 description = "Explore geodata interactively."
 authors = ["Morten Letnes <morten.letnes@ssb.no>"]
 license = "MIT"
