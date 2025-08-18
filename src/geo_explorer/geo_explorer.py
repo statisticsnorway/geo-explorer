@@ -18,6 +18,8 @@ from time import perf_counter
 from typing import Any
 from typing import ClassVar
 
+import pyarrow
+import pyarrow.parquet as pq
 import dash
 import dash_bootstrap_components as dbc
 import dash_leaflet as dl
@@ -430,7 +432,26 @@ def filter_by_bounds(df: pl.DataFrame, bounds: tuple[float]) -> pl.DataFrame:
     return df
 
 
+def read_nrows(file, nrow: int, nth_batch: int) -> pyarrow.Table:
+    """Read first n rows of a parquet file."""
+    for _, batch in zip(
+        range(nth_batch + 1), pq.ParquetFile(file).iter_batches(nrow), strict=False
+    ):
+        pass
+    return pyarrow.Table.from_batches([batch]).to_pandas()
+
+
 def _read_and_to_4326(path: str, file_system) -> GeoDataFrame:
+    if "-_-" in path:
+        rows = path.split("-_-")[-1]
+        nrow, nth_batch = rows.split("-")
+        nrow = int(nrow)
+        nth_batch = int(nth_batch)
+        path = path.split("-_-")[0]
+        df = read_nrows(path, nrow, nth_batch)
+        df["geometry"] = GeoSeries.from_wkb(df["geometry"])
+        df = GeoDataFrame(df, crs=25833)
+        return _fix_df(df)
     df = sg.read_geopandas(path, file_system=file_system)
     return _fix_df(df)
 
@@ -473,15 +494,38 @@ def _read_files(explorer, paths: list[str]) -> None:
         df["_unique_id"] = _get_unique_id(
             df, explorer._max_unique_id_int
         )  # len(explorer.loaded_data))
-        df = pl.from_pandas(df.assign(geometry=df.geometry.to_wkb()))
+        if isinstance(df, GeoDataFrame):
+            df = df.assign(geometry=df.geometry.to_wkb())
+        df = pl.from_pandas(df)
         if explorer.splitted:
             df = get_split_index(df)
         explorer.loaded_data[path] = df
 
+    if any("-_-" in path for path in explorer.loaded_data):
+        for base_path in {
+            path.split("-_-")[0] for path in explorer.loaded_data if "-_-" in path
+        }:
+            explorer.loaded_data[base_path] = pl.concat(
+                [
+                    explorer.loaded_data.pop(path)
+                    for path in list(explorer.loaded_data)
+                    if base_path in path
+                ],
+                how="diagonal_relaxed",
+            )
 
-def _random_color() -> str:
-    r, g, b = np.random.choice(range(256), size=3)
-    return f"#{r:02x}{g:02x}{b:02x}"
+
+def _random_color(min_diff: int = 50) -> str:
+    """Get a random hex color code that is not too gray.
+
+    Args:
+        min_diff: minimum total distance between red, green and blue.
+            Maximum possible value will be 510, if one value is 0 and another is 255 (the third one will not matter).
+    """
+    while True:
+        r, g, b = np.random.choice(range(256), size=3)
+        if abs(r - g) + abs(r - b) > min_diff:
+            return f"#{r:02x}{g:02x}{b:02x}"
 
 
 def _get_name(path):
@@ -581,7 +625,7 @@ class GeoExplorer:
         color_dict: dict | None = None,
         max_zoom: int = 40,
         min_zoom: int = 4,
-        max_rows: int = 10_000,
+        max_rows: int = 25_000,
         alpha: float = 0.7,
         zoom_animation: bool = False,
         splitted: bool = False,
@@ -1577,22 +1621,53 @@ class GeoExplorer:
                         if path not in self.loaded_data and is_checked(path)
                     }
                 )
+                if not all(path in self._loaded_data_sizes for path in missing):
+                    missing_size = [
+                        path for path in missing if path not in self._loaded_data_sizes
+                    ]
+                    with ThreadPoolExecutor() as executor:
+                        more_sizes = {
+                            path: x["size"]
+                            for path, x in zip(
+                                missing_size,
+                                executor.map(self.file_system.info, missing_size),
+                                strict=True,
+                            )
+                        }
+                    self._loaded_data_sizes |= more_sizes
+
+                new_missing = []
+                for path in missing:
+                    size = self._loaded_data_sizes[path]
+                    if size < 1e9:
+                        new_missing.append(path)
+                        continue
+                    with self.file_system.open(path, "rb") as file:
+                        nrow = pq.read_metadata(file).num_rows
+                    n = 30
+                    rows_to_read = nrow // n
+                    for i in range(n):
+                        new_path = path + f"-_-{rows_to_read}-{i}"
+                        new_missing.append(new_path)
+                        self._loaded_data_sizes[new_path] = size / n
+                missing = new_missing
+
             if missing:
                 if len(missing) > 10:
                     to_read = 0
                     cumsum = 0
-                    if not all(path in self._loaded_data_sizes for path in missing):
-                        with ThreadPoolExecutor() as executor:
-                            more_sizes = {
-                                path: x["size"]
-                                for path, x in zip(
-                                    missing,
-                                    executor.map(self.file_system.info, missing),
-                                    strict=True,
-                                )
-                            }
-                        self._loaded_data_sizes |= more_sizes
-                    for path in missing:
+                    # if not all(path in self._loaded_data_sizes for path in missing):
+                    #     with ThreadPoolExecutor() as executor:
+                    #         more_sizes = {
+                    #             path: x["size"]
+                    #             for path, x in zip(
+                    #                 missing,
+                    #                 executor.map(self.file_system.info, missing),
+                    #                 strict=True,
+                    #             )
+                    #         }
+                    #     self._loaded_data_sizes |= more_sizes
+                    for i, path in enumerate(missing):
                         size = self._loaded_data_sizes[path]
                         cumsum += size
                         to_read += 1
@@ -1600,12 +1675,12 @@ class GeoExplorer:
                             break
                 else:
                     to_read = min(10, len(missing))
-                debug_print("to_read", to_read, len(missing))
+                debug_print(f"{to_read=}, {len(missing)=}")
                 if len(missing) > to_read:
                     _read_files(self, missing[:to_read])
                     missing = missing[to_read:]
                     disabled = False
-                    new_data_read = dash.no_update if not len(missing) else True
+                    new_data_read = dash.no_update if not len(missing) else False
                 else:
                     _read_files(self, missing)
                     missing = []
@@ -1818,6 +1893,11 @@ class GeoExplorer:
         ):
             triggered = dash.callback_context.triggered_id
             debug_print("\nget_column_value_color_dict", column, triggered)
+
+            if column and column != self.column:
+                self._color_dict2 = {}
+                # colorpicker_ids, colorpicker_values_list = [], []
+
             if not self.selected_files:
                 self.column = None
                 column = None
@@ -1829,16 +1909,18 @@ class GeoExplorer:
             if triggered is None and self.selected_files:
                 self.color_dict = self._color_dict2
 
-            debug_print(self.column, column)
-            debug_print(self.color_dict)
-            debug_print(self._color_dict2)
-            debug_print(self.selected_files)
             if not is_splitted and self.splitted:
                 colorpicker_ids, colorpicker_values_list = [], []
                 self.splitted = is_splitted
 
             column_values = [x["column_value"] for x in colorpicker_ids]
             default_colors = list(sg.maps.map._CATEGORICAL_CMAP.values())
+
+            debug_print(self.column, column)
+            debug_print(self.color_dict)
+            debug_print(self._color_dict2)
+            debug_print(column_values)
+            debug_print(colorpicker_values_list)
 
             if not column or (
                 self.concatted_data is not None and column not in self.concatted_data
@@ -1906,17 +1988,21 @@ class GeoExplorer:
             if not values_no_nans.dtype.is_numeric():
                 force_categorical_button = None
             elif (force_categorical_clicks or 0) % 2 == 0:
-                force_categorical_button = html.Button(
+                force_categorical_button = get_button_with_tooltip(
                     "Force categorical",
+                    id="force-categorical-button",
                     n_clicks=force_categorical_clicks,
+                    tooltip_text="Get all numeric values as a single color group",
                     style={
                         "background": "white",
                         "color": "black",
                     },
                 )
             else:
-                force_categorical_button = html.Button(
+                force_categorical_button = get_button_with_tooltip(
                     "Force categorical",
+                    id="force-categorical-button",
+                    tooltip_text="Back to numeric values",
                     n_clicks=force_categorical_clicks,
                     style={
                         "background": "black",
@@ -1964,10 +2050,12 @@ class GeoExplorer:
                     }
             else:
                 # make sure the existing color scheme is not altered
-                if column_values is not None and triggered not in [
-                    "column-dropdown",
-                    "force-categorical",
-                ]:
+                if column_values is not None and triggered == "data-was-concatted":
+                    #     not in [
+                    #     "column-dropdown",
+                    #     "force-categorical",
+                    #     "is_splitted",
+                    # ]:
                     color_dict = dict(
                         zip(column_values, colorpicker_values_list, strict=True)
                     )
@@ -1993,7 +2081,13 @@ class GeoExplorer:
                 colors = colors + [
                     _random_color() for _ in range(len(new_values) - len(colors))
                 ]
-                color_dict = color_dict | dict(zip(new_values, colors, strict=True))
+                color_dict = dict(
+                    sorted(
+                        (
+                            color_dict | dict(zip(new_values, colors, strict=True))
+                        ).items()
+                    )
+                )
                 bins = None
 
             debug_print("\n\ncolor_dict")
@@ -2081,6 +2175,7 @@ class GeoExplorer:
         ):
             debug_print("\n\nadd_data", len(self.loaded_data))
             debug_print(bounds)
+            debug_print(colorpicker_values_list)
             t = perf_counter()
 
             bounds = self._nested_bounds_to_bounds(bounds)
@@ -2263,7 +2358,11 @@ class GeoExplorer:
                 intersecting = (
                     filter_by_bounds(self.concatted_data, geom.bounds)
                     .filter(pl.col("_unique_id") != unique_id)
-                    .filter(pl.col("geometry").map_elements(geoms_relate))
+                    .filter(
+                        pl.col("geometry").map_elements(
+                            geoms_relate, return_dtype=pl.Boolean
+                        )
+                    )
                 )
                 _used_file_paths |= set(intersecting["__file_path"].unique())
 

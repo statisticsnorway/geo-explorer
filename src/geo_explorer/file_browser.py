@@ -1,6 +1,7 @@
 import time
 from pathlib import Path
 
+import numpy as np
 import dash
 import dash_bootstrap_components as dbc
 from dash import Input
@@ -296,9 +297,16 @@ class FileBrowser:
                         )
                     )
             if sum(sort_by_clicks):
+
+                def try_to_sort(x):
+                    try:
+                        return x[0][sort_by_key]
+                    except KeyError:
+                        return "sort this string last" * 100
+
                 sorted_pairs = sorted(
                     zip(file_data_dict, file_list, strict=False),
-                    key=lambda x: x[0][sort_by_key],
+                    key=try_to_sort,
                 )
                 if sum(sort_by_clicks) % 2 == 0:
                     sorted_pairs = list(reversed(sorted_pairs))
