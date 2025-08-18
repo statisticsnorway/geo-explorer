@@ -496,28 +496,13 @@ def _read_files(explorer, paths: list[str]) -> None:
                     df = df.drop(col, axis=1)
         df["__file_path"] = path
         explorer._max_unique_id_int += 1
-        df["_unique_id"] = _get_unique_id(
-            df, explorer._max_unique_id_int
-        )  # len(explorer.loaded_data))
+        df["_unique_id"] = _get_unique_id(df, explorer._max_unique_id_int)
         if isinstance(df, GeoDataFrame):
             df = df.assign(geometry=df.geometry.to_wkb())
         df = pl.from_pandas(df)
         if explorer.splitted:
             df = get_split_index(df)
         explorer.loaded_data[path] = df
-
-    if any("-_-" in path for path in explorer.loaded_data):
-        for base_path in {
-            path.split("-_-")[0] for path in explorer.loaded_data if "-_-" in path
-        }:
-            explorer.loaded_data[base_path] = pl.concat(
-                [
-                    explorer.loaded_data.pop(path)
-                    for path in list(explorer.loaded_data)
-                    if base_path in path
-                ],
-                how="diagonal_relaxed",
-            )
 
 
 def _random_color(min_diff: int = 50) -> str:
@@ -1641,6 +1626,7 @@ class GeoExplorer:
                         }
                     self._loaded_data_sizes |= more_sizes
 
+            if triggered != "interval-component":
                 new_missing = []
                 for path in missing:
                     size = self._loaded_data_sizes[path]
@@ -1653,25 +1639,22 @@ class GeoExplorer:
                     rows_to_read = nrow // n
                     for i in range(n):
                         new_path = path + f"-_-{rows_to_read}-{i}"
+                        if new_path in missing:
+                            continue
                         new_missing.append(new_path)
                         self._loaded_data_sizes[new_path] = size / n
+                        self.bounds_series = pd.concat(
+                            [
+                                self.bounds_series,
+                                GeoSeries({new_path: self.bounds_series.loc[path]}),
+                            ]
+                        )
                 missing = new_missing
 
             if missing:
                 if len(missing) > 10:
                     to_read = 0
                     cumsum = 0
-                    # if not all(path in self._loaded_data_sizes for path in missing):
-                    #     with ThreadPoolExecutor() as executor:
-                    #         more_sizes = {
-                    #             path: x["size"]
-                    #             for path, x in zip(
-                    #                 missing,
-                    #                 executor.map(self.file_system.info, missing),
-                    #                 strict=True,
-                    #             )
-                    #         }
-                    #     self._loaded_data_sizes |= more_sizes
                     for i, path in enumerate(missing):
                         size = self._loaded_data_sizes[path]
                         cumsum += size
@@ -1684,8 +1667,8 @@ class GeoExplorer:
                 if len(missing) > to_read:
                     _read_files(self, missing[:to_read])
                     missing = missing[to_read:]
-                    disabled = False
-                    new_data_read = dash.no_update if not len(missing) else False
+                    disabled = False if len(missing) else True
+                    new_data_read = dash.no_update if len(missing) else False
                 else:
                     _read_files(self, missing)
                     missing = []
@@ -1699,11 +1682,7 @@ class GeoExplorer:
                 "get_files_in_bounds ferdig etter",
                 perf_counter() - t,
                 "-",
-                len(missing),
-                len(self.loaded_data),
-                new_data_read,
-                len(missing),
-                disabled,
+                f"{len(missing)=}, {len(self.loaded_data)=}, {new_data_read=}, {len(missing)=}, {disabled=}",
             )
 
             return new_data_read, missing, disabled
