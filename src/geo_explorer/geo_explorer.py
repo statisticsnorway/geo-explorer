@@ -432,10 +432,12 @@ def filter_by_bounds(df: pl.DataFrame, bounds: tuple[float]) -> pl.DataFrame:
     return df
 
 
-def read_nrows(file, nrow: int, nth_batch: int) -> pyarrow.Table:
+def read_nrows(file, nrow: int, nth_batch: int, file_system) -> pyarrow.Table:
     """Read first n rows of a parquet file."""
     for _, batch in zip(
-        range(nth_batch + 1), pq.ParquetFile(file).iter_batches(nrow), strict=False
+        range(nth_batch + 1),
+        pq.ParquetFile(file, filesystem=file_system).iter_batches(nrow),
+        strict=False,
     ):
         pass
     return pyarrow.Table.from_batches([batch]).to_pandas()
@@ -448,7 +450,10 @@ def _read_and_to_4326(path: str, file_system) -> GeoDataFrame:
         nrow = int(nrow)
         nth_batch = int(nth_batch)
         path = path.split("-_-")[0]
-        df = read_nrows(path, nrow, nth_batch)
+        try:
+            df = read_nrows(path, nrow, nth_batch, file_system=file_system)
+        except Exception:
+            df = read_nrows(path, nrow, nth_batch, file_system=None)
         df["geometry"] = GeoSeries.from_wkb(df["geometry"])
         df = GeoDataFrame(df, crs=25833)
         return _fix_df(df)
