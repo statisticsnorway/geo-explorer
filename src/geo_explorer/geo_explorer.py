@@ -616,7 +616,7 @@ class GeoExplorer:
         color_dict: dict | None = None,
         max_zoom: int = 40,
         min_zoom: int = 4,
-        max_rows: int = 25_000,
+        max_rows: int = 10_000,
         alpha: float = 0.7,
         zoom_animation: bool = False,
         splitted: bool = False,
