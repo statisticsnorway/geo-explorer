@@ -63,7 +63,7 @@ TABLE_TITLE_SUFFIX: str = (
 DEFAULT_ZOOM: int = 10
 DEFAULT_CENTER: tuple[float, float] = (59.91740845, 10.71394444)
 
-DEBUG: bool = 1
+DEBUG: bool = False
 
 if DEBUG:
 
@@ -1675,7 +1675,7 @@ class GeoExplorer:
                             break
                 else:
                     to_read = min(10, len(missing))
-                debug_print("to_read", to_read, len(missing))
+                debug_print(f"{to_read=}, {len(missing)=}")
                 if len(missing) > to_read:
                     _read_files(self, missing[:to_read])
                     missing = missing[to_read:]
