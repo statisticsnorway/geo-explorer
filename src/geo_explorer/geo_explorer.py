@@ -1437,6 +1437,7 @@ class GeoExplorer:
             debug_print(f"{len(self.concatted_data)=}")
 
             self._all_rows_deleted = self._all_rows_deleted.difference(paths_to_reload)
+            self._paths_concatted = self._paths_concatted.difference(paths_to_reload)
 
             return None
 
