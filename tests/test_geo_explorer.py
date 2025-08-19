@@ -96,6 +96,7 @@ def not_test_geo_explorer_dapla():
 
 
 if __name__ == "__main__":
+
     if any("dapla" in key.lower() for key in os.environ):
         not_test_geo_explorer_dapla()
     else:

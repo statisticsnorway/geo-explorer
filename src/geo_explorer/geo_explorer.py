@@ -737,7 +737,7 @@ class GeoExplorer:
                                                             "Export as code",
                                                             id="export",
                                                             style={"color": "#285cd4"},
-                                                            tooltip_text="Get code to reproduce current view.",
+                                                            tooltip_text="Get code to reproduce current view",
                                                         ),
                                                         dcc.Dropdown(
                                                             value=self.alpha,
@@ -759,7 +759,7 @@ class GeoExplorer:
                                                             [
                                                                 dbc.ModalHeader(
                                                                     dbc.ModalTitle(
-                                                                        "Code to reproduce explore view"
+                                                                        "Code to reproduce current view"
                                                                     ),
                                                                     close_button=False,
                                                                 ),
@@ -2771,11 +2771,6 @@ class GeoExplorer:
     def __str__(self) -> str:
         """String representation."""
 
-        def maybe_to_string(x):
-            if isinstance(x, str):
-                return f"'{x}'"
-            return x
-
         data = {
             key: value
             for key, value in self.__dict__.items()
@@ -2790,6 +2785,7 @@ class GeoExplorer:
                 "tile_names",
                 "concatted_data",
                 "splitted",
+                "logger",
             ]
             and not key.startswith("_")
             and not (isinstance(value, (dict, list, tuple)) and not value)
@@ -2803,12 +2799,19 @@ class GeoExplorer:
         if self._file_browser.favorites:
             data["favorites"] = self._file_browser.favorites
 
+        data["file_system"] = data["file_system"].__class__.__name__ + "()"
+
         if "selected_features" in data:
             data["selected_features"] = [
                 x["_unique_id"] for x in data["selected_features"].values()
             ]
 
-        txt = ", ".join(f"{k}={maybe_to_string(v)}" for k, v in data.items())
+        def maybe_to_string(key: str, value: Any):
+            if isinstance(value, str) and key not in ["file_system"]:
+                return f"'{value}'"
+            return value
+
+        txt = ", ".join(f"{k}={maybe_to_string(k, v)}" for k, v in data.items())
         return f"{self.__class__.__name__}({txt})"
 
 
