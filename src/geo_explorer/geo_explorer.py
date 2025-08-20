@@ -63,7 +63,7 @@ TABLE_TITLE_SUFFIX: str = (
 DEFAULT_ZOOM: int = 10
 DEFAULT_CENTER: tuple[float, float] = (59.91740845, 10.71394444)
 
-DEBUG: bool = False
+DEBUG: bool = 1
 
 if DEBUG:
 
@@ -302,7 +302,7 @@ def _add_data_one_path(
         )
         return data, out_alert, False
     if column and column not in df:
-        debug_print("_add_data_one_path111", column)
+        debug_print("_add_data_one_path111", column, len(df))
         data.append(
             dl.Overlay(
                 dl.GeoJSON(
@@ -326,7 +326,9 @@ def _add_data_one_path(
             )
         )
     elif column:
-        debug_print("_add_data_one_path222", column)
+        debug_print("_add_data_one_path222", column, (df))
+        debug_print(df["_color"].unique())
+        debug_print(df["_color"])
         data.append(
             dl.Overlay(
                 dl.LayerGroup(
@@ -1288,15 +1290,25 @@ class GeoExplorer:
                         ),
                         dbc.Col(html.Span(path)),
                         dbc.Row(
-                            dcc.Input(
-                                get_filter_function_if_any(path),
-                                placeholder="Filter (with polars or pandas)",
-                                id={
-                                    "type": "filter",
-                                    "index": path,
-                                },
-                                debounce=3,
-                            ),
+                            [
+                                dcc.Input(
+                                    get_filter_function_if_any(path),
+                                    placeholder="Filter (with polars or pandas). E.g. komm_nr == '0301'",
+                                    id={
+                                        "type": "filter",
+                                        "index": path,
+                                    },
+                                    debounce=3,
+                                ),
+                                dbc.Tooltip(
+                                    "E.g. komm_nr == '0301' or pl.col('komm_nr') == '0301'",
+                                    target={
+                                        "type": "filter",
+                                        "index": path,
+                                    },
+                                    delay={"show": 500, "hide": 100},
+                                ),
+                            ],
                         ),
                     ],
                     style={
@@ -1306,9 +1318,7 @@ class GeoExplorer:
                         "marginBottom": "5px",
                     },
                 )
-                for i, (path, checked) in enumerate(
-                    reversed(self.selected_files.items())
-                )
+                for path, checked in (reversed(self.selected_files.items()))
             ], dash.no_update
 
         @callback(
@@ -1752,14 +1762,18 @@ class GeoExplorer:
             )
             # constructing dataset to be filtered from the full dataset, in case it has already been filtered on another query
             this_data = pl.concat(
-                _get_df(path, self.loaded_data, self._paths_concatted, override=True)
+                _get_df(path, self.loaded_data, self._paths_concatted, override=True),
+                how="diagonal_relaxed",
             )
 
             out_alert = None
             if filter_function is not None and not (
                 isinstance(filter_function, str) and filter_function == ""
             ):
+                # try to filter with polars, then pandas.loc, then pandas.query
+                # no need for pretty code and specific exception handling here, as this a convenience feature
                 try:
+                    # polars needs functions called, pandas does not
                     if callable(filter_function):
                         filter_function = filter_function(this_data)
                     this_data = this_data.filter(filter_function)
@@ -1769,22 +1783,33 @@ class GeoExplorer:
                             this_data.to_pandas().loc[filter_function]
                         )
                     except Exception as e2:
-                        e_name = type(e).__name__
-                        e2_name = type(e2).__name__
-                        e = str(e)
-                        e2 = str(e2)
-                        if len(e) > 1000:
-                            e = e[:997] + "... "
-                        if len(e2) > 1000:
-                            e2 = e2[:997] + "... "
-                        out_alert = dbc.Alert(
-                            (
-                                f"Filter function failed with polars ({e_name}: {e}) "
-                                f"and pandas: ({e2_name}: {e2})"
-                            ),
-                            color="warning",
-                            dismissable=True,
-                        )
+                        try:
+                            this_data = pl.DataFrame(
+                                this_data.to_pandas().query(filter_function)
+                            )
+                        except Exception as e3:
+                            e_name = type(e).__name__
+                            e2_name = type(e2).__name__
+                            e3_name = type(e3).__name__
+                            e = str(e)
+                            e2 = str(e2)
+                            e3 = str(e3)
+                            if len(e) > 1000:
+                                e = e[:997] + "... "
+                            if len(e2) > 1000:
+                                e2 = e2[:997] + "... "
+                            out_alert = dbc.Alert(
+                                (
+                                    f"Filter function failed with polars ({e_name}: {e}) "
+                                    f"and pandas loc: ({e2_name}: {e2}) "
+                                    f"and pandas query: ({e3_name}: {e3}) "
+                                ),
+                                color="warning",
+                                dismissable=True,
+                            )
+
+            debug_print("filter")
+            debug_print(this_data)
 
             self.concatted_data = pl.concat(
                 [this_data, other_data], how="diagonal_relaxed"
@@ -1823,7 +1848,6 @@ class GeoExplorer:
                 )
                 for path in self.selected_files
             ]
-            debug_print("concat_dat111111", perf_counter() - t)
 
             dfs = [
                 df
@@ -1838,6 +1862,7 @@ class GeoExplorer:
                 debug_print(dfs)
                 self.concatted_data = pl.concat(dfs, how="diagonal_relaxed")
                 self._paths_concatted = set(self.concatted_data["__file_path"].unique())
+                self.concatted_data = self.concatted_data.unique()
 
             if DEBUG and self.concatted_data is not None:
                 assert len(self.concatted_data) == len(
@@ -1848,7 +1873,11 @@ class GeoExplorer:
                     "_unique_id", "__file_path"
                 )
 
-            debug_print("concat_data finished after", perf_counter() - t)
+            debug_print(
+                "concat_data finished after",
+                perf_counter() - t,
+                len(self.concatted_data if self.concatted_data is not None else []),
+            )
 
             return 1, 1
 
