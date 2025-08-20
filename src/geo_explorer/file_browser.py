@@ -486,7 +486,7 @@ def _get_file_list_row(path, timestamp, size, isdir: bool, current_path, file_sy
                     id={"type": "file-path", "index": path},
                     className="path-button",
                     style={
-                        "padding-left": "3px",
+                        "paddingLeft": "3px",
                         "backgroundColor": "rgba(0, 0, 0, 0)",
                         "fillColor": "rgba(0, 0, 0, 0)",
                         "width": "80vh",
@@ -499,13 +499,13 @@ def _get_file_list_row(path, timestamp, size, isdir: bool, current_path, file_sy
             html.Td(
                 timestamp,
                 style={
-                    "padding-left": "10px",
+                    "paddingLeft": "10px",
                 },
             ),
             html.Td(
                 mb,
                 style={
-                    "padding-left": "10px",
+                    "paddingLeft": "10px",
                 },
             ),
         ]

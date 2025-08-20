@@ -47,6 +47,8 @@ from jenkspy import jenks_breaks
 from pandas.api.types import is_datetime64_any_dtype
 from shapely.errors import GEOSException
 from shapely.geometry import Polygon
+from shapely.geometry import Point
+
 
 from .file_browser import FileBrowser
 from .fs import LocalFileSystem
@@ -63,7 +65,7 @@ TABLE_TITLE_SUFFIX: str = (
 DEFAULT_ZOOM: int = 10
 DEFAULT_CENTER: tuple[float, float] = (59.91740845, 10.71394444)
 
-DEBUG: bool = 1
+DEBUG: bool = False
 
 if DEBUG:
 
@@ -234,7 +236,6 @@ def _add_data_one_path(
     alpha,
 ):
     debug_print("add_data_one_path", path)
-    print(column, is_numeric)
     ns = Namespace("onEachFeatureToggleHighlight", "default")
     data = []
     if concatted_data is None:
@@ -434,7 +435,7 @@ def read_nrows(file, nrow: int, nth_batch: int, file_system) -> pyarrow.Table:
     return pyarrow.Table.from_batches([batch]).to_pandas()
 
 
-def _read_and_to_4326(path: str, file_system) -> GeoDataFrame:
+def _read_and_to_4326(path: str, file_system, **kwargs) -> GeoDataFrame:
     if "-_-" in path:
         rows = path.split("-_-")[-1]
         nrow, nth_batch = rows.split("-")
@@ -448,7 +449,7 @@ def _read_and_to_4326(path: str, file_system) -> GeoDataFrame:
         df["geometry"] = GeoSeries.from_wkb(df["geometry"])
         df = GeoDataFrame(df, crs=25833)
         return _fix_df(df)
-    df = sg.read_geopandas(path, file_system=file_system)
+    df = sg.read_geopandas(path, file_system=file_system, **kwargs)
     return _fix_df(df)
 
 
@@ -456,7 +457,7 @@ def _fix_df(df: GeoDataFrame) -> GeoDataFrame:
     df["area"] = df.area
     if df["area"].median() > 10:
         df["area"] = df["area"].astype(int)
-    if len(df):
+    if df.crs is not None:
         df = df.to_crs(4326)
     bounds = df.geometry.bounds.astype("float32[pyarrow]")
     df[["minx", "miny", "maxx", "maxy"]] = bounds[["minx", "miny", "maxx", "maxy"]]
@@ -469,14 +470,16 @@ def _get_unique_id(df, i):
     return (np.array(range(len(df))) / divider) + i
 
 
-def _read_files(explorer, paths: list[str]) -> None:
+def _read_files(explorer, paths: list[str], **kwargs) -> None:
     if not paths:
         return
     paths = list(paths)
     backend = "threading" if len(paths) <= 3 else "loky"
     with joblib.Parallel(len(paths), backend=backend) as parallel:
         more_data = parallel(
-            joblib.delayed(_read_and_to_4326)(path, file_system=explorer.file_system)
+            joblib.delayed(_read_and_to_4326)(
+                path, file_system=explorer.file_system, **kwargs
+            )
             for path in paths
         )
     for path, df in zip(paths, more_data, strict=True):
@@ -974,20 +977,21 @@ class GeoExplorer:
         error_mess = "'data' must be a list of file paths or a dict of GeoDataFrames."
         bounds_series_dict = {}
         for x in data or []:
-            if isinstance(x, dict):
-                for key, df in x.items():
-                    if not isinstance(df, GeoDataFrame):
-                        raise ValueError(error_mess)
-                    key = _standardize_path(key)
-                    df = _fix_df(df)
-                    bounds_series_dict[key] = shapely.box(*df.total_bounds)
-                    df = pl.from_pandas(df.assign(geometry=df.geometry.to_wkb()))
-                    self.loaded_data[key] = df
-                    self.selected_files[key] = True
-            elif isinstance(x, (str | os.PathLike | PurePath)):
+            if isinstance(x, (str | os.PathLike | PurePath)):
                 self.selected_files[_standardize_path(x)] = True
-            else:
+                continue
+            elif not isinstance(x, dict):
                 raise ValueError(error_mess)
+            for key, df in x.items():
+                if not isinstance(df, GeoDataFrame):
+                    raise ValueError(error_mess)
+                key = _standardize_path(key)
+                df = _fix_df(df)
+                bounds_series_dict[key] = shapely.box(*df.total_bounds)
+                self.loaded_data[key] = pl.from_pandas(
+                    df.assign(geometry=df.geometry.to_wkb())
+                )
+                self.selected_files[key] = True
 
         self.bounds_series = GeoSeries(bounds_series_dict)
 
@@ -1005,7 +1009,7 @@ class GeoExplorer:
             return
 
         child_paths = _get_child_paths(
-            [x for x in self.selected_files if x not in bounds_series_dict],
+            [x for x in self.selected_files if x not in self.loaded_data],
             self.file_system,
         )
         if child_paths:
@@ -1018,9 +1022,11 @@ class GeoExplorer:
                 ]
             )
 
+        temp_center = center if center is not None else DEFAULT_CENTER
         _read_files(
             self,
-            [x for x in self.selected_files if x not in bounds_series_dict],
+            [x for x in self.selected_files if x not in self.loaded_data],
+            mask=Point(temp_center),
         )
 
         # dataframe dicts as input data are currently sorted first because they were added to loaded_data first.
@@ -1096,7 +1102,7 @@ class GeoExplorer:
                 / os.environ["JUPYTERHUB_SERVICE_PREFIX"].strip("/")
             )
             display_url = f"{kwargs['jupyter_server_url']}/proxy/{self.port}/"
-            # make sure there's two slashes to make link clickable in print
+            # make sure there's two slashes to make link clickable in terminal
             # (env variable might only have one slash, which redirects to two-slash-url)
             display_url = display_url.replace("https:/", "https://").replace(
                 "https:///", "https://"
@@ -1182,7 +1188,6 @@ class GeoExplorer:
                 self.splitted = True
                 for key, df in self.loaded_data.items():
                     self.loaded_data[key] = get_split_index(df)
-                # self.concatted_data = get_split_index(self.concatted_data)
                 return None
             if not any(load_parquet) or not triggered:
                 return dash.no_update
@@ -1358,10 +1363,10 @@ class GeoExplorer:
             filter_ids: list[str],
             bounds,
         ):
-            debug_print("concat_data")
+            debug_print("concat_data", new_data_read)
             t = perf_counter()
             if not new_data_read:
-                return dash.no_update, 1
+                return dash.no_update, 1, dash.no_update
 
             bounds = self._nested_bounds_to_bounds(bounds)
 
@@ -1408,6 +1413,8 @@ class GeoExplorer:
                 perf_counter() - t,
                 len(self.concatted_data if self.concatted_data is not None else []),
             )
+            if not alerts:
+                alerts = None
             return 1, 1, alerts
 
         @callback(
@@ -1727,7 +1734,6 @@ class GeoExplorer:
         def update_column_dropdown_options(_):
             if self.concatted_data is None or not len(self.concatted_data):
                 return dash.no_update
-            print("update_column_dropdown_options", set(self.concatted_data.columns))
             return self._get_column_dropdown_options()
 
         @callback(
@@ -1777,6 +1783,7 @@ class GeoExplorer:
             colorpicker_ids,
             bins,
         ):
+
             triggered = dash.callback_context.triggered_id
             debug_print("\nget_column_value_color_dict", column, triggered)
 
@@ -1971,8 +1978,6 @@ class GeoExplorer:
                 colors = colors + [
                     _random_color() for _ in range(len(new_values) - len(colors))
                 ]
-                print(color_dict)
-                print(new_values)
                 color_dict = dict(
                     sorted(
                         (
