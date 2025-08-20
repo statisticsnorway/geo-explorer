@@ -1181,7 +1181,7 @@ class GeoExplorer:
                     return dash.no_update
                 self.splitted = True
                 for key, df in self.loaded_data.items():
-                    self.loaded_data[key] = get_split_index(self.loaded_data[key])
+                    self.loaded_data[key] = get_split_index(df)
                 # self.concatted_data = get_split_index(self.concatted_data)
                 return None
             if not any(load_parquet) or not triggered:
