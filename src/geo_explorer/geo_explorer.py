@@ -651,12 +651,15 @@ class GeoExplorer:
         self.concatted_data: pl.DataFrame | None = None
         self.tile_names: list[str] = []
         self.currently_in_bounds: list[str] = []
-        self._file_browser = FileBrowser(
-            start_dir, file_system=file_system, favorites=favorites
-        )
         self.selected_features = {}
         self._all_rows_deleted = set()
         self._loaded_dfs_at_start = set()
+        self._file_browser = FileBrowser(
+            start_dir, file_system=file_system, favorites=favorites
+        )
+
+        self._deleted_categories = set()
+        self._deleted_files = set()
 
         if is_jupyter():
             service_prefix = os.environ["JUPYTERHUB_SERVICE_PREFIX"].strip("/")
@@ -690,7 +693,6 @@ class GeoExplorer:
                 [
                     dcc.Location(id="url"),
                     dbc.Row(html.Div(id="alert")),
-                    dbc.Row(html.Div(id="alert2")),
                     dbc.Row(html.Div(id="alert3")),
                     dbc.Row(html.Div(id="alert4")),
                     dbc.Row(html.Div(id="new-file-added")),
@@ -910,6 +912,14 @@ class GeoExplorer:
                                             "margin-right": "0px",
                                         },
                                     ),
+                                    dbc.Col(
+                                        get_button_with_tooltip(
+                                            "Reload categories",
+                                            id="reload-categories",
+                                            n_clicks=0,
+                                            tooltip_text="Get back categories that have been X-ed out",
+                                        )
+                                    ),
                                     dbc.Row(id="colorpicker-container"),
                                 ],
                                 style={
@@ -949,10 +959,9 @@ class GeoExplorer:
                     ),
                     dcc.Store(id="viewport-container", data=None),
                     html.Div(id="color-container", style={"display": "none"}),
-                    html.Div(id="currently-in-bounds", style={"display": "none"}),
                     html.Div(id="missing", style={"display": "none"}),
-                    html.Div(id="currently-in-bounds2", style={"display": "none"}),
-                    html.Div(id="new-file-added2", style={"display": "none"}),
+                    dcc.Store(id="colors-are-updated"),
+                    html.Div(id="wms-added", style={"display": "none"}),
                     html.Div(id="data-was-concatted", style={"display": "none"}),
                     html.Div(id="data-was-changed", style={"display": "none"}),
                     dcc.Store(id="order-was-changed", data=None),
@@ -1142,6 +1151,334 @@ class GeoExplorer:
             return html.Div(f"{self}.run()"), True
 
         @callback(
+            Output("debounced_bounds", "value"),
+            Input("map", "bounds"),
+            Input("map", "zoom"),
+            State("map-bounds", "data"),
+            prevent_initial_call=True,
+        )
+        def update_bounds(bounds, zoom, bounds2):
+            debug_print("update_bounds", bounds, bounds2)
+            if bounds is None:
+                return dash.no_update
+            self.bounds = bounds
+            centroid = shapely.box(*self._nested_bounds_to_bounds(bounds)).centroid
+            self.center = (centroid.y, centroid.x)
+            self.zoom = zoom
+            return json.dumps(bounds)
+
+        @callback(
+            Output("map", "bounds"),
+            Output("map", "zoom"),
+            Output("map", "center"),
+            State("map-bounds", "data"),
+            Input("map-zoom", "data"),
+            State("map-center", "data"),
+            prevent_initial_call=True,
+        )
+        def intermediate_update_bounds(bounds, zoom, center):
+            """Update map bounds after short sleep because otherwise it's buggy."""
+            time.sleep(0.1)
+            if not zoom and not bounds and not center:
+                return dash.no_update, dash.no_update, dash.no_update
+            debug_print("intermediate_update_bounds", zoom, bounds, center)
+            return bounds, zoom, center
+
+        @callback(
+            Output("new-file-added", "children"),
+            Input({"type": "load-parquet", "index": dash.ALL}, "n_clicks"),
+            Input({"type": "load-parquet", "index": dash.ALL}, "id"),
+            Input("is_splitted", "data"),
+            State({"type": "file-path", "index": dash.ALL}, "id"),
+        )
+        def append_path(load_parquet, load_parquet_ids, is_splitted, ids):
+            triggered = dash.callback_context.triggered_id
+            debug_print("append_path", triggered)
+            if triggered == "is_splitted":
+                if not is_splitted:
+                    return dash.no_update
+                self.splitted = True
+                for key, df in self.loaded_data.items():
+                    self.loaded_data[key] = self.loaded_data[key].with_columns(
+                        split_index=[f"{_get_name(key)} {i}" for i in range(len(df))]
+                    )
+                self.concatted_data = get_split_index(self.concatted_data)
+                return None
+            if not any(load_parquet) or not triggered:
+                return dash.no_update
+            try:
+                selected_path = triggered["index"]
+            except Exception as e:
+                raise type(e)(f"{e}: {triggered}") from e
+            n_clicks = get_index(load_parquet, load_parquet_ids, selected_path)
+            if selected_path in self.selected_files or not n_clicks:
+                return dash.no_update
+            self._deleted_files = self._deleted_files.difference(selected_path)
+            try:
+                more_bounds = _get_bounds_series(
+                    selected_path, file_system=self.file_system
+                )
+            except Exception as e:
+                return dbc.Alert(
+                    f"Couldn't read {selected_path}. {type(e)}: {e}",
+                    color="warning",
+                    dismissable=True,
+                )
+            self.selected_files[selected_path] = True
+            self.bounds_series = pd.concat(
+                [
+                    self.bounds_series,
+                    more_bounds,
+                ]
+            )
+            return None
+
+        @callback(
+            Output("new-data-read", "children"),
+            Output("missing", "children"),
+            Output("interval-component", "disabled"),
+            Input("debounced_bounds", "value"),
+            Input("new-file-added", "children"),
+            # Input("file-deleted", "children"),
+            Input("interval-component", "n_intervals"),
+            Input("missing", "children"),
+            Input({"type": "checked-btn", "index": dash.ALL}, "n_clicks"),
+            State({"type": "checked-btn", "index": dash.ALL}, "id"),
+        )
+        def get_files_in_bounds(
+            bounds,
+            file_added,
+            # file_deleted,
+            n_intervals,
+            missing,
+            checked_clicks,
+            checked_ids,
+        ):
+            t = perf_counter()
+
+            triggered = dash.callback_context.triggered_id
+            debug_print(
+                "get_files_in_bounds",
+                triggered,
+                f"{len(missing or [])=}, {len(self.loaded_data)=}",
+            )
+            if isinstance(triggered, dict) and triggered["type"] == "checked-btn":
+                path = get_index_if_clicks(checked_clicks, checked_ids)
+                if path is None:
+                    return dash.no_update, dash.no_update, dash.no_update
+
+            if triggered != "missing":
+                box = shapely.box(*self._nested_bounds_to_bounds(bounds))
+                files_in_bounds = sg.sfilter(self.bounds_series, box)
+                self.currently_in_bounds = list(set(files_in_bounds.index))
+
+                def is_checked(path) -> bool:
+                    return next(
+                        iter(
+                            is_checked
+                            for sel_path, is_checked in self.selected_files.items()
+                            if sel_path in path
+                        )
+                    )
+
+                missing = list(
+                    {
+                        path
+                        for path in files_in_bounds.index
+                        if path not in self.loaded_data and is_checked(path)
+                    }.difference(self._all_rows_deleted)
+                )
+                if not all(path in self._loaded_data_sizes for path in missing):
+                    missing_size = [
+                        path for path in missing if path not in self._loaded_data_sizes
+                    ]
+                    with ThreadPoolExecutor() as executor:
+                        more_sizes = {
+                            path: x["size"]
+                            for path, x in zip(
+                                missing_size,
+                                executor.map(self.file_system.info, missing_size),
+                                strict=True,
+                            )
+                        }
+                    self._loaded_data_sizes |= more_sizes
+
+            if triggered != "interval-component":
+                new_missing = []
+                for path in missing:
+                    size = self._loaded_data_sizes[path]
+                    if size < 1e9:
+                        new_missing.append(path)
+                        continue
+                    with self.file_system.open(path, "rb") as file:
+                        nrow = pq.read_metadata(file).num_rows
+                    n = 30
+                    rows_to_read = nrow // n
+                    for i in range(n):
+                        new_path = path + f"-_-{rows_to_read}-{i}"
+                        if new_path in missing:
+                            continue
+                        new_missing.append(new_path)
+                        self._loaded_data_sizes[new_path] = size / n
+                        self.bounds_series = pd.concat(
+                            [
+                                self.bounds_series,
+                                GeoSeries({new_path: self.bounds_series.loc[path]}),
+                            ]
+                        )
+                missing = new_missing
+
+            if missing:
+                if len(missing) > 10:
+                    to_read = 0
+                    cumsum = 0
+                    for i, path in enumerate(missing):
+                        size = self._loaded_data_sizes[path]
+                        cumsum += size
+                        to_read += 1
+                        if cumsum > 500_000_000 or to_read > cpu_count() * 2:
+                            break
+                else:
+                    to_read = min(10, len(missing))
+                debug_print(f"{to_read=}, {len(missing)=}")
+                if len(missing) > to_read:
+                    _read_files(self, missing[:to_read])
+                    missing = missing[to_read:]
+                    disabled = False if len(missing) else True
+                    new_data_read = dash.no_update if len(missing) else False
+                else:
+                    _read_files(self, missing)
+                    missing = []
+                    disabled = True
+                    new_data_read = True
+            else:
+                new_data_read = True
+                disabled = True
+
+            debug_print(
+                "get_files_in_bounds ferdig etter",
+                perf_counter() - t,
+                "-",
+                f"{len(missing)=}, {len(self.loaded_data)=}, {new_data_read=}, {disabled=}",
+            )
+
+            return new_data_read, missing, disabled
+
+        @callback(
+            Output("data-was-concatted", "children"),
+            Output("data-was-changed", "children"),
+            Input("new-data-read", "children"),
+            Input("file-deleted", "children"),
+            Input({"type": "filter", "index": dash.ALL}, "value"),
+            Input({"type": "filter", "index": dash.ALL}, "id"),
+            State("debounced_bounds", "value"),
+            prevent_initial_call=True,
+        )
+        def concat_data(
+            new_data_read,
+            file_deleted,
+            filter_functions: list[str],
+            filter_ids: list[str],
+            bounds,
+        ):
+            debug_print("concat_data", self._paths_concatted)
+            t = perf_counter()
+            if not new_data_read:
+                return dash.no_update, 1
+
+            dfs = []
+            for path in self.selected_files:
+                if path in self._deleted_files:
+                    continue
+                for key in self.loaded_data:
+                    if path not in key:
+                        continue
+                    df = (
+                        self.loaded_data[key]
+                        .lazy()
+                        .with_columns(__file_path=pl.lit(key))
+                    )
+                    print(path)
+                    if self._deleted_categories and self.column in df:
+                        expression = (
+                            pl.col(self.column).is_in(list(self._deleted_categories))
+                            == False
+                        )
+                        print(expression)
+                        if self.nan_label in self._deleted_categories:
+                            expression &= pl.col(self.column).is_not_null()
+                        print(expression)
+                        df = df.filter(expression)
+                    elif (
+                        self.nan_label in self._deleted_categories
+                        and self.column not in df
+                    ):
+                        continue
+                    df = df.collect()
+                    print(df)
+                    # filtering by function after collect because LazyFrame doesnt implement to_pandas.
+                    try:
+                        filter_function = get_index(filter_functions, filter_ids, path)
+                    except ValueError as e:
+                        print(e)
+                        filter_function = None
+                    print(path, filter_function)
+                    if filter_function is not None:
+                        df, alert = _filter_data(df, filter_function)
+                        print(alert)
+
+                    dfs.append(df)
+
+            self.concatted_data = pl.concat(dfs, how="diagonal_relaxed")
+            debug_print(
+                "concat_data finished after",
+                perf_counter() - t,
+                len(self.concatted_data if self.concatted_data is not None else []),
+            )
+            return 1, 1
+
+            dfs = [
+                _get_df(
+                    path,
+                    loaded_data=self.loaded_data,
+                    paths_concatted=self._paths_concatted,
+                )
+                for path in self.selected_files
+            ]
+
+            dfs = [
+                df
+                for sublist in dfs
+                for df in sublist
+                if df is not None and len(df) > 0
+            ]
+            if dfs:
+                if self.concatted_data is not None:
+                    dfs.append(self.concatted_data)
+
+                debug_print(dfs)
+                self.concatted_data = pl.concat(dfs, how="diagonal_relaxed")
+                self._paths_concatted = set(self.concatted_data["__file_path"].unique())
+                # self.concatted_data = self.concatted_data.unique()
+
+            if DEBUG and self.concatted_data is not None:
+                assert len(self.concatted_data) == len(
+                    self.concatted_data["_unique_id"].unique()
+                ), self.concatted_data.filter(
+                    pl.col("_unique_id").is_duplicated()
+                ).select(
+                    "_unique_id", "__file_path"
+                )
+
+            debug_print(
+                "concat_data finished after",
+                perf_counter() - t,
+                len(self.concatted_data if self.concatted_data is not None else []),
+            )
+
+            return 1, 1
+
+        @callback(
             Output("file-control-panel", "children"),  # , allow_duplicate=True),
             Output("order-was-changed", "data"),
             Input("data-was-changed", "children"),
@@ -1232,24 +1569,6 @@ class GeoExplorer:
                                     }
                                 ),
                                 tooltip_text="Show/hide data",
-                            )
-                        ),
-                        dbc.Col(
-                            get_button_with_tooltip(
-                                "Reload",
-                                id={
-                                    "type": "reload-btn",
-                                    "index": path,
-                                },
-                                n_clicks=0,
-                                style={
-                                    "color": "#285cd4",
-                                    "border": "none",
-                                    "background": "none",
-                                    "cursor": "pointer",
-                                    "marginLeft": "auto",
-                                },
-                                tooltip_text="Reload data (in case categories have been X-ed out)",
                             )
                         ),
                         dbc.Col(
@@ -1379,13 +1698,18 @@ class GeoExplorer:
             debug_print(f"path to delete: {path_to_delete}")
 
             if not self.column:
-                self._paths_concatted = {
-                    path
-                    for path in self._paths_concatted
-                    if Path(path).stem != path_to_delete
-                }
-                return (*self._delete_file(n_clicks_list, delete_ids), dash.no_update)
+                # self._paths_concatted = {
+                #     path
+                #     for path in self._paths_concatted
+                #     if Path(path).stem != path_to_delete
+                # }
+                self._deleted_files.add(path_to_delete)
+                return None, None, dash.no_update
+                # return (*self._delete_file(n_clicks_list, delete_ids), dash.no_update)
             else:
+                self._deleted_categories.add(path_to_delete)
+                return None, None, dash.no_update
+
                 if self.concatted_data[self.column].dtype.is_numeric():
                     return (
                         dash.no_update,
@@ -1417,38 +1741,17 @@ class GeoExplorer:
                     if path not in self._paths_concatted:
                         del self.loaded_data[path]
 
-            return None, None, color_container
+                return None, None, color_container
 
         @callback(
             Output("file-deleted", "children", allow_duplicate=True),
-            Input({"type": "reload-btn", "index": dash.ALL}, "n_clicks"),
-            State({"type": "reload-btn", "index": dash.ALL}, "id"),
+            Input("reload-categories", "n_clicks"),
             prevent_initial_call=True,
         )
-        def reload_data(n_clicks_list, reload_ids):
-            debug_print("\n\nreload_data")
-            path_to_reload = get_index_if_clicks(n_clicks_list, reload_ids)
-            if path_to_reload is None:
+        def reload_data(n_clicks):
+            if not n_clicks:
                 return dash.no_update
-
-            if path_to_reload in self._loaded_dfs_at_start:
-                return dbc.Alert(
-                    "Cannot reload data passed as DataFrames in initializer.",
-                    color="warning",
-                    dismissable=True,
-                )
-
-            paths_to_reload = set(
-                self.bounds_series.index[
-                    self.bounds_series.index.str.contains(path_to_reload)
-                ]
-            )
-            _read_files(self, paths_to_reload)
-            debug_print(f"{len(self.concatted_data)=}")
-
-            self._all_rows_deleted = self._all_rows_deleted.difference(paths_to_reload)
-            self._paths_concatted = self._paths_concatted.difference(paths_to_reload)
-
+            self._deleted_categories = set()
             return None
 
         @callback(
@@ -1473,7 +1776,11 @@ class GeoExplorer:
         )
         def is_splitted(n_clicks: int, column):
             triggered = dash.callback_context.triggered_id
-            if self.concatted_data is None or triggered is None:
+            if (
+                not self.loaded_data
+                or not self.currently_in_bounds
+                or triggered is None
+            ):
                 return dash.no_update, dash.no_update, dash.no_update, dash.no_update
             is_splitted: bool = n_clicks % 2 == 1 and not (
                 triggered == "column-dropdown" and not column
@@ -1514,206 +1821,6 @@ class GeoExplorer:
             return "Loading data..."
 
         @callback(
-            Output("new-file-added", "children"),
-            Output("new-file-added", "style"),
-            Input({"type": "load-parquet", "index": dash.ALL}, "n_clicks"),
-            Input({"type": "load-parquet", "index": dash.ALL}, "id"),
-            Input("is_splitted", "data"),
-            State({"type": "file-path", "index": dash.ALL}, "id"),
-        )
-        def append_path(load_parquet, load_parquet_ids, is_splitted, ids):
-            triggered = dash.callback_context.triggered_id
-            debug_print("append_path", triggered)
-            if triggered == "is_splitted":
-                if not is_splitted:
-                    return dash.no_update, dash.no_update
-                self.splitted = True
-                for key, df in self.loaded_data.items():
-                    self.loaded_data[key] = self.loaded_data[key].with_columns(
-                        split_index=[f"{_get_name(key)} {i}" for i in range(len(df))]
-                    )
-                self.concatted_data = get_split_index(self.concatted_data)
-                return 1, {"display": "none"}
-            if not any(load_parquet) or not triggered:
-                return dash.no_update, dash.no_update
-            try:
-                selected_path = triggered["index"]
-            except Exception as e:
-                raise type(e)(f"{e}: {triggered}") from e
-            n_clicks = get_index(load_parquet, load_parquet_ids, selected_path)
-            if selected_path in self.selected_files or not n_clicks:
-                return dash.no_update, dash.no_update
-            try:
-                more_bounds = _get_bounds_series(
-                    selected_path, file_system=self.file_system
-                )
-            except Exception as e:
-                return (
-                    dbc.Alert(
-                        f"Couldn't read {selected_path}. {type(e)}: {e}",
-                        color="warning",
-                        dismissable=True,
-                    ),
-                    None,
-                )
-            self.selected_files[selected_path] = True
-            self.bounds_series = pd.concat(
-                [
-                    self.bounds_series,
-                    more_bounds,
-                ]
-            )
-            return 1, {"display": "none"}
-
-        @callback(
-            Output("debounced_bounds", "value"),
-            Input("map", "bounds"),
-            Input("map", "zoom"),
-            State("map-bounds", "data"),
-            prevent_initial_call=True,
-        )
-        def update_bounds(bounds, zoom, bounds2):
-            debug_print("update_bounds", bounds, bounds2)
-            if bounds is None:
-                return dash.no_update
-            self.bounds = bounds
-            centroid = shapely.box(*self._nested_bounds_to_bounds(bounds)).centroid
-            self.center = (centroid.y, centroid.x)
-            self.zoom = zoom
-            return json.dumps(bounds)
-
-        @callback(
-            Output("new-data-read", "children"),
-            Output("missing", "children"),
-            Output("interval-component", "disabled"),
-            Input("debounced_bounds", "value"),
-            Input("new-file-added", "children"),
-            Input("file-deleted", "children"),
-            Input("interval-component", "n_intervals"),
-            Input("missing", "children"),
-            Input({"type": "checked-btn", "index": dash.ALL}, "n_clicks"),
-            State({"type": "checked-btn", "index": dash.ALL}, "id"),
-        )
-        def get_files_in_bounds(
-            bounds,
-            file_added,
-            file_deleted,
-            n_intervals,
-            missing,
-            checked_clicks,
-            checked_ids,
-        ):
-            t = perf_counter()
-
-            triggered = dash.callback_context.triggered_id
-            debug_print(
-                "get_files_in_bounds",
-                triggered,
-                f"{len(missing or [])=}, {len(self.loaded_data)=}",
-            )
-            if isinstance(triggered, dict) and triggered["type"] == "checked-btn":
-                path = get_index_if_clicks(checked_clicks, checked_ids)
-                if path is None:
-                    return dash.no_update, dash.no_update, dash.no_update
-
-            if triggered != "missing":
-                box = shapely.box(*self._nested_bounds_to_bounds(bounds))
-                files_in_bounds = sg.sfilter(self.bounds_series, box)
-                self.currently_in_bounds = list(set(files_in_bounds.index))
-
-                def is_checked(path) -> bool:
-                    return next(
-                        iter(
-                            is_checked
-                            for sel_path, is_checked in self.selected_files.items()
-                            if sel_path in path
-                        )
-                    )
-
-                missing = list(
-                    {
-                        path
-                        for path in files_in_bounds.index
-                        if path not in self.loaded_data and is_checked(path)
-                    }.difference(self._all_rows_deleted)
-                )
-                if not all(path in self._loaded_data_sizes for path in missing):
-                    missing_size = [
-                        path for path in missing if path not in self._loaded_data_sizes
-                    ]
-                    with ThreadPoolExecutor() as executor:
-                        more_sizes = {
-                            path: x["size"]
-                            for path, x in zip(
-                                missing_size,
-                                executor.map(self.file_system.info, missing_size),
-                                strict=True,
-                            )
-                        }
-                    self._loaded_data_sizes |= more_sizes
-
-            if triggered != "interval-component":
-                new_missing = []
-                for path in missing:
-                    size = self._loaded_data_sizes[path]
-                    if size < 1e9:
-                        new_missing.append(path)
-                        continue
-                    with self.file_system.open(path, "rb") as file:
-                        nrow = pq.read_metadata(file).num_rows
-                    n = 30
-                    rows_to_read = nrow // n
-                    for i in range(n):
-                        new_path = path + f"-_-{rows_to_read}-{i}"
-                        if new_path in missing:
-                            continue
-                        new_missing.append(new_path)
-                        self._loaded_data_sizes[new_path] = size / n
-                        self.bounds_series = pd.concat(
-                            [
-                                self.bounds_series,
-                                GeoSeries({new_path: self.bounds_series.loc[path]}),
-                            ]
-                        )
-                missing = new_missing
-
-            if missing:
-                if len(missing) > 10:
-                    to_read = 0
-                    cumsum = 0
-                    for i, path in enumerate(missing):
-                        size = self._loaded_data_sizes[path]
-                        cumsum += size
-                        to_read += 1
-                        if cumsum > 500_000_000 or to_read > cpu_count() * 2:
-                            break
-                else:
-                    to_read = min(10, len(missing))
-                debug_print(f"{to_read=}, {len(missing)=}")
-                if len(missing) > to_read:
-                    _read_files(self, missing[:to_read])
-                    missing = missing[to_read:]
-                    disabled = False if len(missing) else True
-                    new_data_read = dash.no_update if len(missing) else False
-                else:
-                    _read_files(self, missing)
-                    missing = []
-                    disabled = True
-                    new_data_read = True
-            else:
-                new_data_read = True
-                disabled = True
-
-            debug_print(
-                "get_files_in_bounds ferdig etter",
-                perf_counter() - t,
-                "-",
-                f"{len(missing)=}, {len(self.loaded_data)=}, {new_data_read=}, {disabled=}",
-            )
-
-            return new_data_read, missing, disabled
-
-        @callback(
             Output("loading", "children", allow_duplicate=True),
             Input("missing", "children"),
             prevent_initial_call=True,
@@ -1726,96 +1833,13 @@ class GeoExplorer:
 
         @callback(
             Output("column-dropdown", "options"),
-            Input("currently-in-bounds2", "children"),
+            Input("colors-are-updated", "data"),
             prevent_initial_call=True,
         )
         def update_column_dropdown_options(_):
             if not self.currently_in_bounds:
                 return dash.no_update
             return self._get_column_dropdown_options(self.currently_in_bounds)
-
-        @callback(
-            Output("alert2", "children"),
-            Input({"type": "filter", "index": dash.ALL}, "value"),
-            Input({"type": "filter", "index": dash.ALL}, "id"),
-            prevent_initial_call=True,
-        )
-        def filter_data(filter_functions: list[str], filter_ids: list[str]):
-            if not filter_functions:
-                return dash.no_update
-            triggered = dash.callback_context.triggered_id
-
-            path = triggered["index"]
-            filter_function = get_index(filter_functions, filter_ids, path)
-            if filter_function is None:
-                # no_update only if None, not if empty string (meaning filter has been filled, then cleared)
-                return dash.no_update
-
-            filter_function = filter_function.strip()
-            try:
-                filter_function = eval(filter_function)
-            except Exception:
-                pass
-
-            other_data = self.concatted_data.filter(
-                pl.col("__file_path").str.contains(path) == False
-            )
-            # constructing dataset to be filtered from the full dataset, in case it has already been filtered on another query
-            this_data = pl.concat(
-                _get_df(path, self.loaded_data, self._paths_concatted, override=True),
-                how="diagonal_relaxed",
-            )
-
-            out_alert = None
-            if filter_function is not None and not (
-                isinstance(filter_function, str) and filter_function == ""
-            ):
-                # try to filter with polars, then pandas.loc, then pandas.query
-                # no need for pretty code and specific exception handling here, as this a convenience feature
-                try:
-                    # polars needs functions called, pandas does not
-                    if callable(filter_function):
-                        filter_function = filter_function(this_data)
-                    this_data = this_data.filter(filter_function)
-                except Exception as e:
-                    try:
-                        this_data = pl.DataFrame(
-                            this_data.to_pandas().loc[filter_function]
-                        )
-                    except Exception as e2:
-                        try:
-                            this_data = pl.DataFrame(
-                                this_data.to_pandas().query(filter_function)
-                            )
-                        except Exception as e3:
-                            e_name = type(e).__name__
-                            e2_name = type(e2).__name__
-                            e3_name = type(e3).__name__
-                            e = str(e)
-                            e2 = str(e2)
-                            e3 = str(e3)
-                            if len(e) > 1000:
-                                e = e[:997] + "... "
-                            if len(e2) > 1000:
-                                e2 = e2[:997] + "... "
-                            out_alert = dbc.Alert(
-                                (
-                                    f"Filter function failed with polars ({e_name}: {e}) "
-                                    f"and pandas loc: ({e2_name}: {e2}) "
-                                    f"and pandas query: ({e3_name}: {e3}) "
-                                ),
-                                color="warning",
-                                dismissable=True,
-                            )
-
-            debug_print("filter")
-            debug_print(this_data)
-
-            self.concatted_data = pl.concat(
-                [this_data, other_data], how="diagonal_relaxed"
-            )
-
-            return out_alert
 
         @callback(
             Output("numeric-options", "style"),
@@ -1826,60 +1850,6 @@ class GeoExplorer:
                 return {"margin-bottom": "7px"}
             else:
                 return {"display": "none"}
-
-        @callback(
-            Output("data-was-concatted", "children"),
-            Output("data-was-changed", "children"),
-            Input("new-data-read", "children"),
-            State("debounced_bounds", "value"),
-            prevent_initial_call=True,
-        )
-        def concat_data(new_data_read, bounds):
-            debug_print("concat_data", self._paths_concatted)
-            t = perf_counter()
-            if not new_data_read:
-                return dash.no_update, 1
-
-            dfs = [
-                _get_df(
-                    path,
-                    loaded_data=self.loaded_data,
-                    paths_concatted=self._paths_concatted,
-                )
-                for path in self.selected_files
-            ]
-
-            dfs = [
-                df
-                for sublist in dfs
-                for df in sublist
-                if df is not None and len(df) > 0
-            ]
-            if dfs:
-                if self.concatted_data is not None:
-                    dfs.append(self.concatted_data)
-
-                debug_print(dfs)
-                self.concatted_data = pl.concat(dfs, how="diagonal_relaxed")
-                self._paths_concatted = set(self.concatted_data["__file_path"].unique())
-                self.concatted_data = self.concatted_data.unique()
-
-            if DEBUG and self.concatted_data is not None:
-                assert len(self.concatted_data) == len(
-                    self.concatted_data["_unique_id"].unique()
-                ), self.concatted_data.filter(
-                    pl.col("_unique_id").is_duplicated()
-                ).select(
-                    "_unique_id", "__file_path"
-                )
-
-            debug_print(
-                "concat_data finished after",
-                perf_counter() - t,
-                len(self.concatted_data if self.concatted_data is not None else []),
-            )
-
-            return 1, 1
 
         @callback(
             Output("force-categorical", "n_clicks"),
@@ -1894,12 +1864,11 @@ class GeoExplorer:
             Output("bins", "children"),
             Output("is-numeric", "children"),
             Output("force-categorical", "children"),
-            Output("currently-in-bounds2", "children"),
+            Output("colors-are-updated", "data"),
             Input("cmap-placeholder", "value"),
             Input("k", "value"),
             Input("force-categorical", "n_clicks"),
             Input("data-was-concatted", "children"),
-            Input("alert2", "children"),
             Input("is_splitted", "data"),
             State("column-dropdown", "value"),
             State("debounced_bounds", "value"),
@@ -1912,7 +1881,6 @@ class GeoExplorer:
             k: int,
             force_categorical_clicks: int,
             data_was_concatted,
-            alert2,
             is_splitted,
             column,
             bounds,
@@ -1925,7 +1893,8 @@ class GeoExplorer:
 
             if column and column != self.column:
                 self._color_dict2 = {}
-                # colorpicker_ids, colorpicker_values_list = [], []
+                self.column = column
+                colorpicker_ids, colorpicker_values_list = [], []
 
             if not self.selected_files:
                 self.column = None
@@ -2012,7 +1981,7 @@ class GeoExplorer:
                 bounds,
             )[column]
             values_no_nans = values.drop_nans().drop_nulls()
-            values_no_nans_unique = values_no_nans.unique()
+            values_no_nans_unique = set(values_no_nans.unique())
 
             if not values_no_nans.dtype.is_numeric():
                 force_categorical_button = None
@@ -2050,8 +2019,7 @@ class GeoExplorer:
 
                 if column_values is not None and triggered in [
                     "map",
-                    "currently-in-bounds",
-                    "currently-in-bounds2",
+                    "colors-are-updated",
                 ]:
                     color_dict = dict(
                         zip(column_values, colorpicker_values_list, strict=True)
@@ -2079,7 +2047,7 @@ class GeoExplorer:
                     }
             else:
                 # make sure the existing color scheme is not altered
-                if column_values is not None and triggered == "data-was-concatted":
+                if column_values is not None:  # and triggered == "data-was-concatted":
                     #     not in [
                     #     "column-dropdown",
                     #     "force-categorical",
@@ -2119,8 +2087,6 @@ class GeoExplorer:
                 )
                 bins = None
 
-            debug_print("\n\ncolor_dict")
-            debug_print(color_dict)
             if color_dict.get(self.nan_label, self.nan_color) != self.nan_color:
                 self.nan_color = color_dict[self.nan_label]
 
@@ -2131,6 +2097,16 @@ class GeoExplorer:
                 color_dict |= self.color_dict
 
             self._color_dict2 = color_dict
+            debug_print("\n\ncolor_dict nederst")
+            debug_print(color_dict)
+            if not is_numeric:
+                color_dict = {
+                    key: color
+                    for key, color in color_dict.items()
+                    if key in values_no_nans_unique or key == self.nan_label
+                }
+            debug_print(color_dict)
+
             return (
                 get_colorpicker_container(color_dict),
                 bins,
@@ -2163,13 +2139,13 @@ class GeoExplorer:
             Output("lc", "children"),
             Output("alert", "children"),
             Output("max_rows", "children"),
-            Input("currently-in-bounds2", "children"),
+            Input("colors-are-updated", "data"),
             Input({"type": "colorpicker", "column_value": dash.ALL}, "value"),
             Input("is-numeric", "children"),
-            Input("file-deleted", "children"),
+            # Input("file-deleted", "children"),
             Input("wms-items", "children"),
             Input("wms-checklist", "value"),
-            Input("new-file-added2", "children"),
+            Input("wms-added", "children"),
             Input("max_rows_was_changed", "children"),
             Input("data-was-changed", "children"),
             Input("order-was-changed", "data"),
@@ -2183,10 +2159,10 @@ class GeoExplorer:
             State("max_rows", "children"),
         )
         def add_data(
-            currently_in_bounds2,
+            currently_in_bounds,
             colorpicker_values_list,
             is_numeric,
-            file_deleted,
+            # file_deleted,
             wms,
             wms_checked,
             new_file_added2,
@@ -2202,7 +2178,11 @@ class GeoExplorer:
             colorpicker_ids,
             max_rows_component,
         ):
-            debug_print("\n\nadd_data", len(self.loaded_data))
+            debug_print(
+                "\n\nadd_data",
+                dash.callback_context.triggered_id,
+                len(self.loaded_data),
+            )
             debug_print(bounds)
             debug_print(colorpicker_values_list)
             t = perf_counter()
@@ -2500,23 +2480,6 @@ class GeoExplorer:
             return self._update_table(data, column_dropdown, style_table)
 
         @callback(
-            Output("map", "bounds"),
-            Output("map", "zoom"),
-            Output("map", "center"),
-            State("map-bounds", "data"),
-            Input("map-zoom", "data"),
-            State("map-center", "data"),
-            prevent_initial_call=True,
-        )
-        def intermediate_update_bounds(bounds, zoom, center):
-            """Update map bounds after short sleep because otherwise it's buggy."""
-            time.sleep(0.1)
-            if not zoom and not bounds and not center:
-                return dash.no_update, dash.no_update, dash.no_update
-            debug_print("intermediate_update_bounds", zoom, bounds, center)
-            return bounds, zoom, center
-
-        @callback(
             Output("map-bounds", "data"),
             Output("map-zoom", "data"),
             Output("map-center", "data"),
@@ -2558,7 +2521,7 @@ class GeoExplorer:
             return bounds, int(zoom_level), center
 
         @callback(
-            Output("new-file-added2", "children"),
+            Output("wms-added", "children"),
             Input({"type": "from-year", "index": dash.ALL}, "value"),
             Input({"type": "to-year", "index": dash.ALL}, "value"),
             Input({"type": "wms-not-contains", "index": dash.ALL}, "value"),
@@ -2971,3 +2934,54 @@ def get_split_index(df: pl.DataFrame) -> pl.DataFrame:
             + pl.col("__file_path").cum_count().over("__file_path").cast(pl.Utf8)
         ).alias("split_index")
     )
+
+
+def _filter_data(df: pl.DataFrame, filter_function: str | None) -> pl.DataFrame:
+    filter_function = filter_function.strip()
+    try:
+        filter_function = eval(filter_function)
+    except Exception:
+        pass
+
+    if filter_function is None or (
+        isinstance(filter_function, str) and filter_function == ""
+    ):
+        return df, None
+
+    alert = None
+
+    # try to filter with polars, then pandas.loc, then pandas.query
+    # no need for pretty code and specific exception handling here, as this a convenience feature
+    try:
+        # polars needs functions called, pandas does not
+        if callable(filter_function):
+            filter_function = filter_function(df)
+        df = df.filter(filter_function)
+    except Exception as e:
+        try:
+            df = pl.DataFrame(df.to_pandas().loc[filter_function])
+        except Exception as e2:
+            try:
+                df = pl.DataFrame(df.to_pandas().query(filter_function))
+            except Exception as e3:
+                e_name = type(e).__name__
+                e2_name = type(e2).__name__
+                e3_name = type(e3).__name__
+                e = str(e)
+                e2 = str(e2)
+                e3 = str(e3)
+                if len(e) > 1000:
+                    e = e[:997] + "... "
+                if len(e2) > 1000:
+                    e2 = e2[:997] + "... "
+                alert = dbc.Alert(
+                    (
+                        f"Filter function failed with polars ({e_name}: {e}) "
+                        f"and pandas loc: ({e2_name}: {e2}) "
+                        f"and pandas query: ({e3_name}: {e3}) "
+                    ),
+                    color="warning",
+                    dismissable=True,
+                )
+
+    return df, alert
