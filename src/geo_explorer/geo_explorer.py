@@ -234,6 +234,7 @@ def _add_data_one_path(
     alpha,
 ):
     debug_print("add_data_one_path", path)
+    print(column, is_numeric)
     ns = Namespace("onEachFeatureToggleHighlight", "default")
     data = []
     if concatted_data is None:
@@ -291,16 +292,6 @@ def _add_data_one_path(
             except KeyError as e:
                 raise KeyError(e, color_dict, conditions, choices, bins) from e
         df = pd.concat([notnas, df[df[column].isna()]])
-    # if not any(path in x for x in currently_in_bounds):
-    #     data.append(
-    #         dl.Overlay(
-    #             dl.GeoJSON(id={"type": "geojson", "filename": path}),
-    #             name=_get_name(path),
-    #             checked=True,
-    #             id={"type": "geojson-overlay", "filename": path},
-    #         )
-    #     )
-    #     return data, out_alert, False
     if column and column not in df:
         debug_print("_add_data_one_path111", column, len(df))
         data.append(
@@ -1190,10 +1181,8 @@ class GeoExplorer:
                     return dash.no_update
                 self.splitted = True
                 for key, df in self.loaded_data.items():
-                    self.loaded_data[key] = self.loaded_data[key].with_columns(
-                        split_index=[f"{_get_name(key)} {i}" for i in range(len(df))]
-                    )
-                self.concatted_data = get_split_index(self.concatted_data)
+                    self.loaded_data[key] = get_split_index(self.loaded_data[key])
+                # self.concatted_data = get_split_index(self.concatted_data)
                 return None
             if not any(load_parquet) or not triggered:
                 return dash.no_update
@@ -1377,7 +1366,7 @@ class GeoExplorer:
             bounds = self._nested_bounds_to_bounds(bounds)
 
             dfs = []
-            alerts = []
+            alerts = {}
             for path in self.selected_files:
                 for key in self.loaded_data:
                     if path not in key:
@@ -1947,7 +1936,11 @@ class GeoExplorer:
                     }
             else:
                 # make sure the existing color scheme is not altered
-                if column_values is not None:  # and triggered == "data-was-concatted":
+                if column_values is not None and triggered not in [
+                    "is_splitted",
+                    "force-categorical",
+                    "column-dropdown",
+                ]:
                     #     not in [
                     #     "column-dropdown",
                     #     "force-categorical",
@@ -1978,6 +1971,8 @@ class GeoExplorer:
                 colors = colors + [
                     _random_color() for _ in range(len(new_values) - len(colors))
                 ]
+                print(color_dict)
+                print(new_values)
                 color_dict = dict(
                     sorted(
                         (
