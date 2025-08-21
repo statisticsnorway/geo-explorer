@@ -122,7 +122,7 @@ def _change_order(explorer, n_clicks_list, ids, buttons, what: str):
     return buttons, True
 
 
-def get_colorpicker_container(color_dict: dict[str, str]) -> html.Div:
+def _get_colorpicker_container(color_dict: dict[str, str]) -> html.Div:
     def to_python_type(x):
         if isinstance(x, Number):
             return float(x)
@@ -235,20 +235,27 @@ def _add_data_one_path(
     nan_color,
     alpha,
 ):
-    debug_print("add_data_one_path", path)
     ns = Namespace("onEachFeatureToggleHighlight", "default")
     data = []
     if concatted_data is None:
-        return [None], None, False
+        return ([None], None, False)
     try:
         df = concatted_data.filter(pl.col("__file_path").str.contains(path))
     except Exception as e:
         raise type(e)(f"{e}: {path} - {concatted_data['__file_path']}")
 
-    debug_print(len(df))
-
     if not len(df):
-        return [None], None, False
+        return (
+            [
+                dl.Overlay(
+                    dl.GeoJSON(id={"type": "geojson", "filename": path}),
+                    name=_get_name(path),
+                    id={"type": "geojson-overlay", "filename": path},
+                )
+            ],
+            None,
+            False,
+        )
 
     df = filter_by_bounds(df, bounds)
 
@@ -259,8 +266,6 @@ def _add_data_one_path(
     df = df.to_pandas()
     df["geometry"] = shapely.from_wkb(df["geometry"])
     df = GeoDataFrame(df, crs=4326)
-
-    debug_print(len(df))
 
     out_alert = None
 
@@ -666,7 +671,7 @@ class GeoExplorer:
             self.logger.addHandler(logging.StreamHandler(stream=sys.stdout))
 
         def get_layout():
-            debug_print("\n\n\n\n\nget_layout", self.bounds, self.column)
+            debug_print("\n\n\n\n\nget_layout", self.bounds, self.zoom, self.column)
             return dbc.Container(
                 [
                     dcc.Location(id="url"),
@@ -899,7 +904,9 @@ class GeoExplorer:
                                             tooltip_text="Get back categories that have been X-ed out",
                                         )
                                     ),
-                                    dbc.Row(id="colorpicker-container"),
+                                    dbc.Row(
+                                        id="colorpicker-container",
+                                    ),
                                 ],
                                 style={
                                     "height": "90vh",
@@ -1140,7 +1147,6 @@ class GeoExplorer:
             prevent_initial_call=True,
         )
         def update_bounds(bounds, zoom, bounds2):
-            debug_print("update_bounds", bounds, bounds2)
             if bounds is None:
                 return dash.no_update
             self.bounds = bounds
@@ -1163,7 +1169,6 @@ class GeoExplorer:
             time.sleep(0.1)
             if not zoom and not bounds and not center:
                 return dash.no_update, dash.no_update, dash.no_update
-            debug_print("intermediate_update_bounds", zoom, bounds, center)
             return bounds, zoom, center
 
         @callback(
@@ -1355,7 +1360,6 @@ class GeoExplorer:
             if triggered is not None:
                 self.splitted = not self.splitted
             if self.splitted:
-                print("\n\n\n\n\n\n\n\nset_column_to_split_index")
                 return self.splitted, "split_index"
             return self.splitted, self.column
 
@@ -1419,6 +1423,8 @@ class GeoExplorer:
                     ):
                         continue
                     df = df.collect()
+                    if not len(df):
+                        continue
                     # filtering by function after collect because LazyFrame doesnt implement to_pandas.
                     try:
                         filter_function = get_index(filter_functions, filter_ids, path)
@@ -1427,6 +1433,8 @@ class GeoExplorer:
                     if filter_function is not None:
                         df, alert = _filter_data(df, filter_function)
                         alerts.add(alert)
+                    if not len(df):
+                        continue
                     dfs.append(df)
 
             if dfs:
@@ -1434,7 +1442,7 @@ class GeoExplorer:
             debug_print(
                 "concat_data finished after",
                 perf_counter() - t,
-                len(self.concatted_data if self.concatted_data is not None else []),
+                len(self.concatted_data) if self.concatted_data is not None else None,
             )
             if not alerts:
                 alerts = None
@@ -1649,10 +1657,8 @@ class GeoExplorer:
             prevent_initial_call=True,
         )
         def delete_category(n_clicks_list, delete_ids, color_container):
-            debug_print("\n\n\n\ndelete_category")
             path_to_delete = get_index_if_clicks(n_clicks_list, delete_ids)
             if path_to_delete is None:
-                debug_print("no path to delete\n\n\n\n\n\n\n")
                 return dash.no_update, dash.no_update, dash.no_update
             debug_print(f"path to delete: {path_to_delete}")
             if not self.column:
@@ -1766,7 +1772,6 @@ class GeoExplorer:
             prevent_initial_call=True,
         )
         def update_column_dropdown_options(_):
-            print("update_column_dropdown_options")
             if self.concatted_data is None or not len(self.concatted_data):
                 return dash.no_update
             return self._get_column_dropdown_options()
@@ -1799,7 +1804,7 @@ class GeoExplorer:
             Input("k", "value"),
             Input("force-categorical", "n_clicks"),
             Input("data-was-concatted", "children"),
-            Input("is_splitted", "data"),
+            State("is_splitted", "data"),
             State("column-dropdown", "value"),
             State("debounced_bounds", "value"),
             State({"type": "colorpicker", "column_value": dash.ALL}, "value"),
@@ -1838,11 +1843,12 @@ class GeoExplorer:
             if triggered is None and self.selected_files:
                 self.color_dict = self._color_dict2
 
-            # if not is_splitted and self.splitted:
-            #     colorpicker_ids, colorpicker_values_list = [], []
-            #     self.splitted = is_splitted
+            if 0 and triggered == "force-categorical" and not force_categorical_clicks:
+                column_values = list(self._color_dict2)
+                colorpicker_values_list = list(self._color_dict2.values())
+            else:
+                column_values = [x["column_value"] for x in colorpicker_ids]
 
-            column_values = [x["column_value"] for x in colorpicker_ids]
             default_colors = list(sg.maps.map._CATEGORICAL_CMAP.values())
 
             debug_print(self.column, column)
@@ -1898,7 +1904,7 @@ class GeoExplorer:
                 self._color_dict2 = color_dict
 
                 return (
-                    get_colorpicker_container(color_dict),
+                    _get_colorpicker_container(color_dict),
                     None,
                     False,
                     None,
@@ -1978,11 +1984,17 @@ class GeoExplorer:
                     }
             else:
                 # make sure the existing color scheme is not altered
-                if column_values is not None and triggered not in [
-                    "is_splitted",
-                    "force-categorical",
-                    "column-dropdown",
-                ]:
+                if (
+                    column_values is not None
+                    and triggered
+                    not in [
+                        "is_splitted",
+                        "column-dropdown",
+                    ]
+                    and not (
+                        triggered == "force-categorical" and force_categorical_clicks
+                    )
+                ):
                     color_dict = dict(
                         zip(column_values, colorpicker_values_list, strict=True)
                     )
@@ -2038,7 +2050,7 @@ class GeoExplorer:
             debug_print(color_dict)
 
             return (
-                get_colorpicker_container(color_dict),
+                _get_colorpicker_container(color_dict),
                 bins,
                 is_numeric,
                 force_categorical_button,
@@ -2114,15 +2126,12 @@ class GeoExplorer:
                 len(self.loaded_data),
                 f"{column=}" f"{self.column=}",
             )
-            debug_print(bounds)
-            debug_print(colorpicker_values_list)
             t = perf_counter()
 
             bounds = self._nested_bounds_to_bounds(bounds)
 
             column_values = [x["column_value"] for x in colorpicker_ids]
             color_dict = dict(zip(column_values, colorpicker_values_list, strict=True))
-            debug_print(color_dict)
 
             wms_layers = []
             tiles = []
@@ -2162,14 +2171,12 @@ class GeoExplorer:
                 bins=bins,
                 alpha=alpha,
             )
-            debug_print("add_data111", perf_counter() - t)
 
             results = [
                 add_data_func(path)
                 for path, checked in self.selected_files.items()
                 if checked
             ]
-            debug_print("add_data2222", perf_counter() - t, len(results))
 
             data = list(itertools.chain.from_iterable([x[0] for x in results if x[0]]))
             out_alert = [x[1] for x in results if x[1]]
@@ -2182,11 +2189,6 @@ class GeoExplorer:
                 len(self.loaded_data),
                 "concatted_data:",
                 len(self.concatted_data if self.concatted_data is not None else []),
-                len(
-                    {x for x in self.concatted_data["__file_path"]}
-                    if self.concatted_data is not None
-                    else []
-                ),
             )
             if rows_are_not_hidden:
                 max_rows_component = None
@@ -2247,6 +2249,7 @@ class GeoExplorer:
                 clicked_ids = list(self.selected_features)
                 clicked_features = list(self.selected_features.values())
                 return clicked_features, clicked_ids, None
+
             if triggered == "clear-table-clicked":
                 self.selected_features = {}
                 return [], [], None
@@ -2271,6 +2274,7 @@ class GeoExplorer:
                     break
 
             feature = features[index]
+            assert feature, (feature, index, filename_id)
             unique_id = next(
                 iter(
                     value
@@ -2363,13 +2367,11 @@ class GeoExplorer:
                 return dash.no_update
 
             clicked_path = get_index_if_clicks(table_btn_n_clicks, table_btn_ids)
-            debug_print(clicked_path)
             if clicked_path is None:
                 return dash.no_update
             data = self.concatted_data.filter(
                 pl.col("__file_path").str.contains(clicked_path)
             )
-            debug_print(data)
             columns = None
             for path in self.loaded_data:
                 if clicked_path in path:
@@ -2437,16 +2439,13 @@ class GeoExplorer:
                 return dash.no_update, dash.no_update, dash.no_update
             minx, miny, maxx, maxy = matches.row(0)
             center = ((miny + maxy) / 2, (minx + maxx) / 2)
-            debug_print(center)
             bounds = [[miny, minx], [maxy, maxx]]
-            debug_print(bounds)
 
             width = int(viewport["width"] * 0.7)
             height = int(viewport["height"] * 0.7)
             zoom_level = get_zoom_from_bounds(minx, miny, maxx, maxy, width, height)
             zoom_level = min(zoom_level, self.max_zoom)
             zoom_level = max(zoom_level, self.min_zoom)
-            debug_print(zoom_level)
             return bounds, int(zoom_level), center
 
         @callback(
@@ -2617,7 +2616,6 @@ class GeoExplorer:
         return [{"label": col, "value": col} for col in sorted(columns)]
 
     def _update_table(self, data, column_dropdown, style_table):
-        debug_print("update_table")
         if not data:
             return None, None, style_table | {"height": "1vh"}, None
         if column_dropdown is None:
@@ -2640,10 +2638,8 @@ class GeoExplorer:
         )
 
     def _delete_file(self, n_clicks_list, delete_ids):
-        debug_print("\n\n\n\ndelete_file")
         path_to_delete = get_index_if_clicks(n_clicks_list, delete_ids)
         if path_to_delete is None:
-            debug_print("no path to delete\n\n\n\n\n\n\n")
             return dash.no_update, dash.no_update
         debug_print(f"path to delete: {path_to_delete}")
         for path in dict(self.selected_files):
@@ -2663,7 +2659,7 @@ class GeoExplorer:
         self,
         bounds: list[list[float]],
     ) -> tuple[float, float, float, float]:
-        if bounds is None:
+        if bounds is None and self.bounds is None:
             return (
                 sg.to_gdf(reversed(self.center), 4326)
                 .to_crs(3035)
@@ -2671,6 +2667,8 @@ class GeoExplorer:
                 .to_crs(4326)
                 .total_bounds
             )
+        elif self.bounds is not None:
+            bounds = self.bounds
         if isinstance(bounds, str):
             bounds = json.loads(bounds)
         mins, maxs = bounds
@@ -2741,7 +2739,6 @@ def get_zoom_from_bounds(
     Returns:
         Approximate zoom level (can be float)
     """
-    debug_print(map_width_px, map_height_px)
 
     # Earth's circumference in meters (WGS 84)
     C = 40075016.686
@@ -2765,17 +2762,14 @@ def get_zoom_from_bounds(
 
     # Invert the meters/pixel formula:
     zoom = math.log2(C * math.cos(lat_rad) / (meters_per_pixel * 256))
+    debug_print("get_zoom_from_bounds", map_width_px, map_height_px, zoom)
     return round(zoom, 2)
 
 
 def get_index_if_clicks(n_clicks_list, ids) -> str | None:
-    debug_print("get_index_if_clicks")
-    debug_print(n_clicks_list)
-    debug_print(ids)
     if not any(n_clicks_list):
         return None
     triggered = dash.callback_context.triggered_id
-    debug_print("get_index_if_clicks", triggered)
     if not isinstance(triggered, dict):
         return None
     triggered_index = triggered["index"]
