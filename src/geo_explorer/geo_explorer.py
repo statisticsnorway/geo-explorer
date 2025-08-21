@@ -65,7 +65,7 @@ TABLE_TITLE_SUFFIX: str = (
 DEFAULT_ZOOM: int = 10
 DEFAULT_CENTER: tuple[float, float] = (59.91740845, 10.71394444)
 
-DEBUG: bool = False
+DEBUG: bool = 1
 
 if DEBUG:
 
@@ -294,7 +294,6 @@ def _add_data_one_path(
                 raise KeyError(e, color_dict, conditions, choices, bins) from e
         df = pd.concat([notnas, df[df[column].isna()]])
     if column and column not in df:
-        debug_print("_add_data_one_path111", column, len(df))
         data.append(
             dl.Overlay(
                 dl.GeoJSON(
@@ -318,9 +317,6 @@ def _add_data_one_path(
             )
         )
     elif column:
-        debug_print("_add_data_one_path222", column, (df))
-        debug_print(df["_color"].unique())
-        debug_print(df["_color"])
         data.append(
             dl.Overlay(
                 dl.LayerGroup(
@@ -379,7 +375,6 @@ def _add_data_one_path(
     else:
         # no column
         color = color_dict[_get_name(path)]
-        debug_print("_add_data_one_path333", color, "-", color_dict)
         data.append(
             dl.Overlay(
                 dl.GeoJSON(
@@ -495,8 +490,6 @@ def _read_files(explorer, paths: list[str], **kwargs) -> None:
         if isinstance(df, GeoDataFrame):
             df = df.assign(geometry=df.geometry.to_wkb())
         df = pl.from_pandas(df)
-        if explorer.splitted:
-            df = get_split_index(df)
         explorer.loaded_data[path] = df
 
 
@@ -1176,19 +1169,11 @@ class GeoExplorer:
             Output("new-file-added", "children"),
             Input({"type": "load-parquet", "index": dash.ALL}, "n_clicks"),
             Input({"type": "load-parquet", "index": dash.ALL}, "id"),
-            Input("is_splitted", "data"),
             State({"type": "file-path", "index": dash.ALL}, "id"),
         )
-        def append_path(load_parquet, load_parquet_ids, is_splitted, ids):
+        def append_path(load_parquet, load_parquet_ids, ids):
             triggered = dash.callback_context.triggered_id
             debug_print("append_path", triggered)
-            if triggered == "is_splitted":
-                if not is_splitted:
-                    return dash.no_update
-                self.splitted = True
-                for key, df in self.loaded_data.items():
-                    self.loaded_data[key] = get_split_index(df)
-                return None
             if not any(load_parquet) or not triggered:
                 return dash.no_update
             try:
@@ -1351,6 +1336,7 @@ class GeoExplorer:
             Output("alert2", "children"),
             Input("new-data-read", "children"),
             Input("file-deleted", "children"),
+            Input("is_splitted", "data"),
             Input({"type": "filter", "index": dash.ALL}, "value"),
             Input({"type": "filter", "index": dash.ALL}, "id"),
             State("debounced_bounds", "value"),
@@ -1359,11 +1345,14 @@ class GeoExplorer:
         def concat_data(
             new_data_read,
             file_deleted,
+            is_splitted,
             filter_functions: list[str],
             filter_ids: list[str],
             bounds,
         ):
-            debug_print("concat_data", new_data_read)
+            triggered = dash.callback_context.triggered_id
+            debug_print("concat_data", triggered, new_data_read, self.splitted)
+
             t = perf_counter()
             if not new_data_read:
                 return dash.no_update, 1, dash.no_update
@@ -1381,6 +1370,8 @@ class GeoExplorer:
                         .lazy()
                         .with_columns(__file_path=pl.lit(key))
                     )
+                    if self.splitted:
+                        df = get_split_index(df)
                     df = filter_by_bounds(df, bounds)
                     if self._deleted_categories and self.column in df:
                         expression = (
@@ -1659,13 +1650,23 @@ class GeoExplorer:
             prevent_initial_call=True,
         )
         def reset_columns(_):
+            print("reset_columns")
             if not self.selected_files:
                 return ""
             return dash.no_update
 
         @callback(
-            Output("splitter", "n_clicks"),
             Output("splitter", "style"),
+            Input("is_splitted", "data"),
+        )
+        def update_splitter_style(_):
+            if self.splitted:
+                return _clicked_button_style()
+            else:
+                return _unclicked_button_style()
+
+        @callback(
+            Output("splitter", "n_clicks"),
             Output("is_splitted", "data"),
             Output("column-dropdown", "value", allow_duplicate=True),
             Input("splitter", "n_clicks"),
@@ -1675,23 +1676,35 @@ class GeoExplorer:
         )
         def is_splitted(n_clicks: int, column):
             triggered = dash.callback_context.triggered_id
-            if self.concatted_data is None or triggered is None:
-                return dash.no_update, dash.no_update, dash.no_update, dash.no_update
+            print("\nis_splitted", triggered, column)
+            if (
+                self.concatted_data
+                is None
+                # or triggered is None
+                # or triggered == "column-dropdown"
+                # and column == "split_index"
+            ):
+                return (
+                    dash.no_update,
+                    dash.no_update,
+                    dash.no_update,
+                )
             is_splitted: bool = n_clicks % 2 == 1 and not (
                 triggered == "column-dropdown" and not column
             )
-            if is_splitted:
-                style = _clicked_button_style()
-            else:
-                style = _unclicked_button_style()
+            self.splitted = is_splitted
             if is_splitted:
                 column = "split_index"
             elif column == "split_index":
                 column = None
             else:
                 column = dash.no_update
+            self.splitted = is_splitted
             n_clicks = 1 if is_splitted else 0
-            return n_clicks, style, is_splitted, column
+            print(
+                "is_splitted", triggered, is_splitted, self.splitted, n_clicks, column
+            )
+            return n_clicks, is_splitted, column
 
         @callback(
             Output("hard-click", "style"),
@@ -1732,6 +1745,7 @@ class GeoExplorer:
             prevent_initial_call=True,
         )
         def update_column_dropdown_options(_):
+            print("update_column_dropdown_options")
             if self.concatted_data is None or not len(self.concatted_data):
                 return dash.no_update
             return self._get_column_dropdown_options()
@@ -1803,9 +1817,9 @@ class GeoExplorer:
             if triggered is None and self.selected_files:
                 self.color_dict = self._color_dict2
 
-            if not is_splitted and self.splitted:
-                colorpicker_ids, colorpicker_values_list = [], []
-                self.splitted = is_splitted
+            # if not is_splitted and self.splitted:
+            #     colorpicker_ids, colorpicker_values_list = [], []
+            #     self.splitted = is_splitted
 
             column_values = [x["column_value"] for x in colorpicker_ids]
             default_colors = list(sg.maps.map._CATEGORICAL_CMAP.values())
@@ -1948,11 +1962,6 @@ class GeoExplorer:
                     "force-categorical",
                     "column-dropdown",
                 ]:
-                    #     not in [
-                    #     "column-dropdown",
-                    #     "force-categorical",
-                    #     "is_splitted",
-                    # ]:
                     color_dict = dict(
                         zip(column_values, colorpicker_values_list, strict=True)
                     )
@@ -2157,9 +2166,6 @@ class GeoExplorer:
                     else []
                 ),
             )
-            if self.splitted:
-                debug_print(self.concatted_data["split_index"])
-
             if rows_are_not_hidden:
                 max_rows_component = None
             else:
@@ -2213,7 +2219,9 @@ class GeoExplorer:
         ):
             triggered = dash.callback_context.triggered_id
             debug_print("display_clicked_feature_attributes", triggered)
-            if triggered is None:
+            if triggered is None or (
+                self.selected_features and not features or not any(features)
+            ):
                 clicked_ids = list(self.selected_features)
                 clicked_features = list(self.selected_features.values())
                 return clicked_features, clicked_ids, None
@@ -2656,15 +2664,13 @@ class GeoExplorer:
             for key, value in self.__dict__.items()
             if key
             not in [
-                "paths",
                 "app",
-                "currently_in_bounds",
                 "bounds_series",
                 "loaded_data",
                 "bounds",
                 "tile_names",
                 "concatted_data",
-                "splitted",
+                # "splitted",
                 "logger",
             ]
             and not key.startswith("_")
