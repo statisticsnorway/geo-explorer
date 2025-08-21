@@ -666,7 +666,7 @@ class GeoExplorer:
             self.logger.addHandler(logging.StreamHandler(stream=sys.stdout))
 
         def get_layout():
-            debug_print("\n\n\n\n\nget_layout", self.bounds)
+            debug_print("\n\n\n\n\nget_layout", self.bounds, self.column)
             return dbc.Container(
                 [
                     dcc.Location(id="url"),
@@ -930,6 +930,7 @@ class GeoExplorer:
                     ),
                     *self._file_browser.get_file_browser_components(),
                     dcc.Store(id="is_splitted", data=False),
+                    dcc.Store(id="column-dropdown2", data=None),
                     dcc.Input(
                         id="debounced_bounds",
                         value=None,
@@ -1330,6 +1331,34 @@ class GeoExplorer:
 
             return new_data_read, missing, disabled
 
+        # @callback(
+        #     Output("column-dropdown", "value"),
+        #     Input("column-dropdown2", "data"),
+        #     # prevent_initial_call=True,
+        # )
+        # def set_column_to_split_index2(column):
+        #     return column
+
+        @callback(
+            Output("is_splitted", "data"),
+            Output("column-dropdown", "value"),
+            Input("splitter", "n_clicks"),
+            Input("file-deleted", "children"),
+            # prevent_initial_call=True,
+        )
+        def set_column_to_split_index(splitter_clicks, file_deleted):
+            if not self.selected_files:
+                return False, None
+            triggered = dash.callback_context.triggered_id
+            if triggered == "file-deleted":
+                return dash.no_update
+            if triggered is not None:
+                self.splitted = not self.splitted
+            if self.splitted:
+                print("\n\n\n\n\n\n\n\nset_column_to_split_index")
+                return self.splitted, "split_index"
+            return self.splitted, self.column
+
         @callback(
             Output("data-was-concatted", "children"),
             Output("data-was-changed", "children"),
@@ -1353,6 +1382,9 @@ class GeoExplorer:
             triggered = dash.callback_context.triggered_id
             debug_print("concat_data", triggered, new_data_read, self.splitted)
 
+            if triggered == "splitter":
+                self.splitted = not self.splitted
+
             t = perf_counter()
             if not new_data_read:
                 return dash.no_update, 1, dash.no_update
@@ -1360,7 +1392,7 @@ class GeoExplorer:
             bounds = self._nested_bounds_to_bounds(bounds)
 
             dfs = []
-            alerts = {}
+            alerts = set()
             for path in self.selected_files:
                 for key in self.loaded_data:
                     if path not in key:
@@ -1394,7 +1426,7 @@ class GeoExplorer:
                         filter_function = None
                     if filter_function is not None:
                         df, alert = _filter_data(df, filter_function)
-                        alerts.append(alert)
+                        alerts.add(alert)
                     dfs.append(df)
 
             if dfs:
@@ -1406,6 +1438,8 @@ class GeoExplorer:
             )
             if not alerts:
                 alerts = None
+            else:
+                alerts = list(alerts)
             return 1, 1, alerts
 
         @callback(
@@ -1620,13 +1654,7 @@ class GeoExplorer:
             if path_to_delete is None:
                 debug_print("no path to delete\n\n\n\n\n\n\n")
                 return dash.no_update, dash.no_update, dash.no_update
-            i: int = next(
-                iter(
-                    i for i, x in enumerate(delete_ids) if x["index"] == path_to_delete
-                )
-            )
             debug_print(f"path to delete: {path_to_delete}")
-
             if not self.column:
                 return (*self._delete_file(n_clicks_list, delete_ids), dash.no_update)
             else:
@@ -1644,67 +1672,60 @@ class GeoExplorer:
             self._deleted_categories = set()
             return None
 
-        @callback(
-            Output("column-dropdown", "value", allow_duplicate=True),
-            Input("file-deleted", "children"),
-            prevent_initial_call=True,
-        )
-        def reset_columns(_):
-            print("reset_columns")
-            if not self.selected_files:
-                return ""
-            return dash.no_update
+        # @callback(
+        #     Output("column-dropdown", "value", allow_duplicate=True),
+        #     Input("file-deleted", "children"),
+        #     prevent_initial_call=True,
+        # )
+        # def reset_columns(_):
+        #     print("reset_columns")
+        #     if not self.selected_files:
+        #         return ""
+        #     return dash.no_update
 
         @callback(
             Output("splitter", "style"),
             Input("is_splitted", "data"),
+            Input("column-dropdown", "value"),
         )
-        def update_splitter_style(_):
-            if self.splitted:
+        def update_splitter_style(_, column):
+            if column is None:
+                self.column = None
+                self.splitted = None
+            if self.splitted and column == "split_index":
                 return _clicked_button_style()
             else:
                 return _unclicked_button_style()
 
-        @callback(
-            Output("splitter", "n_clicks"),
-            Output("is_splitted", "data"),
-            Output("column-dropdown", "value", allow_duplicate=True),
-            Input("splitter", "n_clicks"),
-            Input("column-dropdown", "value"),
-            # Input("file-control-panel", "children"),
-            prevent_initial_call=True,
-        )
-        def is_splitted(n_clicks: int, column):
-            triggered = dash.callback_context.triggered_id
-            print("\nis_splitted", triggered, column)
-            if (
-                self.concatted_data
-                is None
-                # or triggered is None
-                # or triggered == "column-dropdown"
-                # and column == "split_index"
-            ):
-                return (
-                    dash.no_update,
-                    dash.no_update,
-                    dash.no_update,
-                )
-            is_splitted: bool = n_clicks % 2 == 1 and not (
-                triggered == "column-dropdown" and not column
-            )
-            self.splitted = is_splitted
-            if is_splitted:
-                column = "split_index"
-            elif column == "split_index":
-                column = None
-            else:
-                column = dash.no_update
-            self.splitted = is_splitted
-            n_clicks = 1 if is_splitted else 0
-            print(
-                "is_splitted", triggered, is_splitted, self.splitted, n_clicks, column
-            )
-            return n_clicks, is_splitted, column
+        # @callback(
+        #     Output("splitter", "n_clicks"),
+        #     Output("is_splitted", "data"),
+        #     Output("column-dropdown", "value", allow_duplicate=True),
+        #     Input("splitter", "n_clicks"),
+        #     Input("column-dropdown", "value"),
+        #     prevent_initial_call=True,
+        # )
+        # def is_splitted(n_clicks: int, column):
+        #     triggered = dash.callback_context.triggered_id
+        #     print("\nis_splitted", triggered, column, n_clicks)
+        #     if self.concatted_data is None:
+        #         return (dash.no_update, dash.no_update, dash.no_update)
+        #     is_splitted: bool = n_clicks % 2 == 1 and not (
+        #         triggered == "column-dropdown" and not column
+        #     )
+        #     self.splitted = is_splitted
+        #     if is_splitted:
+        #         column = "split_index"
+        #     elif column == "split_index":
+        #         column = None
+        #     else:
+        #         column = dash.no_update
+        #     self.splitted = is_splitted
+        #     n_clicks = 1 if is_splitted else 0
+        #     print(
+        #         "is_splitted", triggered, is_splitted, self.splitted, n_clicks, column
+        #     )
+        #     return n_clicks, is_splitted, column
 
         @callback(
             Output("hard-click", "style"),
@@ -1799,7 +1820,7 @@ class GeoExplorer:
         ):
 
             triggered = dash.callback_context.triggered_id
-            debug_print("\nget_column_value_color_dict", column, triggered)
+            debug_print("\nget_column_value_color_dict, column=", column, triggered)
 
             if column and column != self.column:
                 self._color_dict2 = {}
@@ -2091,6 +2112,7 @@ class GeoExplorer:
                 "\n\nadd_data",
                 dash.callback_context.triggered_id,
                 len(self.loaded_data),
+                f"{column=}" f"{self.column=}",
             )
             debug_print(bounds)
             debug_print(colorpicker_values_list)
