@@ -622,7 +622,6 @@ class GeoExplorer:
         self.bounds = None
         self.column = column
         self.color_dict = color_dict or {}
-        self._color_dict2 = {}
         self.wms = wms or {}
         self.file_system = file_system or LocalFileSystem()
         self.nan_color = nan_color
@@ -1337,27 +1336,19 @@ class GeoExplorer:
 
             return new_data_read, missing, disabled
 
-        # @callback(
-        #     Output("column-dropdown", "value"),
-        #     Input("column-dropdown2", "data"),
-        #     # prevent_initial_call=True,
-        # )
-        # def set_column_to_split_index2(column):
-        #     return column
-
         @callback(
             Output("is_splitted", "data"),
             Output("column-dropdown", "value"),
             Input("splitter", "n_clicks"),
             Input("file-deleted", "children"),
-            # prevent_initial_call=True,
         )
         def set_column_to_split_index(splitter_clicks, file_deleted):
             if not self.selected_files:
                 return False, None
             triggered = dash.callback_context.triggered_id
             if triggered == "file-deleted":
-                return dash.no_update
+                # TODO: why is this needed?
+                return dash.no_update, dash.no_update
             if triggered is not None:
                 self.splitted = not self.splitted
             if self.splitted:
@@ -1452,7 +1443,7 @@ class GeoExplorer:
             return 1, 1, alerts
 
         @callback(
-            Output("file-control-panel", "children"),  # , allow_duplicate=True),
+            Output("file-control-panel", "children"),
             Output("order-was-changed", "data"),
             Input("data-was-changed", "children"),
             # Input("map", "bounds"),
@@ -1679,17 +1670,6 @@ class GeoExplorer:
             self._deleted_categories = set()
             return None
 
-        # @callback(
-        #     Output("column-dropdown", "value", allow_duplicate=True),
-        #     Input("file-deleted", "children"),
-        #     prevent_initial_call=True,
-        # )
-        # def reset_columns(_):
-        #     print("reset_columns")
-        #     if not self.selected_files:
-        #         return ""
-        #     return dash.no_update
-
         @callback(
             Output("splitter", "style"),
             Input("is_splitted", "data"),
@@ -1703,36 +1683,6 @@ class GeoExplorer:
                 return _clicked_button_style()
             else:
                 return _unclicked_button_style()
-
-        # @callback(
-        #     Output("splitter", "n_clicks"),
-        #     Output("is_splitted", "data"),
-        #     Output("column-dropdown", "value", allow_duplicate=True),
-        #     Input("splitter", "n_clicks"),
-        #     Input("column-dropdown", "value"),
-        #     prevent_initial_call=True,
-        # )
-        # def is_splitted(n_clicks: int, column):
-        #     triggered = dash.callback_context.triggered_id
-        #     print("\nis_splitted", triggered, column, n_clicks)
-        #     if self.concatted_data is None:
-        #         return (dash.no_update, dash.no_update, dash.no_update)
-        #     is_splitted: bool = n_clicks % 2 == 1 and not (
-        #         triggered == "column-dropdown" and not column
-        #     )
-        #     self.splitted = is_splitted
-        #     if is_splitted:
-        #         column = "split_index"
-        #     elif column == "split_index":
-        #         column = None
-        #     else:
-        #         column = dash.no_update
-        #     self.splitted = is_splitted
-        #     n_clicks = 1 if is_splitted else 0
-        #     print(
-        #         "is_splitted", triggered, is_splitted, self.splitted, n_clicks, column
-        #     )
-        #     return n_clicks, is_splitted, column
 
         @callback(
             Output("hard-click", "style"),
@@ -1808,7 +1758,7 @@ class GeoExplorer:
                 iter(i for i, x in enumerate(ids) if x["column_value"] == column_value)
             )
             color = colors[i]
-            self._color_dict2[column_value] = color
+            self.color_dict[column_value] = color
 
         @callback(
             Output("colorpicker-container", "children"),
@@ -1820,11 +1770,8 @@ class GeoExplorer:
             Input("k", "value"),
             Input("force-categorical", "n_clicks"),
             Input("data-was-concatted", "children"),
-            State("is_splitted", "data"),
             State("column-dropdown", "value"),
             State("debounced_bounds", "value"),
-            State({"type": "colorpicker", "column_value": dash.ALL}, "value"),
-            State({"type": "colorpicker", "column_value": dash.ALL}, "id"),
             State("bins", "children"),
         )
         def get_column_value_color_dict(
@@ -1832,76 +1779,34 @@ class GeoExplorer:
             k: int,
             force_categorical_clicks: int,
             data_was_concatted,
-            is_splitted,
             column,
             bounds,
-            colorpicker_values_list,
-            colorpicker_ids,
             bins,
         ):
             triggered = dash.callback_context.triggered_id
             debug_print("\nget_column_value_color_dict, column=", column, triggered)
 
-            if column and column != self.column:
-                self._color_dict2 = {}
-                self.color_dict = {}
-                self.column = column
-                colorpicker_ids, colorpicker_values_list = [], []
-
             if not self.selected_files:
                 self.column = None
-                column = None
+                self.color_dict = {}
                 return html.Div(), None, False, None, 1
+            elif column and column != self.column:
+                self.color_dict = {}
+                self.column = column
             elif not column and triggered is None:
                 column = self.column
             else:
                 self.column = column
-            if triggered is None and self.selected_files:
-                self.color_dict = self._color_dict2
-
-            if triggered == "force-categorical" and not force_categorical_clicks:
-                column_values = list(self._color_dict2)
-                colorpicker_values_list = list(self._color_dict2.values())
-            else:
-                column_values = [x["column_value"] for x in colorpicker_ids]
 
             default_colors = list(sg.maps.map._CATEGORICAL_CMAP.values())
 
             debug_print(self.column, column)
             debug_print(self.color_dict)
-            debug_print(self._color_dict2)
-            debug_print(column_values)
-            debug_print(colorpicker_values_list)
 
             if not column or (
                 self.concatted_data is not None and column not in self.concatted_data
             ):
-                color_dict = dict(
-                    zip(column_values, colorpicker_values_list, strict=True)
-                )
-
-                if self.color_dict:
-                    color_dict |= self.color_dict
-
-                color_dict = {
-                    key: color
-                    for key, color in color_dict.items()
-                    if any(str(key) in x for x in self.selected_files)
-                }
-
-                default_colors = [
-                    x for x in default_colors if x not in set(color_dict.values())
-                ]
-
-                new_values = [
-                    _get_name(value)
-                    for value in self.selected_files
-                    if _get_name(value) not in color_dict
-                ]
-                if len(color_dict) < len(default_colors):
-                    default_colors = default_colors[
-                        : min(len(self.selected_files), len(default_colors))
-                    ]
+                new_values = [_get_name(value) for value in self.selected_files]
                 new_colors = (
                     default_colors
                     + [
@@ -1911,13 +1816,18 @@ class GeoExplorer:
                 )[: len(new_values)]
 
                 try:
-                    color_dict = color_dict | dict(
-                        zip(new_values, new_colors, strict=True)
-                    )
+                    color_dict = dict(zip(new_values, new_colors, strict=True))
                 except ValueError as e:
                     raise ValueError(f"{e}: {new_values} - {new_colors}") from e
 
-                self._color_dict2 |= color_dict
+                color_dict |= self.color_dict
+                self.color_dict = color_dict
+
+                color_dict = {
+                    key: color
+                    for key, color in color_dict.items()
+                    if any(str(key) == Path(x).stem for x in self.selected_files)
+                }
 
                 return (
                     _get_colorpicker_container(color_dict),
@@ -1936,31 +1846,10 @@ class GeoExplorer:
             values_no_nans = values.drop_nans().drop_nulls()
             values_no_nans_unique = set(values_no_nans.unique())
 
-            if not values_no_nans.dtype.is_numeric():
-                force_categorical_button = None
-            elif (force_categorical_clicks or 0) % 2 == 0:
-                force_categorical_button = get_button_with_tooltip(
-                    "Force categorical",
-                    id="force-categorical-button",
-                    n_clicks=force_categorical_clicks,
-                    tooltip_text="Get all numeric values as a single color group",
-                    style={
-                        "background": "white",
-                        "color": "black",
-                    },
-                )
-            else:
-                force_categorical_button = get_button_with_tooltip(
-                    "Force categorical",
-                    id="force-categorical-button",
-                    tooltip_text="Back to numeric values",
-                    n_clicks=force_categorical_clicks,
-                    style={
-                        "background": "black",
-                        "color": "white",
-                    },
-                )
-            is_numeric = (
+            force_categorical_button = _get_force_categorical_button(
+                values_no_nans, force_categorical_clicks
+            )
+            is_numeric: bool = (
                 force_categorical_clicks or 0
             ) % 2 == 0 and values_no_nans.dtype.is_numeric()
 
@@ -1970,63 +1859,35 @@ class GeoExplorer:
                 else:
                     bins = jenks_breaks(values_no_nans.to_numpy(), n_classes=k)
 
-                if column_values is not None and triggered in [
-                    "map",
-                    "colors-are-updated",
-                ]:
-                    color_dict = dict(
-                        zip(column_values, colorpicker_values_list, strict=True)
-                    )
-                else:
-                    cmap_ = matplotlib.colormaps.get_cmap(cmap)
-                    colors_ = [
-                        matplotlib.colors.to_hex(cmap_(int(i)))
-                        for i in np.linspace(0, 255, num=k)
-                    ]
-                    rounded_bins = [round(x, 1) for x in bins]
-                    color_dict = {
-                        f"{round(min(values_no_nans), 1)} - {rounded_bins[0]}": colors_[
-                            0
-                        ],
-                        **{
-                            f"{start} - {stop}": colors_[i + 1]
-                            for i, (start, stop) in enumerate(
-                                itertools.pairwise(rounded_bins[1:-1])
-                            )
-                        },
-                        f"{rounded_bins[-1]} - {round(max(values_no_nans), 1)}": colors_[
-                            -1
-                        ],
-                    }
+                cmap_ = matplotlib.colormaps.get_cmap(cmap)
+                colors_ = [
+                    matplotlib.colors.to_hex(cmap_(int(i)))
+                    for i in np.linspace(0, 255, num=k)
+                ]
+                rounded_bins = [round(x, 1) for x in bins]
+                color_dict = {
+                    f"{round(min(values_no_nans), 1)} - {rounded_bins[0]}": colors_[0],
+                    **{
+                        f"{start} - {stop}": colors_[i + 1]
+                        for i, (start, stop) in enumerate(
+                            itertools.pairwise(rounded_bins[1:-1])
+                        )
+                    },
+                    f"{rounded_bins[-1]} - {round(max(values_no_nans), 1)}": colors_[
+                        -1
+                    ],
+                }
             else:
-                # make sure the existing color scheme is not altered
-                if (
-                    column_values is not None
-                    and triggered
-                    not in [
-                        "is_splitted",
-                        "column-dropdown",
-                    ]
-                    and not (
-                        triggered == "force-categorical" and force_categorical_clicks
-                    )
-                ):
-                    color_dict = dict(
-                        zip(column_values, colorpicker_values_list, strict=True)
-                    )
-                else:
-                    color_dict = {}
-
                 new_values = [
                     value
                     for value in values_no_nans_unique
-                    if value not in column_values
+                    if value not in self.color_dict
                 ]
                 existing_values = [
-                    value for value in values_no_nans_unique if value in column_values
+                    value for value in values_no_nans_unique if value in self.color_dict
                 ]
                 default_colors = [
-                    x for x in default_colors if x not in set(color_dict.values())
+                    x for x in default_colors if x not in set(self.color_dict.values())
                 ]
                 colors = default_colors[
                     len(existing_values) : min(
@@ -2037,11 +1898,7 @@ class GeoExplorer:
                     _random_color() for _ in range(len(new_values) - len(colors))
                 ]
                 color_dict = dict(
-                    sorted(
-                        (
-                            color_dict | dict(zip(new_values, colors, strict=True))
-                        ).items()
-                    )
+                    sorted((dict(zip(new_values, colors, strict=True))).items())
                 )
                 bins = None
 
@@ -2051,16 +1908,11 @@ class GeoExplorer:
             elif self.nan_label not in color_dict and polars_isna(values).any():
                 color_dict[self.nan_label] = self.nan_color
 
-            print(color_dict)
-            if self.color_dict:
-                color_dict |= self.color_dict
-            color_dict |= self._color_dict2
-            print(color_dict)
-
-            self._color_dict2 |= color_dict
             debug_print("\n\ncolor_dict nederst")
             debug_print(color_dict)
             if not is_numeric:
+                color_dict |= self.color_dict
+                self.color_dict = color_dict
                 color_dict = {
                     key: color
                     for key, color in color_dict.items()
@@ -2103,7 +1955,6 @@ class GeoExplorer:
             Input("colors-are-updated", "data"),
             Input({"type": "colorpicker", "column_value": dash.ALL}, "value"),
             Input("is-numeric", "children"),
-            # Input("file-deleted", "children"),
             Input("wms-items", "children"),
             Input("wms-checklist", "value"),
             Input("wms-added", "children"),
@@ -2123,7 +1974,6 @@ class GeoExplorer:
             currently_in_bounds,
             colorpicker_values_list,
             is_numeric,
-            # file_deleted,
             wms,
             wms_checked,
             new_file_added2,
@@ -2914,3 +2764,32 @@ def _filter_data(df: pl.DataFrame, filter_function: str | None) -> pl.DataFrame:
                 )
 
     return df, alert
+
+
+def _get_force_categorical_button(
+    values_no_nans: pl.Series, force_categorical_clicks: int | None
+):
+    if not values_no_nans.dtype.is_numeric():
+        return None
+    elif (force_categorical_clicks or 0) % 2 == 0:
+        return get_button_with_tooltip(
+            "Force categorical",
+            id="force-categorical-button",
+            n_clicks=force_categorical_clicks,
+            tooltip_text="Get all numeric values as a single color group",
+            style={
+                "background": "white",
+                "color": "black",
+            },
+        )
+    else:
+        return get_button_with_tooltip(
+            "Force categorical",
+            id="force-categorical-button",
+            tooltip_text="Back to numeric values",
+            n_clicks=force_categorical_clicks,
+            style={
+                "background": "black",
+                "color": "white",
+            },
+        )
