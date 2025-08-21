@@ -65,7 +65,7 @@ TABLE_TITLE_SUFFIX: str = (
 DEFAULT_ZOOM: int = 10
 DEFAULT_CENTER: tuple[float, float] = (59.91740845, 10.71394444)
 
-DEBUG: bool = 1
+DEBUG: bool = False
 
 if DEBUG:
 
