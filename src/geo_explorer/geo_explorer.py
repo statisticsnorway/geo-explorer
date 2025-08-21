@@ -948,6 +948,7 @@ class GeoExplorer:
                     html.Div(id="color-container", style={"display": "none"}),
                     html.Div(id="missing", style={"display": "none"}),
                     dcc.Store(id="colors-are-updated"),
+                    dcc.Store(id="dummy3"),
                     html.Div(id="wms-added", style={"display": "none"}),
                     html.Div(id="data-was-concatted", style={"display": "none"}),
                     html.Div(id="data-was-changed", style={"display": "none"}),
@@ -1795,6 +1796,21 @@ class GeoExplorer:
             return 0
 
         @callback(
+            Output("dummy3", "data"),
+            Input({"type": "colorpicker", "column_value": dash.ALL}, "value"),
+            State({"type": "colorpicker", "column_value": dash.ALL}, "id"),
+            prevent_initial_call=True,
+        )
+        def set_colorpicker_value(colors, ids):
+            triggered = dash.callback_context.triggered_id
+            column_value = triggered["column_value"]
+            i = next(
+                iter(i for i, x in enumerate(ids) if x["column_value"] == column_value)
+            )
+            color = colors[i]
+            self._color_dict2[column_value] = color
+
+        @callback(
             Output("colorpicker-container", "children"),
             Output("bins", "children"),
             Output("is-numeric", "children"),
@@ -1823,12 +1839,12 @@ class GeoExplorer:
             colorpicker_ids,
             bins,
         ):
-
             triggered = dash.callback_context.triggered_id
             debug_print("\nget_column_value_color_dict, column=", column, triggered)
 
             if column and column != self.column:
                 self._color_dict2 = {}
+                self.color_dict = {}
                 self.column = column
                 colorpicker_ids, colorpicker_values_list = [], []
 
@@ -1843,7 +1859,7 @@ class GeoExplorer:
             if triggered is None and self.selected_files:
                 self.color_dict = self._color_dict2
 
-            if 0 and triggered == "force-categorical" and not force_categorical_clicks:
+            if triggered == "force-categorical" and not force_categorical_clicks:
                 column_values = list(self._color_dict2)
                 colorpicker_values_list = list(self._color_dict2.values())
             else:
@@ -1901,7 +1917,7 @@ class GeoExplorer:
                 except ValueError as e:
                     raise ValueError(f"{e}: {new_values} - {new_colors}") from e
 
-                self._color_dict2 = color_dict
+                self._color_dict2 |= color_dict
 
                 return (
                     _get_colorpicker_container(color_dict),
@@ -2035,10 +2051,13 @@ class GeoExplorer:
             elif self.nan_label not in color_dict and polars_isna(values).any():
                 color_dict[self.nan_label] = self.nan_color
 
+            print(color_dict)
             if self.color_dict:
                 color_dict |= self.color_dict
+            color_dict |= self._color_dict2
+            print(color_dict)
 
-            self._color_dict2 = color_dict
+            self._color_dict2 |= color_dict
             debug_print("\n\ncolor_dict nederst")
             debug_print(color_dict)
             if not is_numeric:
