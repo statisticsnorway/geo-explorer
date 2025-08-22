@@ -1383,9 +1383,6 @@ class GeoExplorer:
             triggered = dash.callback_context.triggered_id
             debug_print("concat_data", triggered, new_data_read, self.splitted)
 
-            if triggered == "splitter":
-                self.splitted = not self.splitted
-
             t = perf_counter()
             if not new_data_read:
                 return dash.no_update, 1, dash.no_update
@@ -1444,7 +1441,11 @@ class GeoExplorer:
             if not alerts:
                 alerts = None
             else:
-                alerts = list(alerts)
+                alerts = [
+                    dbc.Alert(txt, color="warning", dismissable=True)
+                    for txt in alerts
+                    if txt
+                ]
             return 1, 1, alerts
 
         @callback(
@@ -2757,14 +2758,10 @@ def _filter_data(df: pl.DataFrame, filter_function: str | None) -> pl.DataFrame:
                     e = e[:997] + "... "
                 if len(e2) > 1000:
                     e2 = e2[:997] + "... "
-                alert = dbc.Alert(
-                    (
-                        f"Filter function failed with polars ({e_name}: {e}) "
-                        f"-- and pandas loc: ({e2_name}: {e2}) "
-                        f"-- and pandas query: ({e3_name}: {e3}) "
-                    ),
-                    color="warning",
-                    dismissable=True,
+                alert = (
+                    f"Filter function failed with polars ({e_name}: {e}) "
+                    f"-- and pandas loc: ({e2_name}: {e2}) "
+                    f"-- and pandas query: ({e3_name}: {e3}) "
                 )
 
     return df, alert
