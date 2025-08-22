@@ -626,6 +626,7 @@ class GeoExplorer:
         zoom_animation: bool = False,
         splitted: bool = False,
         hard_click: bool = False,
+        filters: dict[str, Callable | pl.Expr | str] | None = None,
     ) -> None:
         """Initialiser."""
         self.start_dir = start_dir
@@ -643,6 +644,7 @@ class GeoExplorer:
         self.hard_click = hard_click
         self.max_rows = max_rows
         self.alpha = alpha
+        self.filters = filters or {}
         self.bounds_series = GeoSeries()
         self.selected_files: dict[str, int] = {}
         self.loaded_data: dict[str, pl.DataFrame] = {}
@@ -1397,63 +1399,21 @@ class GeoExplorer:
 
             bounds = self._nested_bounds_to_bounds(bounds)
 
-            dfs = []
-            alerts = set()
             for path in self.selected_files:
-                for key in self.loaded_data:
-                    if path not in key:
-                        continue
-                    df = (
-                        self.loaded_data[key]
-                        .lazy()
-                        .with_columns(__file_path=pl.lit(key))
-                    )
-                    if self.splitted:
-                        df = get_split_index(df)
-                    df = filter_by_bounds(df, bounds)
-                    if self._deleted_categories and self.column in df:
-                        expression = (
-                            pl.col(self.column).is_in(list(self._deleted_categories))
-                            == False
-                        )
-                        if self.nan_label in self._deleted_categories:
-                            expression &= pl.col(self.column).is_not_null()
-                        df = df.filter(expression)
-                    elif (
-                        self.nan_label in self._deleted_categories
-                        and self.column not in df
-                    ):
-                        continue
-                    df = df.collect()
-                    if not len(df):
-                        continue
-                    # filtering by function after collect because LazyFrame doesnt implement to_pandas.
-                    try:
-                        filter_function = get_index(filter_functions, filter_ids, path)
-                    except ValueError:
-                        filter_function = None
-                    if filter_function is not None:
-                        df, alert = _filter_data(df, filter_function)
-                        alerts.add(alert)
-                    if not len(df):
-                        continue
-                    dfs.append(df)
+                try:
+                    filter_function = get_index(filter_functions, filter_ids, path)
+                    self.filters[path] = filter_function
+                except ValueError:
+                    pass
 
-            if dfs:
-                self.concatted_data = pl.concat(dfs, how="diagonal_relaxed")
+            df, alerts = self._concat_data(bounds)
+            self.concatted_data = df
             debug_print(
                 "concat_data finished after",
                 perf_counter() - t,
                 len(self.concatted_data) if self.concatted_data is not None else None,
             )
-            if not alerts:
-                alerts = None
-            else:
-                alerts = [
-                    dbc.Alert(txt, color="warning", dismissable=True)
-                    for txt in alerts
-                    if txt
-                ]
+
             return 1, 1, alerts
 
         @callback(
@@ -1466,8 +1426,6 @@ class GeoExplorer:
             Input({"type": "order-button-down", "index": dash.ALL}, "n_clicks"),
             State({"type": "order-button-up", "index": dash.ALL}, "id"),
             State({"type": "order-button-down", "index": dash.ALL}, "id"),
-            State({"type": "filter", "index": dash.ALL}, "value"),
-            State({"type": "filter", "index": dash.ALL}, "id"),
             State("file-control-panel", "children"),
             prevent_initial_call=True,
         )
@@ -1478,8 +1436,6 @@ class GeoExplorer:
             n_clicks_down,
             ids_up,
             ids_down,
-            filter_functions,
-            filter_ids,
             buttons,
         ):
             triggered = dash.callback_context.triggered_id
@@ -1487,12 +1443,6 @@ class GeoExplorer:
                 return _change_order(self, n_clicks_up, ids_up, buttons, "up")
             if isinstance(triggered, dict) and triggered["type"] == "order-button-down":
                 return _change_order(self, n_clicks_down, ids_down, buttons, "down")
-
-            def get_filter_function_if_any(path):
-                try:
-                    return get_index(filter_functions, filter_ids, path)
-                except ValueError:
-                    return None
 
             return [
                 dbc.Row(
@@ -1589,7 +1539,7 @@ class GeoExplorer:
                         dbc.Row(
                             [
                                 dcc.Input(
-                                    get_filter_function_if_any(path),
+                                    self.filters.get(path, None),
                                     placeholder="Filter (with polars or pandas). E.g. komm_nr == '0301'",
                                     id={
                                         "type": "filter",
@@ -2262,15 +2212,13 @@ class GeoExplorer:
             if clicked_path is None:
                 return dash.no_update
 
-            data = [
-                self.loaded_data[key] for key in self.loaded_data if clicked_path in key
-            ]
-            if not data:
+            df, _ = self._concat_data(bounds=None, paths=[clicked_path])
+            if df is None or not len(df):
                 return None
-            data = pl.concat(data, how="diagonal_relaxed").drop("geometry")
-            if not len(data.columns):
+            df = df.drop("geometry")
+            if not len(df.columns):
                 return None
-            clicked_features = data.to_dicts()
+            clicked_features = df.to_dicts()
             return clicked_features
 
         @callback(
@@ -2565,6 +2513,61 @@ class GeoExplorer:
         maxy, maxx = maxs
         return minx, miny, maxx, maxy
 
+    def _concat_data(
+        self, bounds, paths: list[str] | None = None
+    ) -> tuple[pl.DataFrame | None, list[dbc.Alert] | None]:
+        dfs = []
+        alerts = set()
+        for path in self.selected_files:
+            if paths and path not in paths:
+                continue
+            for key in self.loaded_data:
+                if path not in key:
+                    continue
+                df = self.loaded_data[key].lazy().with_columns(__file_path=pl.lit(key))
+                if self.splitted:
+                    df = get_split_index(df)
+                if bounds is not None:
+                    df = filter_by_bounds(df, bounds)
+                if self._deleted_categories and self.column in df:
+                    expression = (
+                        pl.col(self.column).is_in(list(self._deleted_categories))
+                        == False
+                    )
+                    if self.nan_label in self._deleted_categories:
+                        expression &= pl.col(self.column).is_not_null()
+                    df = df.filter(expression)
+                elif (
+                    self.nan_label in self._deleted_categories and self.column not in df
+                ):
+                    continue
+                df = df.collect()
+                if not len(df):
+                    continue
+                # filtering by function after collect because LazyFrame doesnt implement to_pandas.
+                if self.filters.get(path, None) is not None:
+                    df, alert = _filter_data(df, self.filters[path])
+                    alerts.add(alert)
+                if not len(df):
+                    continue
+                dfs.append(df)
+
+        if dfs:
+            df = pl.concat(dfs, how="diagonal_relaxed")
+        else:
+            df = None
+
+        if not alerts:
+            alerts = None
+        else:
+            alerts = [
+                dbc.Alert(txt, color="warning", dismissable=True)
+                for txt in alerts
+                if txt
+            ]
+
+        return df, alerts
+
     def __str__(self) -> str:
         """String representation."""
 
@@ -2586,9 +2589,15 @@ class GeoExplorer:
         }
 
         if self.selected_files:
-            data["data"] = list(data.pop("selected_files"))
+            data = {"data": list(data.pop("selected_files")), **data}
         else:
             data.pop("selected_files")
+
+        data["filters"] = {
+            key: func for key, func in data["filters"].items() if func is not None
+        }
+        if not data["filters"]:
+            data.pop("filters")
 
         if self._file_browser.favorites:
             data["favorites"] = self._file_browser.favorites
