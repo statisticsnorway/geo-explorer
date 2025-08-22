@@ -2098,6 +2098,8 @@ class GeoExplorer:
             Input("clicked-features", "data"),
         )
         def update_clicked_features_title(features):
+            if not features:
+                return dash.no_update
             return (f"Clicked features (n={len(features)}) {TABLE_TITLE_SUFFIX}",)
 
         @callback(
@@ -2105,6 +2107,8 @@ class GeoExplorer:
             Input("all-features", "data"),
         )
         def update_all_features_title(features):
+            if not features:
+                return dash.no_update
             return (
                 f"All features (n={len(features)}) {TABLE_TITLE_SUFFIX}"
                 " (also note that for partitioned files, only partitions in bounds are loaded)",

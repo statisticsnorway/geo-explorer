@@ -478,7 +478,10 @@ def _get_file_list_row(path, timestamp, size, isdir: bool, current_path, file_sy
     mb = str(round(size / 1_000_000, 2))
     is_loadable = not isdir or (
         path.endswith(".parquet")
-        or all(x.endswith(".parquet") for x in file_system.ls(path))
+        or all(
+            x.endswith(".parquet") or _standardize_path(x) == path
+            for x in file_system.ls(path)
+        )
     )
     if is_loadable:
         button = html.Button(
