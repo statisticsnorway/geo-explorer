@@ -98,6 +98,11 @@ def _get_max_rows_displayed_component(max_rows: int):
             ),
             style={"width": "13vh"},
         ),
+        dbc.Tooltip(
+            "Set number of rows rendered. Currently showing random sample of data to avoid crashing.",
+            target="max_rows_value",
+            delay={"show": 500, "hide": 100},
+        ),
     ]
 
 
@@ -252,6 +257,7 @@ def _add_data_one_path(
                     dl.GeoJSON(id={"type": "geojson", "filename": path}),
                     name=_get_name(path),
                     id={"type": "geojson-overlay", "filename": path},
+                    checked=True,
                 )
             ],
             None,
@@ -451,7 +457,9 @@ def _read_and_to_4326(path: str, file_system, **kwargs) -> GeoDataFrame:
         primary_column = metadata["primary_column"]
         geo_metadata = metadata["columns"][primary_column]
         crs = geo_metadata["crs"]
-        df[primary_column] = GeoSeries.from_wkb(df[primary_column])
+        df["geometry"] = GeoSeries.from_wkb(df[primary_column])
+        if primary_column != "geometry":
+            df = df.drop(primary_column, axis=1)
         df = GeoDataFrame(df, crs=crs)
         return _fix_df(df)
     df = sg.read_geopandas(path, file_system=file_system, **kwargs)
@@ -719,7 +727,7 @@ class GeoExplorer:
                                                     "Split rows",
                                                     id="splitter",
                                                     n_clicks=1 if self.splitted else 0,
-                                                    tooltip_text="Split all data into separate colors",
+                                                    tooltip_text="Split all geometries into separate colors",
                                                 ),
                                             ),
                                             dbc.Col(
@@ -1670,7 +1678,7 @@ class GeoExplorer:
             Input("reload-categories", "n_clicks"),
             prevent_initial_call=True,
         )
-        def reload_data(n_clicks):
+        def reload_categories(n_clicks):
             if not n_clicks:
                 return dash.no_update
             self._deleted_categories = set()
@@ -1680,6 +1688,7 @@ class GeoExplorer:
             Output("splitter", "style"),
             Input("is_splitted", "data"),
             Input("column-dropdown", "value"),
+            prevent_initial_call=True,
         )
         def update_splitter_style(_, column):
             if column is None:
@@ -1903,10 +1912,10 @@ class GeoExplorer:
                 colors = colors + [
                     _random_color() for _ in range(len(new_values) - len(colors))
                 ]
-                color_dict = dict(
-                    sorted((dict(zip(new_values, colors, strict=True))).items())
-                )
+                color_dict = dict(zip(new_values, colors, strict=True))
                 bins = None
+
+                color_dict |= self.color_dict
 
             if color_dict.get(self.nan_label, self.nan_color) != self.nan_color:
                 self.nan_color = color_dict[self.nan_label]
@@ -1917,12 +1926,13 @@ class GeoExplorer:
             debug_print("\n\ncolor_dict nederst")
             debug_print(color_dict)
             if not is_numeric:
-                color_dict |= self.color_dict
                 self.color_dict = color_dict
+                any_isnull = values.is_null().any()
                 color_dict = {
                     key: color
                     for key, color in color_dict.items()
-                    if key in values_no_nans_unique or key == self.nan_label
+                    if key in values_no_nans_unique
+                    or (key == self.nan_label and any_isnull)
                 }
             debug_print(color_dict)
 
@@ -2095,7 +2105,10 @@ class GeoExplorer:
             Input("all-features", "data"),
         )
         def update_all_features_title(features):
-            return (f"All features (n={len(features)}) {TABLE_TITLE_SUFFIX}",)
+            return (
+                f"All features (n={len(features)}) {TABLE_TITLE_SUFFIX}"
+                " (also note that for partitioned files, only partitions in bounds are loaded)",
+            )
 
         @callback(
             Output("clicked-features", "data"),
@@ -2244,19 +2257,16 @@ class GeoExplorer:
             clicked_path = get_index_if_clicks(table_btn_n_clicks, table_btn_ids)
             if clicked_path is None:
                 return dash.no_update
-            data = self.concatted_data.filter(
-                pl.col("__file_path").str.contains(clicked_path)
-            )
-            columns = None
-            for path in self.loaded_data:
-                if clicked_path in path:
-                    columns = set(self.loaded_data[path].columns).difference(
-                        {"geometry"}
-                    )
-                    break
-            if columns is None:
-                return dash.no_update
-            clicked_features = data[list(columns)].to_dicts()
+
+            data = [
+                self.loaded_data[key] for key in self.loaded_data if clicked_path in key
+            ]
+            if not data:
+                return None
+            data = pl.concat(data, how="diagonal_relaxed").drop("geometry")
+            if not len(data.columns):
+                return None
+            clicked_features = data.to_dicts()
             return clicked_features
 
         @callback(
