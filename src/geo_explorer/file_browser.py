@@ -28,9 +28,12 @@ class FileBrowser:
         favorites: list[str] | None = None,
         file_system: AbstractFileSystem | None = None,
     ) -> None:
-        self.start_dir = start_dir
+        self.start_dir = _standardize_path(start_dir)
         self.file_system = file_system
-        self.favorites = favorites if favorites is not None else []
+        self.favorites = (
+            [_standardize_path(x) for x in favorites] if favorites is not None else []
+        )
+        self._history = [self.start_dir]
         self._register_callbacks()
 
     def get_file_browser_components(self, width: str = "140vh") -> list[Component]:
@@ -64,6 +67,13 @@ class FileBrowser:
                                                         _standardize_path(path)
                                                         for path in self.favorites
                                                     ],
+                                                    clearable=False,
+                                                    className="expandable-dropdown-left-aligned",
+                                                ),
+                                                dcc.Dropdown(
+                                                    id="history-dropdown",
+                                                    placeholder="History",
+                                                    options=self._history,
                                                     clearable=False,
                                                     className="expandable-dropdown-left-aligned",
                                                 ),
@@ -195,18 +205,34 @@ class FileBrowser:
     def _register_callbacks(self):
 
         @callback(
+            Output("favorites-dropdown", "value"),
             Output("current-path", "value", allow_duplicate=True),
             Input("favorites-dropdown", "value"),
             State("current-path", "value"),
             prevent_initial_call=True,
         )
-        def update_case_button(clicked_favorite: str | None, current_path: str):
+        def go_to_favorite(clicked_favorite: str | None, current_path: str):
             if clicked_favorite and clicked_favorite == current_path:
-                return dash.no_update
+                return None, dash.no_update
             elif clicked_favorite:
-                return clicked_favorite
+                return None, clicked_favorite
             else:
-                return self.start_dir
+                return None, self.start_dir
+
+        @callback(
+            Output("history-dropdown", "value"),
+            Output("current-path", "value", allow_duplicate=True),
+            Input("history-dropdown", "value"),
+            State("current-path", "value"),
+            prevent_initial_call=True,
+        )
+        def go_to_clicked_from_history(clicked: str | None, current_path: str):
+            if clicked and clicked == current_path:
+                return None, dash.no_update
+            elif clicked:
+                return None, clicked
+            else:
+                return None, self.start_dir
 
         @callback(
             Output("case-sensitive", "style"),
@@ -257,6 +283,7 @@ class FileBrowser:
             Output("file-list", "children"),
             Output("file-list-alert", "children"),
             Output({"type": "sort_by", "key": dash.ALL}, "n_clicks"),
+            Output("history-dropdown", "options"),
             Input("current-path", "value"),
             Input("filename-filter", "value"),
             Input("case-sensitive", "n_clicks"),
@@ -277,6 +304,8 @@ class FileBrowser:
             file_data_dict,
         ):
             triggered = dash.callback_context.triggered_id
+            path = _standardize_path(path)
+
             if isinstance(triggered, dict) and triggered["type"] == "sort_by":
                 sort_by_key = triggered["key"]
                 sort_by_clicks = [
@@ -315,18 +344,14 @@ class FileBrowser:
                 file_data_dict = [x[0] for x in sorted_pairs]
                 file_list = [x[1] for x in sorted_pairs]
 
-            return (
-                file_data_dict,
-                file_list,
-                alert,
-                sort_by_clicks,
-            )
+            self._history = list(dict.fromkeys([path, *self._history]))
+
+            return (file_data_dict, file_list, alert, sort_by_clicks, self._history[1:])
 
 
 def _list_dir(
     path: str, containing: str, case_sensitive: bool, recursive: bool, file_system
 ):
-    path = _standardize_path(path)
     containing = containing or ""
     containing = [txt.strip() for txt in containing.split(",") if txt.strip()]
     if (case_sensitive or 0) % 2 == 0:
@@ -362,7 +387,7 @@ def _list_dir(
 
         def _ls(path):
             path = str(Path(path) / "**")
-            return _try_glob(path)
+            return _try_glob(path, file_system)
 
     try:
         paths = _ls(path)
@@ -378,7 +403,7 @@ def _list_dir(
         )
 
     if not paths:
-        paths = _try_glob(path)
+        paths = _try_glob(path, file_system)
 
     if isinstance(paths, dict):
         paths = list(paths.values())
