@@ -48,6 +48,7 @@ from pandas.api.types import is_datetime64_any_dtype
 from shapely.errors import GEOSException
 from shapely.geometry import Polygon
 from shapely.geometry import Point
+from sgis.io.dapla_functions import _get_geo_metadata
 
 
 from .file_browser import FileBrowser
@@ -446,8 +447,12 @@ def _read_and_to_4326(path: str, file_system, **kwargs) -> GeoDataFrame:
             df = read_nrows(path, nrow, nth_batch, file_system=file_system)
         except Exception:
             df = read_nrows(path, nrow, nth_batch, file_system=None)
-        df["geometry"] = GeoSeries.from_wkb(df["geometry"])
-        df = GeoDataFrame(df, crs=25833)
+        metadata = _get_geo_metadata(path, file_system)
+        primary_column = metadata["primary_column"]
+        geo_metadata = metadata["columns"][primary_column]
+        crs = geo_metadata["crs"]
+        df[primary_column] = GeoSeries.from_wkb(df[primary_column])
+        df = GeoDataFrame(df, crs=crs)
         return _fix_df(df)
     df = sg.read_geopandas(path, file_system=file_system, **kwargs)
     return _fix_df(df)
@@ -2559,7 +2564,6 @@ class GeoExplorer:
                 "bounds",
                 "tile_names",
                 "concatted_data",
-                # "splitted",
                 "logger",
             ]
             and not key.startswith("_")
