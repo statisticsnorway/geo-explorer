@@ -633,11 +633,13 @@ class GeoExplorer:
         self.port = port
         self.max_zoom = max_zoom
         self.min_zoom = min_zoom
+        self.zoom_animation = zoom_animation
         self.bounds = None
         self.column = column
         self.color_dict = color_dict or {}
         self.wms = wms or {}
         self._wms_is_checked = {name: True for name in self.wms}
+        self._wms_deleted = set()
         self.file_system = file_system or LocalFileSystem()
         self.nan_color = nan_color
         self.nan_label = nan_label
@@ -657,7 +659,6 @@ class GeoExplorer:
         self._file_browser = FileBrowser(
             start_dir, file_system=file_system, favorites=favorites
         )
-        self.tile_names: list[str] = []
 
         if is_jupyter():
             service_prefix = os.environ["JUPYTERHUB_SERVICE_PREFIX"].strip("/")
@@ -696,31 +697,14 @@ class GeoExplorer:
                     dbc.Row(html.Div(id="alert4")),
                     dbc.Row(html.Div(id="new-file-added")),
                     html.Div(id="file-deleted"),
-                    dbc.Row(html.Div(id="loading", style={"height": "3vh"})),
                     dbc.Row(
                         [
-                            dbc.Col(
-                                [
-                                    dl.Map(
-                                        center=self.center,
-                                        bounds=self.bounds,
-                                        zoom=self.zoom,
-                                        maxZoom=max_zoom,
-                                        minZoom=min_zoom,
-                                        children=self._map_children
-                                        + [
-                                            html.Div(id="lc"),
-                                        ],
-                                        preferCanvas=True,
-                                        zoomAnimation=zoom_animation,
-                                        id="map",
-                                        style={
-                                            "height": "90vh",
-                                        },
-                                    ),
-                                ],
-                                width=9,
-                            ),
+                            dbc.Col(html.Div(id="loading", style={"height": "3vh"})),
+                        ]
+                    ),
+                    dbc.Row(
+                        [
+                            dbc.Col(self._map_constructor(html.Div(id="lc")), width=9),
                             dbc.Col(
                                 [
                                     dbc.Row(
@@ -1725,6 +1709,8 @@ class GeoExplorer:
         )
         def set_colorpicker_value(colors, ids):
             triggered = dash.callback_context.triggered_id
+            if triggered is None:
+                return dash.no_update
             column_value = triggered["column_value"]
             i = next(
                 iter(i for i, x in enumerate(ids) if x["column_value"] == column_value)
@@ -1767,6 +1753,8 @@ class GeoExplorer:
                 self.column = column
             elif not column and triggered is None:
                 column = self.column
+            elif self.concatted_data is None:
+                return [], None, dash.no_update, dash.no_update, dash.no_update
             else:
                 self.column = column
 
@@ -1919,12 +1907,13 @@ class GeoExplorer:
         def update_loading(_):
             if self.concatted_data is None or not len(self.concatted_data):
                 return None
-            return "Finished loading. (If not all geometries are rendering, move the map bounds slightly)"
+            return "Finished loading"
 
         @callback(
             Output("lc", "children"),
             Output("alert", "children"),
             Output("max_rows", "children"),
+            Output("wms-list", "children"),
             Input("colors-are-updated", "data"),
             Input({"type": "colorpicker", "column_value": dash.ALL}, "value"),
             Input("is-numeric", "children"),
@@ -1976,14 +1965,16 @@ class GeoExplorer:
             color_dict = dict(zip(column_values, colorpicker_values_list, strict=True))
 
             wms_layers = []
-            tiles = []
+            all_tiles = []
             for wms_name, wms_obj in self.wms.items():
                 if wms_name not in wms_checklist:
                     continue
                 tiles = wms_obj._filter_tiles(shapely.box(*bounds))["name"]
-                self.tile_names = list(tiles)
+                these_tiles = []
                 for tile in tiles:
-                    debug_print(tile, self._wms_is_checked[wms_name])
+                    if (wms_name + tile) in self._wms_deleted:
+                        continue
+                    these_tiles.append(tile)
                     wms_layers.append(
                         dl.Overlay(
                             dl.WMSTileLayer(
@@ -1996,6 +1987,7 @@ class GeoExplorer:
                             checked=self._wms_is_checked[wms_name],
                         )
                     )
+                all_tiles.append(self._get_wms_list(these_tiles, wms_name))
 
             if is_numeric:
                 color_dict = {i: color for i, color in enumerate(color_dict.values())}
@@ -2042,6 +2034,7 @@ class GeoExplorer:
                 dl.LayersControl(self._base_layers + wms_layers + data),
                 (out_alert if out_alert else None),
                 max_rows_component,
+                all_tiles,
             )
 
         @callback(
@@ -2343,15 +2336,24 @@ class GeoExplorer:
                                         )
                                     ),
                                     dbc.Row(
-                                        dcc.Input(
-                                            value=not_contains,
-                                            id={
-                                                "type": "wms-not-contains",
-                                                "index": wms_name,
-                                            },
-                                            type="text",
-                                            placeholder="Not contains (use | for OR)",
-                                        )
+                                        [
+                                            dcc.Input(
+                                                value=not_contains,
+                                                id={
+                                                    "type": "wms-not-contains",
+                                                    "index": wms_name,
+                                                },
+                                                type="text",
+                                                placeholder="Not contains (use | for OR)",
+                                            ),
+                                            dbc.Tooltip(
+                                                "not_contains. Substrings to be excluded",
+                                                target={
+                                                    "type": "wms-not-contains",
+                                                    "index": wms_name,
+                                                },
+                                            ),
+                                        ],
                                     ),
                                     dbc.Row(
                                         get_button_with_tooltip(
@@ -2368,6 +2370,9 @@ class GeoExplorer:
                                                 else _unclicked_button_style()
                                             ),
                                         )
+                                    ),
+                                    dbc.Row(
+                                        id="wms-list",
                                     ),
                                 ],
                                 style={
@@ -2465,6 +2470,27 @@ class GeoExplorer:
             except Exception:
                 not_contains = str(get_index(values, ids, wms_name))
             self._construct_wms_obj(wms_name, not_contains=not_contains)
+            return True
+
+        @callback(
+            Output("wms-added", "data", allow_duplicate=True),
+            Input(
+                {"type": "delete-wms-btn", "tile": dash.ALL, "wms_name": dash.ALL},
+                "n_clicks",
+            ),
+            # State(
+            #     {"type": "delete-wms-btn", "tile": dash.ALL, "wms_name": dash.ALL}, "id"
+            # ),
+            prevent_initial_call=True,
+        )
+        def delete_wms(n_clicks):
+            triggered = dash.callback_context.triggered_id
+            if triggered is None or not n_clicks or not any(n_clicks):
+                return dash.no_update
+            tile = triggered["tile"]
+            wms_name = triggered["wms_name"]
+            print("delete wms", tile, wms_name)
+            self._wms_deleted.add(wms_name + tile)
             return True
 
         self.app.clientside_callback(
@@ -2611,6 +2637,59 @@ class GeoExplorer:
 
         return df, alerts
 
+    def _map_constructor(self, data: dl.LayersControl) -> dl.Map:
+        return dl.Map(
+            center=self.center,
+            bounds=self.bounds,
+            zoom=self.zoom,
+            maxZoom=self.max_zoom,
+            minZoom=self.min_zoom,
+            children=self._map_children + [data],
+            preferCanvas=True,
+            zoomAnimation=self.zoom_animation,
+            id="map",
+            style={
+                "height": "90vh",
+            },
+        )
+
+    def _get_wms_list(self, tiles: list[str], wms_name: str) -> html.Ul:
+        height = int(min(20, 10 + len(tiles)))
+        return html.Ul(
+            [
+                dbc.Row(
+                    [
+                        dbc.Col(
+                            dbc.Label([tile]),
+                            width="auto",
+                        ),
+                        dbc.Col(
+                            get_button_with_tooltip(
+                                "❌",
+                                id={
+                                    "type": "delete-wms-btn",
+                                    "tile": tile,
+                                    "wms_name": wms_name,
+                                },
+                                n_clicks=0,
+                                style={
+                                    "color": "red",
+                                    "border": "none",
+                                    "background": "none",
+                                    "cursor": "pointer",
+                                    "marginLeft": "auto",
+                                },
+                                tooltip_text="Remove wms layer",
+                            ),
+                            width="auto",
+                        ),
+                    ]
+                )
+                for tile in tiles
+            ],
+            style={"height": f"{height}vh", "overflowY": "scroll"},
+        )
+
     def _construct_wms_obj(self, wms_name: str, **kwargs):
         if wms_name in self.wms:
             constructor = self.wms[wms_name].__class__
@@ -2650,7 +2729,6 @@ class GeoExplorer:
                 "bounds_series",
                 "loaded_data",
                 "bounds",
-                "tile_names",
                 "concatted_data",
                 "logger",
             ]
