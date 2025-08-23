@@ -73,6 +73,12 @@ def not_test_geo_explorer_locally():
                 .assign(num_col=10000),
             },
         ],
+        wms={
+            "Norge i bilder": sg.NorgeIBilderWms(
+                years=range(2020, 2024),
+                not_contains="Sentinel|CIR",
+            ),
+        },
         selected_features=[1, 1.05],
         column="FYLKE",
         zoom=13,

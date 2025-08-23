@@ -637,6 +637,7 @@ class GeoExplorer:
         self.column = column
         self.color_dict = color_dict or {}
         self.wms = wms or {}
+        self._wms_is_checked = {name: True for name in self.wms}
         self.file_system = file_system or LocalFileSystem()
         self.nan_color = nan_color
         self.nan_label = nan_label
@@ -869,9 +870,10 @@ class GeoExplorer:
                                                     dbc.Col(
                                                         html.Button(
                                                             "Hide/show wms options",
-                                                            id="hide-wms-button",
-                                                            n_clicks=1,
-                                                            style={"display": "none"},
+                                                            id="wms-hide-button",
+                                                            n_clicks=(
+                                                                1 if not self.wms else 0
+                                                            ),
                                                         ),
                                                     ),
                                                 ]
@@ -880,14 +882,19 @@ class GeoExplorer:
                                                 [
                                                     html.Div(
                                                         dcc.Checklist(
-                                                            options=["Norge i bilder"],
-                                                            value=[],
+                                                            options=list(
+                                                                set(
+                                                                    self._wms_constructors
+                                                                )
+                                                                | set(self.wms)
+                                                            ),
+                                                            value=list(self.wms),
                                                             id="wms-checklist",
                                                         ),
                                                     ),
                                                     html.Div(id="wms-items"),
                                                 ],
-                                                id="hide-wms-div",
+                                                id="wms-hide-div",
                                                 style={"display": "none"},
                                             ),
                                         ]
@@ -963,7 +970,7 @@ class GeoExplorer:
                     html.Div(id="missing", style={"display": "none"}),
                     dcc.Store(id="colors-are-updated"),
                     dcc.Store(id="dummy3"),
-                    html.Div(id="wms-added", style={"display": "none"}),
+                    dcc.Store(id="wms-added"),
                     html.Div(id="data-was-concatted", style={"display": "none"}),
                     html.Div(id="data-was-changed", style={"display": "none"}),
                     dcc.Store(id="order-was-changed", data=None),
@@ -1921,9 +1928,9 @@ class GeoExplorer:
             Input("colors-are-updated", "data"),
             Input({"type": "colorpicker", "column_value": dash.ALL}, "value"),
             Input("is-numeric", "children"),
-            Input("wms-items", "children"),
+            # Input("wms-items", "children"),
             Input("wms-checklist", "value"),
-            Input("wms-added", "children"),
+            Input("wms-added", "data"),
             Input("max_rows_was_changed", "children"),
             Input("data-was-changed", "children"),
             Input("order-was-changed", "data"),
@@ -1940,9 +1947,9 @@ class GeoExplorer:
             currently_in_bounds,
             colorpicker_values_list,
             is_numeric,
-            wms,
-            wms_checked,
-            new_file_added2,
+            # wms_items,
+            wms_checklist,
+            wms_added,
             max_rows_was_changed,
             data_was_changed,
             order_was_changed,
@@ -1971,11 +1978,12 @@ class GeoExplorer:
             wms_layers = []
             tiles = []
             for wms_name, wms_obj in self.wms.items():
-                if wms_name not in wms_checked:
+                if wms_name not in wms_checklist:
                     continue
                 tiles = wms_obj._filter_tiles(shapely.box(*bounds))["name"]
                 self.tile_names = list(tiles)
                 for tile in tiles:
+                    debug_print(tile, self._wms_is_checked[wms_name])
                     wms_layers.append(
                         dl.Overlay(
                             dl.WMSTileLayer(
@@ -1985,7 +1993,7 @@ class GeoExplorer:
                                 transparent=True,
                             ),
                             name=tile,
-                            checked=wms_obj.checked,
+                            checked=self._wms_is_checked[wms_name],
                         )
                     )
 
@@ -2286,41 +2294,9 @@ class GeoExplorer:
             return bounds, int(zoom_level), center
 
         @callback(
-            Output("wms-added", "children"),
-            Input({"type": "from-year", "index": dash.ALL}, "value"),
-            Input({"type": "to-year", "index": dash.ALL}, "value"),
-            Input({"type": "wms-not-contains", "index": dash.ALL}, "value"),
-            Input({"type": "wms-checked", "index": dash.ALL}, "value"),
-            prevent_initial_call=True,
-        )
-        def get_wms_object(from_year, to_year, not_contains, checked):
-            triggered = dash.callback_context.triggered_id
-            if triggered is None:
-                for wms_name in list(self.wms):
-                    if wms_name not in checked:
-                        self.wms.pop(wms_name)
-                return
-            wms_name = triggered["index"]
-            from_year = next(iter(from_year))
-            to_year = next(iter(to_year))
-            not_contains = next(iter(not_contains)) or None
-            checked = next(iter(checked))
-            if not_contains is not None:
-                not_contains = [x.strip(",") for x in not_contains.split(" ")]
-            try:
-                self.wms[wms_name] = self._wms_constructors[wms_name](
-                    years=np.arange(int(from_year), int(to_year)),
-                    not_contains=not_contains,
-                )
-            except Exception:
-                return dash.no_update
-            self.wms[wms_name].checked = bool(checked)
-            return 1
-
-        @callback(
-            Output("hide-wms-div", "style"),
-            Input("hide-wms-button", "n_clicks"),
-            prevent_initial_call=True,
+            Output("wms-hide-div", "style"),
+            Input("wms-hide-button", "n_clicks"),
+            # prevent_initial_call=True,
         )
         def hide_wms(n_clicks):
             if not n_clicks or n_clicks % 2 == 0:
@@ -2331,7 +2307,6 @@ class GeoExplorer:
             Output("wms-items", "children"),
             Input("wms-checklist", "value"),
             State("wms-items", "children"),
-            prevent_initial_call=True,
         )
         def add_wms_panel(
             checklist_items,
@@ -2341,28 +2316,10 @@ class GeoExplorer:
             if not checklist_items:
                 return items
             for wms_name in checklist_items:
-                defaults = {
-                    arg: default
-                    for arg, default in zip(
-                        inspect.getfullargspec(self._wms_constructors[wms_name]).args[
-                            1:
-                        ],
-                        inspect.getfullargspec(
-                            self._wms_constructors[wms_name]
-                        ).defaults,
-                        strict=True,
-                    )
-                }
-                from_year = int(list(defaults["years"])[0])
-                to_year = int(list(defaults["years"])[-1])
-
-                self.wms[wms_name] = self._wms_constructors[wms_name](
-                    years=np.arange(int(from_year), int(to_year)),
-                )
-                self.wms[wms_name].checked = False
-
-                # from_year = int(list(self.wms[wms_name].years[0]))
-                # to_year = int(list(self.wms[wms_name].years[-1]))
+                self._construct_wms_obj(wms_name)
+                from_year = int(self.wms[wms_name].years[0])
+                to_year = int(self.wms[wms_name].years[-1])
+                not_contains = str(self.wms[wms_name].not_contains)
 
                 items.append(
                     dbc.Row(
@@ -2387,22 +2344,29 @@ class GeoExplorer:
                                     ),
                                     dbc.Row(
                                         dcc.Input(
+                                            value=not_contains,
                                             id={
                                                 "type": "wms-not-contains",
                                                 "index": wms_name,
                                             },
                                             type="text",
-                                            placeholder="Not contains",
+                                            placeholder="Not contains (use | for OR)",
                                         )
                                     ),
                                     dbc.Row(
-                                        dcc.Checklist(
-                                            options=["show/hide all"],
-                                            value=[],
+                                        get_button_with_tooltip(
+                                            "show/hide all",
                                             id={
                                                 "type": "wms-checked",
                                                 "index": wms_name,
                                             },
+                                            n_clicks=0,
+                                            tooltip_text="Show/hide all layers from this WMS",
+                                            style=(
+                                                _clicked_button_style()
+                                                if self._wms_is_checked[wms_name]
+                                                else _unclicked_button_style()
+                                            ),
                                         )
                                     ),
                                 ],
@@ -2423,6 +2387,85 @@ class GeoExplorer:
                 )
 
             return items
+
+        @callback(
+            Output("wms-added", "data", allow_duplicate=True),
+            Output({"type": "wms-checked", "index": dash.ALL}, "style"),
+            Input({"type": "wms-checked", "index": dash.ALL}, "n_clicks"),
+            State({"type": "wms-checked", "index": dash.ALL}, "style"),
+            prevent_initial_call=True,
+        )
+        def update_wms_checked(n_clicks_list, styles):
+            triggered = dash.callback_context.triggered_id
+            if triggered is None or not any(n_clicks_list):
+                return dash.no_update, styles
+            wms_name = triggered["index"]
+            self._wms_is_checked[wms_name] = not self._wms_is_checked.get(
+                wms_name, True
+            )
+            return True, [
+                (_clicked_button_style() if checked else _unclicked_button_style())
+                for checked in self._wms_is_checked.values()
+            ]
+
+        @callback(
+            Output("wms-added", "data", allow_duplicate=True),
+            Input({"type": "from-year", "index": dash.ALL}, "value"),
+            State({"type": "from-year", "index": dash.ALL}, "id"),
+            prevent_initial_call=True,
+        )
+        def update_wms_from_year(values, ids):
+            triggered = dash.callback_context.triggered_id
+            if triggered is None:
+                return dash.no_update
+            wms_name = triggered["index"]
+            self._construct_wms_obj(
+                wms_name,
+                years=range(
+                    get_index(values, ids, wms_name),
+                    int(self.wms[wms_name].years[-1]) + 1,
+                ),
+            )
+            return True
+
+        @callback(
+            Output("wms-added", "data", allow_duplicate=True),
+            Input({"type": "to-year", "index": dash.ALL}, "value"),
+            State({"type": "to-year", "index": dash.ALL}, "id"),
+            prevent_initial_call=True,
+        )
+        def update_wms_to_year(values, ids):
+            triggered = dash.callback_context.triggered_id
+            if triggered is None:
+                return dash.no_update
+            wms_name = triggered["index"]
+            self._construct_wms_obj(
+                wms_name,
+                years=range(
+                    int(self.wms[wms_name].years[0]),
+                    get_index(values, ids, wms_name) + 1,
+                ),
+            )
+            return True
+
+        @callback(
+            Output("wms-added", "data", allow_duplicate=True),
+            Input({"type": "wms-not-contains", "index": dash.ALL}, "value"),
+            State({"type": "wms-not-contains", "index": dash.ALL}, "id"),
+            prevent_initial_call=True,
+        )
+        def update_wms_not_contains(values, ids):
+            triggered = dash.callback_context.triggered_id
+            if triggered is None:
+                return dash.no_update
+            wms_name = triggered["index"]
+            try:
+                # convert list string etc. to python list
+                not_contains = eval(get_index(values, ids, wms_name))
+            except Exception:
+                not_contains = str(get_index(values, ids, wms_name))
+            self._construct_wms_obj(wms_name, not_contains=not_contains)
+            return True
 
         self.app.clientside_callback(
             """
@@ -2567,6 +2610,33 @@ class GeoExplorer:
             ]
 
         return df, alerts
+
+    def _construct_wms_obj(self, wms_name: str, **kwargs):
+        if wms_name in self.wms:
+            constructor = self.wms[wms_name].__class__
+        else:
+            constructor = self._wms_constructors[wms_name]
+
+        defaults = {
+            arg: default
+            for arg, default in zip(
+                inspect.getfullargspec(constructor).args[1:],
+                inspect.getfullargspec(constructor).defaults,
+                strict=True,
+            )
+        }
+
+        if wms_name in self.wms:
+            current_kwargs = {
+                arg: value
+                for arg, value in self.wms[wms_name].__dict__.items()
+                if arg in defaults
+            }
+        else:
+            current_kwargs = defaults
+
+        self.wms[wms_name] = constructor(**(current_kwargs | kwargs))
+        self._wms_is_checked[wms_name] = self._wms_is_checked.get(wms_name, True)
 
     def __str__(self) -> str:
         """String representation."""
