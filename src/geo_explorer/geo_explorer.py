@@ -18,6 +18,7 @@ from time import perf_counter
 from typing import Any
 from typing import ClassVar
 
+import datetime
 import pyarrow
 import pyarrow.parquet as pq
 import dash
@@ -65,6 +66,7 @@ TABLE_TITLE_SUFFIX: str = (
 )
 DEFAULT_ZOOM: int = 10
 DEFAULT_CENTER: tuple[float, float] = (59.91740845, 10.71394444)
+CURRENT_YEAR: int = datetime.datetime.now().year
 
 DEBUG: bool = False
 
@@ -561,12 +563,6 @@ def _get_bounds_series(path, file_system):
     return bounds_series
 
 
-class _EmptyColumnContainer:
-    """Class with attribute 'columns' as an empty list."""
-
-    columns: ClassVar[list] = []
-
-
 class GeoExplorer:
     """Class for exploring geodata interactively."""
 
@@ -637,8 +633,11 @@ class GeoExplorer:
         self.bounds = None
         self.column = column
         self.color_dict = color_dict or {}
-        self.wms = wms or {}
-        self._wms_is_checked = {name: True for name in self.wms}
+        self.wms = dict(wms or {})
+        for wms_name, constructor in self._wms_constructors.items():
+            if constructor in {type(x) for x in self.wms.values()}:
+                continue
+            self.wms[wms_name] = constructor()
         self._wms_deleted = set()
         self.file_system = file_system or LocalFileSystem()
         self.nan_color = nan_color
@@ -856,28 +855,31 @@ class GeoExplorer:
                                                             "Hide/show wms options",
                                                             id="wms-hide-button",
                                                             n_clicks=(
-                                                                1 if not self.wms else 0
+                                                                1 if not wms else 0
                                                             ),
                                                         ),
                                                     ),
                                                 ]
                                             ),
                                             html.Div(
-                                                [
-                                                    html.Div(
-                                                        dcc.Checklist(
-                                                            options=list(
-                                                                set(
-                                                                    self._wms_constructors
-                                                                )
-                                                                | set(self.wms)
+                                                html.Div(
+                                                    [
+                                                        html.Div(
+                                                            dcc.Checklist(
+                                                                options=list(self.wms),
+                                                                value=list(wms or []),
+                                                                id="wms-checklist",
                                                             ),
-                                                            value=list(self.wms),
-                                                            id="wms-checklist",
                                                         ),
-                                                    ),
-                                                    html.Div(id="wms-items"),
-                                                ],
+                                                        html.Div(id="wms-panel"),
+                                                    ],
+                                                    style={
+                                                        "border": "1px solid #ccc",
+                                                        "border-radius": "5px",
+                                                        "padding": "20px",
+                                                        "background-color": OFFWHITE,
+                                                    },
+                                                ),
                                                 id="wms-hide-div",
                                                 style={"display": "none"},
                                             ),
@@ -892,9 +894,9 @@ class GeoExplorer:
                                             "display": "flex",
                                             "flexDirection": "column",
                                             "border": "1px solid #ccc",
-                                            "borderRadius": "3px",
+                                            "border-radius": "3px",
                                             "padding": "0px",
-                                            "backgroundColor": OFFWHITE,
+                                            "background-color": OFFWHITE,
                                             "margin-bottom": "7px",
                                             "margin-top": "7px",
                                             "margin-left": "0px",
@@ -1479,12 +1481,12 @@ class GeoExplorer:
                                 style=(
                                     {
                                         "color": FILE_CHECKED_COLOR,
-                                        "backgroundColor": FILE_CHECKED_COLOR,
+                                        "background-color": FILE_CHECKED_COLOR,
                                     }
                                     if checked
                                     else {
                                         "color": OFFWHITE,
-                                        "backgroundColor": OFFWHITE,
+                                        "background-color": OFFWHITE,
                                     }
                                 ),
                                 tooltip_text="Show/hide data",
@@ -1575,13 +1577,39 @@ class GeoExplorer:
                 self.selected_files[path] = True
                 return {
                     "color": FILE_CHECKED_COLOR,
-                    "backgroundColor": FILE_CHECKED_COLOR,
+                    "background-color": FILE_CHECKED_COLOR,
                 }, 0
             else:
                 self.selected_files[path] = False
                 return {
                     "color": OFFWHITE,
-                    "backgroundColor": OFFWHITE,
+                    "background-color": OFFWHITE,
+                }, 1
+
+        @callback(
+            Output({"type": "checked-btn-wms", "index": dash.MATCH}, "style"),
+            Output({"type": "checked-btn-wms", "index": dash.MATCH}, "n_clicks"),
+            Input({"type": "checked-btn-wms", "index": dash.ALL}, "n_clicks"),
+            State({"type": "checked-btn-wms", "index": dash.ALL}, "id"),
+            prevent_initial_call=True,
+        )
+        def check_or_uncheck(n_clicks_list, ids):
+            path = get_index_if_clicks(n_clicks_list, ids)
+            if not path:
+                return dash.no_update, dash.no_update
+            print(self._these_tiles)
+            is_checked = self._these_tiles[path]
+            if not is_checked:
+                self._these_tiles[path] = True
+                return {
+                    "color": FILE_CHECKED_COLOR,
+                    "background-color": FILE_CHECKED_COLOR,
+                }, 0
+            else:
+                self._these_tiles[path] = False
+                return {
+                    "color": OFFWHITE,
+                    "background-color": OFFWHITE,
                 }, 1
 
         @callback(
@@ -1913,11 +1941,10 @@ class GeoExplorer:
             Output("lc", "children"),
             Output("alert", "children"),
             Output("max_rows", "children"),
-            Output("wms-list", "children"),
+            Output({"type": "wms-list", "index": dash.ALL}, "children"),
             Input("colors-are-updated", "data"),
             Input({"type": "colorpicker", "column_value": dash.ALL}, "value"),
             Input("is-numeric", "children"),
-            # Input("wms-items", "children"),
             Input("wms-checklist", "value"),
             Input("wms-added", "data"),
             Input("max_rows_was_changed", "children"),
@@ -1966,15 +1993,17 @@ class GeoExplorer:
 
             wms_layers = []
             all_tiles = []
+            self._these_tiles = {}
             for wms_name, wms_obj in self.wms.items():
                 if wms_name not in wms_checklist:
+                    all_tiles.append(None)
                     continue
                 tiles = wms_obj._filter_tiles(shapely.box(*bounds))["name"]
-                these_tiles = []
+                these_tiles = {}
                 for tile in tiles:
                     if (wms_name + tile) in self._wms_deleted:
                         continue
-                    these_tiles.append(tile)
+                    these_tiles[tile] = False
                     wms_layers.append(
                         dl.Overlay(
                             dl.WMSTileLayer(
@@ -1984,9 +2013,10 @@ class GeoExplorer:
                                 transparent=True,
                             ),
                             name=tile,
-                            checked=self._wms_is_checked[wms_name],
+                            checked=wms_obj.show,
                         )
                     )
+                self._these_tiles |= {wms_name + tile: False for tile in these_tiles}
                 all_tiles.append(self._get_wms_list(these_tiles, wms_name))
 
             if is_numeric:
@@ -2289,7 +2319,6 @@ class GeoExplorer:
         @callback(
             Output("wms-hide-div", "style"),
             Input("wms-hide-button", "n_clicks"),
-            # prevent_initial_call=True,
         )
         def hide_wms(n_clicks):
             if not n_clicks or n_clicks % 2 == 0:
@@ -2297,43 +2326,79 @@ class GeoExplorer:
             return {"display": "none"}
 
         @callback(
-            Output("wms-items", "children"),
+            Output("wms-panel", "children"),
             Input("wms-checklist", "value"),
-            State("wms-items", "children"),
+            State("wms-panel", "children"),
         )
         def add_wms_panel(
-            checklist_items,
+            wms_checklist,
             items,
         ):
             items = []
-            if not checklist_items:
-                return items
-            for wms_name in checklist_items:
-                self._construct_wms_obj(wms_name)
-                from_year = int(self.wms[wms_name].years[0])
-                to_year = int(self.wms[wms_name].years[-1])
-                not_contains = str(self.wms[wms_name].not_contains)
+            for wms_name in self.wms:
+                if wms_name in wms_checklist:
+                    self._construct_wms_obj(wms_name)
+                    try:
+                        from_year = int(self.wms[wms_name].years[0])
+                    except IndexError:
+                        from_year = dash.no_update
+                    to_year = int(self.wms[wms_name].years[-1])
+                    not_contains = self.wms[wms_name].not_contains
+                    not_contains = str(not_contains) if not_contains else None
+                    style = None
+                else:
+                    from_year = None
+                    to_year = None
+                    not_contains = None
+                    style = {"display": "none"}
 
                 items.append(
                     dbc.Row(
                         [
                             dbc.Col(
                                 [
+                                    dbc.Row(html.Div(html.B(wms_name))),
                                     dbc.Row(
-                                        dcc.Input(
-                                            value=from_year,
-                                            id={"type": "from-year", "index": wms_name},
-                                            type="number",
-                                            placeholder="From year",
-                                        )
+                                        [
+                                            dcc.Input(
+                                                value=from_year,
+                                                id={
+                                                    "type": "from-year",
+                                                    "index": wms_name,
+                                                },
+                                                type="number",
+                                                placeholder="From year",
+                                                debounce=0.25,
+                                            ),
+                                            dbc.Tooltip(
+                                                "From year",
+                                                target={
+                                                    "type": "from-year",
+                                                    "index": wms_name,
+                                                },
+                                            ),
+                                        ]
                                     ),
                                     dbc.Row(
-                                        dcc.Input(
-                                            value=to_year,
-                                            id={"type": "to-year", "index": wms_name},
-                                            type="number",
-                                            placeholder="To year",
-                                        )
+                                        [
+                                            dcc.Input(
+                                                value=to_year,
+                                                id={
+                                                    "type": "to-year",
+                                                    "index": wms_name,
+                                                },
+                                                type="number",
+                                                placeholder="To year",
+                                                debounce=0.25,
+                                            ),
+                                            dbc.Tooltip(
+                                                "To year",
+                                                target={
+                                                    "type": "to-year",
+                                                    "index": wms_name,
+                                                },
+                                            ),
+                                        ]
                                     ),
                                     dbc.Row(
                                         [
@@ -2344,10 +2409,11 @@ class GeoExplorer:
                                                     "index": wms_name,
                                                 },
                                                 type="text",
-                                                placeholder="Not contains (use | for OR)",
+                                                placeholder="Not contains ",
+                                                debounce=0.25,
                                             ),
                                             dbc.Tooltip(
-                                                "not_contains. Substrings to be excluded",
+                                                "Substrings to be excluded (use | for OR)",
                                                 target={
                                                     "type": "wms-not-contains",
                                                     "index": wms_name,
@@ -2356,102 +2422,81 @@ class GeoExplorer:
                                         ],
                                     ),
                                     dbc.Row(
-                                        get_button_with_tooltip(
-                                            "show/hide all",
-                                            id={
-                                                "type": "wms-checked",
-                                                "index": wms_name,
-                                            },
-                                            n_clicks=0,
-                                            tooltip_text="Show/hide all layers from this WMS",
-                                            style=(
-                                                _clicked_button_style()
-                                                if self._wms_is_checked[wms_name]
-                                                else _unclicked_button_style()
-                                            ),
-                                        )
-                                    ),
-                                    dbc.Row(
-                                        id="wms-list",
+                                        id={
+                                            "type": "wms-list",
+                                            "index": wms_name,
+                                        },
                                     ),
                                 ],
                                 style={
-                                    "display": "flex",
-                                    "flexDirection": "column",
                                     "border": "1px solid #ccc",
-                                    "borderRadius": "5px",
-                                    "padding": "20px",
-                                    "backgroundColor": "white",
-                                    "gap": "10px",
-                                    "width": "300px",
+                                    "border-radius": "3px",
                                 },
-                                id=f"wms-item-{wms_name}",
                             ),
                         ],
+                        style=style,
                     )
                 )
 
             return items
 
-        @callback(
-            Output("wms-added", "data", allow_duplicate=True),
-            Output({"type": "wms-checked", "index": dash.ALL}, "style"),
-            Input({"type": "wms-checked", "index": dash.ALL}, "n_clicks"),
-            State({"type": "wms-checked", "index": dash.ALL}, "style"),
-            prevent_initial_call=True,
-        )
-        def update_wms_checked(n_clicks_list, styles):
-            triggered = dash.callback_context.triggered_id
-            if triggered is None or not any(n_clicks_list):
-                return dash.no_update, styles
-            wms_name = triggered["index"]
-            self._wms_is_checked[wms_name] = not self._wms_is_checked.get(
-                wms_name, True
-            )
-            return True, [
-                (_clicked_button_style() if checked else _unclicked_button_style())
-                for checked in self._wms_is_checked.values()
-            ]
+        # @callback(
+        #     Output("wms-added", "data", allow_duplicate=True),
+        #     Output({"type": "wms-hide-show", "index": dash.ALL}, "style"),
+        #     Input({"type": "wms-hide-show", "index": dash.ALL}, "n_clicks"),
+        #     State({"type": "wms-hide-show", "index": dash.ALL}, "style"),
+        #     prevent_initial_call=True,
+        # )
+        # def update_wms_checked(n_clicks_list, styles):
+        #     triggered = dash.callback_context.triggered_id
+        #     if triggered is None or not any(n_clicks_list):
+        #         return dash.no_update, styles
+        #     wms_name = triggered["index"]
+        #     self._construct_wms_obj(wms_name, show=not self.wms[wms_name].show)
+        #     return True, [
+        #         (
+        #             _clicked_button_style()
+        #             if self.wms[name].show
+        #             else _unclicked_button_style()
+        #         )
+        #         for name in self.wms
+        #     ]
 
         @callback(
             Output("wms-added", "data", allow_duplicate=True),
+            Output({"type": "from-year", "index": dash.ALL}, "value"),
             Input({"type": "from-year", "index": dash.ALL}, "value"),
+            State({"type": "to-year", "index": dash.ALL}, "value"),
             State({"type": "from-year", "index": dash.ALL}, "id"),
             prevent_initial_call=True,
         )
-        def update_wms_from_year(values, ids):
+        def update_wms_from_year(from_year_values, to_year_values, ids):
             triggered = dash.callback_context.triggered_id
-            if triggered is None:
-                return dash.no_update
-            wms_name = triggered["index"]
-            self._construct_wms_obj(
-                wms_name,
-                years=range(
-                    get_index(values, ids, wms_name),
-                    int(self.wms[wms_name].years[-1]) + 1,
-                ),
+            return self._update_wms_year(
+                triggered,
+                what="from",
+                to_year_values=to_year_values,
+                from_year_values=from_year_values,
+                ids=ids,
             )
-            return True
 
         @callback(
             Output("wms-added", "data", allow_duplicate=True),
+            Output({"type": "to-year", "index": dash.ALL}, "value"),
             Input({"type": "to-year", "index": dash.ALL}, "value"),
+            State({"type": "from-year", "index": dash.ALL}, "value"),
             State({"type": "to-year", "index": dash.ALL}, "id"),
             prevent_initial_call=True,
         )
-        def update_wms_to_year(values, ids):
+        def update_wms_to_year(to_year_values, from_year_values, ids):
             triggered = dash.callback_context.triggered_id
-            if triggered is None:
-                return dash.no_update
-            wms_name = triggered["index"]
-            self._construct_wms_obj(
-                wms_name,
-                years=range(
-                    int(self.wms[wms_name].years[0]),
-                    get_index(values, ids, wms_name) + 1,
-                ),
+            return self._update_wms_year(
+                triggered,
+                what="to",
+                to_year_values=to_year_values,
+                from_year_values=from_year_values,
+                ids=ids,
             )
-            return True
 
         @callback(
             Output("wms-added", "data", allow_duplicate=True),
@@ -2478,9 +2523,6 @@ class GeoExplorer:
                 {"type": "delete-wms-btn", "tile": dash.ALL, "wms_name": dash.ALL},
                 "n_clicks",
             ),
-            # State(
-            #     {"type": "delete-wms-btn", "tile": dash.ALL, "wms_name": dash.ALL}, "id"
-            # ),
             prevent_initial_call=True,
         )
         def delete_wms(n_clicks):
@@ -2489,7 +2531,6 @@ class GeoExplorer:
                 return dash.no_update
             tile = triggered["tile"]
             wms_name = triggered["wms_name"]
-            print("delete wms", tile, wms_name)
             self._wms_deleted.add(wms_name + tile)
             return True
 
@@ -2660,42 +2701,84 @@ class GeoExplorer:
                 dbc.Row(
                     [
                         dbc.Col(
-                            dbc.Label([tile]),
-                            width="auto",
-                        ),
-                        dbc.Col(
                             get_button_with_tooltip(
-                                "❌",
+                                "x",
                                 id={
-                                    "type": "delete-wms-btn",
-                                    "tile": tile,
-                                    "wms_name": wms_name,
+                                    "type": "checked-btn-wms",
+                                    "index": wms_name + tile,
                                 },
-                                n_clicks=0,
-                                style={
-                                    "color": "red",
-                                    "border": "none",
-                                    "background": "none",
-                                    "cursor": "pointer",
-                                    "marginLeft": "auto",
-                                },
-                                tooltip_text="Remove wms layer",
-                            ),
+                                style=(
+                                    {
+                                        "color": FILE_CHECKED_COLOR,
+                                        "background-color": FILE_CHECKED_COLOR,
+                                    }
+                                    if checked
+                                    else {
+                                        "color": OFFWHITE,
+                                        "background-color": OFFWHITE,
+                                    }
+                                ),
+                                tooltip_text="Show/hide data",
+                            )
+                        ),
+                        # dbc.Col(
+                        #     get_button_with_tooltip(
+                        #         "❌",
+                        #         id={
+                        #             "type": "delete-wms-btn",
+                        #             "tile": tile,
+                        #             "wms_name": wms_name,
+                        #         },
+                        #         n_clicks=0,
+                        #         style={
+                        #             "color": "red",
+                        #             "border": "none",
+                        #             "background": "none",
+                        #             "cursor": "pointer",
+                        #         },
+                        #         tooltip_text="Remove wms layer",
+                        #     ),
+                        #     width="auto",
+                        #     style={
+                        #         "margin-left": "auto",
+                        #         "margin-right": 0,
+                        #         "display": "block",
+                        #         "overflow-x": "visible",
+                        #     },
+                        # ),
+                        dbc.Col(
+                            dbc.Label([tile]),
                             width="auto",
                         ),
                     ]
                 )
-                for tile in tiles
+                for tile, checked in tiles.items()
             ],
-            style={"height": f"{height}vh", "overflowY": "scroll"},
+            style={
+                "height": f"{height}vh",
+                "overflow-y": "auto",
+                "overflow-x": "visible",
+            },
         )
 
-    def _construct_wms_obj(self, wms_name: str, **kwargs):
-        if wms_name in self.wms:
-            constructor = self.wms[wms_name].__class__
-        else:
-            constructor = self._wms_constructors[wms_name]
+    def _update_wms_year(
+        self, triggered, what: str, from_year_values, to_year_values, ids
+    ):
+        if triggered is None:
+            return dash.no_update, dash.no_update
+        wms_name = triggered["index"]
+        i = [x["index"] for x in ids].index(wms_name)
+        from_year = max(from_year_values[i], self.wms[wms_name]._min_year)
+        to_year = min(to_year_values[i], CURRENT_YEAR)
+        from_year_values[i] = from_year
+        to_year_values[i] = to_year
+        years = list(range(from_year, to_year + 1))
+        self._construct_wms_obj(wms_name, years=years)
+        values = from_year_values if what == "from" else to_year_values
+        return True, values
 
+    def _construct_wms_obj(self, wms_name: str, **kwargs):
+        constructor = self.wms[wms_name].__class__
         defaults = {
             arg: default
             for arg, default in zip(
@@ -2714,8 +2797,9 @@ class GeoExplorer:
         else:
             current_kwargs = defaults
 
+        current_kwargs["show"] = True
+
         self.wms[wms_name] = constructor(**(current_kwargs | kwargs))
-        self._wms_is_checked[wms_name] = self._wms_is_checked.get(wms_name, True)
 
     def __str__(self) -> str:
         """String representation."""
@@ -2741,11 +2825,12 @@ class GeoExplorer:
         else:
             data.pop("selected_files")
 
-        data["filters"] = {
-            key: func for key, func in data["filters"].items() if func is not None
-        }
-        if not data["filters"]:
-            data.pop("filters")
+        if "filters" in data:
+            data["filters"] = {
+                key: func for key, func in data["filters"].items() if func is not None
+            }
+        if not data.get("filters", None):
+            data.pop("filters", None)
 
         if self._file_browser.favorites:
             data["favorites"] = self._file_browser.favorites
@@ -2851,17 +2936,17 @@ def get_data_table(*data, title_id: str, table_id: str, div_id: str, clear_id: s
                 dash_table.DataTable(
                     id=table_id,
                     style_header={
-                        "backgroundColor": "#2f2f2f",
+                        "background-color": "#2f2f2f",
                         "color": "white",
                         "fontWeight": "bold",
                     },
                     style_data={
-                        "backgroundColor": OFFWHITE,
+                        "background-color": OFFWHITE,
                         "color": "black",
                     },
                     style_table={
-                        "overflowX": "show",
-                        "overflowY": "scroll",
+                        "overflow-x": "visible",
+                        "overflow-y": "scroll",
                         "height": "1vh",
                     },
                     sort_action="native",

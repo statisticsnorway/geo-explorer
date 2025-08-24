@@ -74,7 +74,7 @@ def not_test_geo_explorer_locally():
             },
         ],
         wms={
-            "Norge i bilder": sg.NorgeIBilderWms(
+            "norge_i_bilder": sg.NorgeIBilderWms(
                 years=range(2020, 2024),
                 not_contains="Sentinel|CIR",
             ),
