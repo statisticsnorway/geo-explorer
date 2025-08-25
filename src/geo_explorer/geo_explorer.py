@@ -230,15 +230,12 @@ def _get_df(path, loaded_data, paths_concatted, override: bool = False):
 
 def _add_data_one_path(
     path,
-    loaded_data,
     bounds,
     column,
-    zoom,
     is_numeric,
     color_dict,
     bins,
     max_rows,
-    # currently_in_bounds,
     concatted_data,
     nan_color,
     alpha,
@@ -246,7 +243,18 @@ def _add_data_one_path(
     ns = Namespace("onEachFeatureToggleHighlight", "default")
     data = []
     if concatted_data is None:
-        return ([None], None, False)
+        return (
+            [
+                dl.Overlay(
+                    dl.GeoJSON(id={"type": "geojson", "filename": path}),
+                    name=_get_name(path),
+                    id={"type": "geojson-overlay", "filename": path},
+                    checked=True,
+                )
+            ],
+            None,
+            False,
+        )
     try:
         df = concatted_data.filter(pl.col("__file_path").str.contains(path))
     except Exception as e:
@@ -610,6 +618,7 @@ class GeoExplorer:
         selected_features: list[str] | None = None,
         column: str | None = None,
         wms=None,
+        wms_layers_checked: dict[str, list[str]] | None = None,
         center: tuple[float, float] | None = None,
         zoom: int | None = None,
         nan_color: str = "#969696",
@@ -638,7 +647,10 @@ class GeoExplorer:
             if constructor in {type(x) for x in self.wms.values()}:
                 continue
             self.wms[wms_name] = constructor()
-        self._wms_deleted = set()
+        wms_layers_checked = wms_layers_checked or {}
+        self.wms_layers_checked = {
+            wms_name: wms_layers_checked.get(wms_name) for wms_name in self.wms
+        }
         self.file_system = file_system or LocalFileSystem()
         self.nan_color = nan_color
         self.nan_label = nan_label
@@ -1587,30 +1599,40 @@ class GeoExplorer:
                 }, 1
 
         @callback(
-            Output({"type": "checked-btn-wms", "index": dash.MATCH}, "style"),
-            Output({"type": "checked-btn-wms", "index": dash.MATCH}, "n_clicks"),
-            Input({"type": "checked-btn-wms", "index": dash.ALL}, "n_clicks"),
-            State({"type": "checked-btn-wms", "index": dash.ALL}, "id"),
+            Output(
+                {"type": "checked-btn-wms", "wms_name": dash.MATCH, "tile": dash.MATCH},
+                "style",
+            ),
+            Input(
+                {"type": "checked-btn-wms", "wms_name": dash.ALL, "tile": dash.ALL},
+                "n_clicks",
+            ),
+            State(
+                {"type": "checked-btn-wms", "wms_name": dash.ALL, "tile": dash.ALL},
+                "id",
+            ),
             prevent_initial_call=True,
         )
         def check_or_uncheck(n_clicks_list, ids):
-            path = get_index_if_clicks(n_clicks_list, ids)
-            if not path:
+            triggered = dash.callback_context.triggered_id
+            if triggered is None:
                 return dash.no_update, dash.no_update
-            print(self._these_tiles)
-            is_checked = self._these_tiles[path]
+            wms_name = triggered["wms_name"]
+            tile = triggered["tile"]
+            is_checked: bool = tile in self.wms_layers_checked[wms_name]
             if not is_checked:
-                self._these_tiles[path] = True
+                self.wms_layers_checked[wms_name].append(tile)
                 return {
                     "color": FILE_CHECKED_COLOR,
                     "background-color": FILE_CHECKED_COLOR,
-                }, 0
+                }
             else:
-                self._these_tiles[path] = False
+                i = self.wms_layers_checked[wms_name].index(tile)
+                self.wms_layers_checked[wms_name].pop(i)
                 return {
                     "color": OFFWHITE,
                     "background-color": OFFWHITE,
-                }, 1
+                }
 
         @callback(
             Output("file-deleted", "children", allow_duplicate=True),
@@ -1952,6 +1974,10 @@ class GeoExplorer:
             Input("order-was-changed", "data"),
             Input("alpha", "value"),
             Input({"type": "checked-btn", "index": dash.ALL}, "n_clicks"),
+            Input(
+                {"type": "checked-btn-wms", "wms_name": dash.ALL, "tile": dash.ALL},
+                "style",
+            ),
             State("debounced_bounds", "value"),
             State("map", "zoom"),
             State("column-dropdown", "value"),
@@ -1971,6 +1997,7 @@ class GeoExplorer:
             order_was_changed,
             alpha,
             checked_clicks,
+            checked_wms_clicks,
             bounds,
             zoom,
             column,
@@ -1992,18 +2019,14 @@ class GeoExplorer:
             color_dict = dict(zip(column_values, colorpicker_values_list, strict=True))
 
             wms_layers = []
-            all_tiles = []
-            self._these_tiles = {}
+            alle_tiles_lists = []
             for wms_name, wms_obj in self.wms.items():
                 if wms_name not in wms_checklist:
-                    all_tiles.append(None)
+                    alle_tiles_lists.append(None)
                     continue
                 tiles = wms_obj._filter_tiles(shapely.box(*bounds))["name"]
-                these_tiles = {}
                 for tile in tiles:
-                    if (wms_name + tile) in self._wms_deleted:
-                        continue
-                    these_tiles[tile] = False
+                    is_checked: bool = tile in self.wms_layers_checked[wms_name]
                     wms_layers.append(
                         dl.Overlay(
                             dl.WMSTileLayer(
@@ -2013,30 +2036,33 @@ class GeoExplorer:
                                 transparent=True,
                             ),
                             name=tile,
-                            checked=wms_obj.show,
+                            checked=is_checked,
                         )
                     )
-                self._these_tiles |= {wms_name + tile: False for tile in these_tiles}
-                all_tiles.append(self._get_wms_list(these_tiles, wms_name))
+
+                alle_tiles_lists.append(
+                    self._get_wms_list(
+                        tiles, wms_name, self.wms_layers_checked[wms_name]
+                    )
+                )
 
             if is_numeric:
                 color_dict = {i: color for i, color in enumerate(color_dict.values())}
 
             add_data_func = partial(
                 _add_data_one_path,
-                loaded_data=self.loaded_data,
                 max_rows=self.max_rows,
                 concatted_data=self.concatted_data,
                 nan_color=self.nan_color,
                 bounds=bounds,
                 column=column,
-                zoom=zoom,
                 is_numeric=is_numeric,
                 color_dict=color_dict,
                 bins=bins,
                 alpha=alpha,
             )
 
+            # not parallelizing here because polars does and doesn't like double parallelization
             results = [
                 add_data_func(path)
                 for path, checked in self.selected_files.items()
@@ -2064,7 +2090,7 @@ class GeoExplorer:
                 dl.LayersControl(self._base_layers + wms_layers + data),
                 (out_alert if out_alert else None),
                 max_rows_component,
-                all_tiles,
+                alle_tiles_lists,
             )
 
         @callback(
@@ -2116,16 +2142,15 @@ class GeoExplorer:
         ):
             triggered = dash.callback_context.triggered_id
             debug_print("display_clicked_feature_attributes", triggered)
+            if triggered == "clear-table-clicked":
+                self.selected_features = {}
+                return [], [], None
             if triggered is None or (
                 self.selected_features and not features or not any(features)
             ):
                 clicked_ids = list(self.selected_features)
                 clicked_features = list(self.selected_features.values())
                 return clicked_features, clicked_ids, None
-
-            if triggered == "clear-table-clicked":
-                self.selected_features = {}
-                return [], [], None
 
             if not features or not any(features):
                 return dash.no_update, dash.no_update, None
@@ -2517,23 +2542,6 @@ class GeoExplorer:
             self._construct_wms_obj(wms_name, not_contains=not_contains)
             return True
 
-        @callback(
-            Output("wms-added", "data", allow_duplicate=True),
-            Input(
-                {"type": "delete-wms-btn", "tile": dash.ALL, "wms_name": dash.ALL},
-                "n_clicks",
-            ),
-            prevent_initial_call=True,
-        )
-        def delete_wms(n_clicks):
-            triggered = dash.callback_context.triggered_id
-            if triggered is None or not n_clicks or not any(n_clicks):
-                return dash.no_update
-            tile = triggered["tile"]
-            wms_name = triggered["wms_name"]
-            self._wms_deleted.add(wms_name + tile)
-            return True
-
         self.app.clientside_callback(
             """
             function(href) {
@@ -2694,8 +2702,12 @@ class GeoExplorer:
             },
         )
 
-    def _get_wms_list(self, tiles: list[str], wms_name: str) -> html.Ul:
+    def _get_wms_list(
+        self, tiles: list[str], wms_name: str, wms_layers_checked: list[str]
+    ) -> html.Ul:
         height = int(min(20, 10 + len(tiles)))
+        assert isinstance(wms_layers_checked, list), wms_layers_checked
+
         return html.Ul(
             [
                 dbc.Row(
@@ -2705,14 +2717,15 @@ class GeoExplorer:
                                 "x",
                                 id={
                                     "type": "checked-btn-wms",
-                                    "index": wms_name + tile,
+                                    "wms_name": wms_name,
+                                    "tile": tile,
                                 },
                                 style=(
                                     {
                                         "color": FILE_CHECKED_COLOR,
                                         "background-color": FILE_CHECKED_COLOR,
                                     }
-                                    if checked
+                                    if tile in wms_layers_checked
                                     else {
                                         "color": OFFWHITE,
                                         "background-color": OFFWHITE,
@@ -2721,38 +2734,13 @@ class GeoExplorer:
                                 tooltip_text="Show/hide data",
                             )
                         ),
-                        # dbc.Col(
-                        #     get_button_with_tooltip(
-                        #         "❌",
-                        #         id={
-                        #             "type": "delete-wms-btn",
-                        #             "tile": tile,
-                        #             "wms_name": wms_name,
-                        #         },
-                        #         n_clicks=0,
-                        #         style={
-                        #             "color": "red",
-                        #             "border": "none",
-                        #             "background": "none",
-                        #             "cursor": "pointer",
-                        #         },
-                        #         tooltip_text="Remove wms layer",
-                        #     ),
-                        #     width="auto",
-                        #     style={
-                        #         "margin-left": "auto",
-                        #         "margin-right": 0,
-                        #         "display": "block",
-                        #         "overflow-x": "visible",
-                        #     },
-                        # ),
                         dbc.Col(
                             dbc.Label([tile]),
                             width="auto",
                         ),
                     ]
                 )
-                for tile, checked in tiles.items()
+                for tile in tiles
             ],
             style={
                 "height": f"{height}vh",
