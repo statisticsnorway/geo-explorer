@@ -73,6 +73,13 @@ def not_test_geo_explorer_locally():
                 .assign(num_col=10000),
             },
         ],
+        wms={
+            "norge_i_bilder": sg.NorgeIBilderWms(
+                years=range(2020, 2024),
+                not_contains="Sentinel|CIR",
+            ),
+        },
+        wms_layers_checked={"norge_i_bilder": ["Oslo kommune 2020"]},
         selected_features=[1, 1.05],
         column="FYLKE",
         zoom=13,
