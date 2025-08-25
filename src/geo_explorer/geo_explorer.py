@@ -2756,13 +2756,6 @@ class GeoExplorer:
         height = int(min(20, 10 + len(tiles)))
         assert isinstance(wms_layers_checked, list), wms_layers_checked
 
-        wms_layers_with_checked = [
-            (tile, True) for tile in tiles if tile in wms_layers_checked
-        ]
-        wms_layers_unchecked = [
-            (tile, False) for tile in tiles if tile not in wms_layers_checked
-        ]
-
         return html.Ul(
             [
                 dbc.Row(
@@ -2780,7 +2773,7 @@ class GeoExplorer:
                                         "color": FILE_CHECKED_COLOR,
                                         "background-color": FILE_CHECKED_COLOR,
                                     }
-                                    if is_checked
+                                    if tile in wms_layers_checked
                                     else {
                                         "color": OFFWHITE,
                                         "background-color": OFFWHITE,
@@ -2795,7 +2788,7 @@ class GeoExplorer:
                         ),
                     ]
                 )
-                for tile, is_checked in (wms_layers_with_checked + wms_layers_unchecked)
+                for tile in tiles
             ],
             style={
                 "height": f"{height}vh",
