@@ -2024,7 +2024,7 @@ class GeoExplorer:
                 if wms_name not in wms_checklist:
                     alle_tiles_lists.append(None)
                     continue
-                tiles = wms_obj._filter_tiles(shapely.box(*bounds))["name"]
+                tiles = wms_obj.filter_tiles(shapely.box(*bounds))
                 for tile in tiles:
                     is_checked: bool = tile in self.wms_layers_checked[wms_name]
                     wms_layers.append(
