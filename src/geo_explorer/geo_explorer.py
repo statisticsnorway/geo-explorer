@@ -1992,7 +1992,6 @@ class GeoExplorer:
                 "style",
             ),
             State("debounced_bounds", "value"),
-            State("map", "zoom"),
             State("column-dropdown", "value"),
             State("bins", "children"),
             State({"type": "colorpicker", "column_value": dash.ALL}, "id"),
@@ -2012,7 +2011,6 @@ class GeoExplorer:
             checked_clicks,
             checked_wms_clicks,
             bounds,
-            zoom,
             column,
             bins,
             colorpicker_ids,
@@ -2031,33 +2029,7 @@ class GeoExplorer:
             column_values = [x["column_value"] for x in colorpicker_ids]
             color_dict = dict(zip(column_values, colorpicker_values_list, strict=True))
 
-            wms_layers = []
-            alle_tiles_lists = []
-            for wms_name, wms_obj in self.wms.items():
-                if wms_name not in wms_checklist:
-                    alle_tiles_lists.append(None)
-                    continue
-                tiles = wms_obj.filter_tiles(shapely.box(*bounds))
-                for tile in tiles:
-                    is_checked: bool = tile in self.wms_layers_checked[wms_name]
-                    wms_layers.append(
-                        dl.Overlay(
-                            dl.WMSTileLayer(
-                                url=wms_obj.url,
-                                layers=tile,
-                                format="image/png",
-                                transparent=True,
-                            ),
-                            name=tile,
-                            checked=is_checked,
-                        )
-                    )
-
-                alle_tiles_lists.append(
-                    self._get_wms_list(
-                        tiles, wms_name, self.wms_layers_checked[wms_name]
-                    )
-                )
+            wms_layers, all_tiles_lists = self._add_wms(wms_checklist, bounds)
 
             if is_numeric:
                 color_dict = {i: color for i, color in enumerate(color_dict.values())}
@@ -2103,7 +2075,7 @@ class GeoExplorer:
                 dl.LayersControl(self._base_layers + wms_layers + data),
                 (out_alert if out_alert else None),
                 max_rows_component,
-                alle_tiles_lists,
+                all_tiles_lists,
             )
 
         @callback(
@@ -2748,6 +2720,36 @@ class GeoExplorer:
             },
         )
 
+    def _add_wms(self, wms_checklist, bounds):
+        wms_layers = []
+        all_tiles_lists = []
+        for wms_name, wms_obj in self.wms.items():
+            if wms_name not in wms_checklist:
+                all_tiles_lists.append(None)
+                continue
+            tiles = wms_obj.filter_tiles(shapely.box(*bounds))
+            for tile in tiles:
+                is_checked: bool = tile in self.wms_layers_checked[wms_name]
+                if not is_checked:
+                    continue
+                wms_layers.append(
+                    dl.Overlay(
+                        dl.WMSTileLayer(
+                            url=wms_obj.url,
+                            layers=tile,
+                            format="image/png",
+                            transparent=True,
+                        ),
+                        name=tile,
+                        checked=is_checked,
+                    )
+                )
+
+            all_tiles_lists.append(
+                self._get_wms_list(tiles, wms_name, self.wms_layers_checked[wms_name])
+            )
+        return wms_layers, all_tiles_lists
+
     def _get_wms_list(
         self, tiles: list[str], wms_name: str, wms_layers_checked: list[str]
     ) -> html.Ul:
@@ -2802,9 +2804,11 @@ class GeoExplorer:
             return dash.no_update, dash.no_update
         wms_name = triggered["index"]
         i = [x["index"] for x in ids].index(wms_name)
+        if from_year_values[i] is None or to_year_values[i] is None:
+            return dash.no_update, dash.no_update
         from_year = max(from_year_values[i], self.wms[wms_name]._min_year)
-        to_year = min(to_year_values[i], CURRENT_YEAR)
         from_year_values[i] = from_year
+        to_year = min(to_year_values[i], CURRENT_YEAR)
         to_year_values[i] = to_year
         years = list(range(from_year, to_year + 1))
         self._construct_wms_obj(wms_name, years=years)
