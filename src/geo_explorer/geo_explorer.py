@@ -2380,19 +2380,25 @@ class GeoExplorer:
                         from_year = int(self.wms[wms_name].years[0])
                     except IndexError:
                         from_year = dash.no_update
-                    to_year = int(self.wms[wms_name].years[-1])
-                    not_contains = self.wms[wms_name].not_contains
-                    if not not_contains or (
-                        hasattr(not_contains, "__iter__") and not any(not_contains)
-                    ):
-                        not_contains = None
-                    else:
-                        not_contains = str(not_contains)
+                    try:
+                        to_year = int(self.wms[wms_name].years[-1])
+                    except IndexError:
+                        to_year = dash.no_update
+
+                    def as_none_if_falsy(x):
+                        if not x or (hasattr(x, "__iter__") and not any(x)):
+                            return None
+                        else:
+                            return str(x)
+
+                    not_contains = as_none_if_falsy(self.wms[wms_name].not_contains)
+                    contains = as_none_if_falsy(self.wms[wms_name].contains)
                     style = None
                 else:
                     from_year = None
                     to_year = None
                     not_contains = None
+                    contains = None
                     style = {"display": "none"}
 
                 items.append(
@@ -2459,6 +2465,27 @@ class GeoExplorer:
                                                 "Substrings to be excluded (use | for OR)",
                                                 target={
                                                     "type": "wms-not-contains",
+                                                    "index": wms_name,
+                                                },
+                                            ),
+                                        ],
+                                    ),
+                                    dbc.Row(
+                                        [
+                                            dcc.Input(
+                                                value=contains,
+                                                id={
+                                                    "type": "wms-contains",
+                                                    "index": wms_name,
+                                                },
+                                                type="text",
+                                                placeholder="Substrings to be included (use | for OR)",
+                                                debounce=0.25,
+                                            ),
+                                            dbc.Tooltip(
+                                                "Substrings to be included (use | for OR)",
+                                                target={
+                                                    "type": "wms-contains",
                                                     "index": wms_name,
                                                 },
                                             ),
@@ -2538,6 +2565,27 @@ class GeoExplorer:
             if not not_contains or not_contains == "None":
                 not_contains = None
             self._construct_wms_obj(wms_name, not_contains=not_contains)
+            return True
+
+        @callback(
+            Output("wms-added", "data", allow_duplicate=True),
+            Input({"type": "wms-contains", "index": dash.ALL}, "value"),
+            State({"type": "wms-contains", "index": dash.ALL}, "id"),
+            prevent_initial_call=True,
+        )
+        def update_wms_contains(values, ids):
+            triggered = dash.callback_context.triggered_id
+            if triggered is None:
+                return dash.no_update
+            wms_name = triggered["index"]
+            try:
+                # convert list string etc. to python list
+                contains = eval(get_index(values, ids, wms_name))
+            except Exception:
+                contains = str(get_index(values, ids, wms_name))
+            if not contains or contains == "None":
+                contains = None
+            self._construct_wms_obj(wms_name, contains=contains)
             return True
 
         self.app.clientside_callback(
@@ -2809,7 +2857,7 @@ class GeoExplorer:
         if self.selected_files:
             data = {"data": list(data.pop("selected_files", [])), **data}
         else:
-            data.pop("selected_files", None)
+            data.pop("selected_files", [])
 
         if "filters" in data:
             data["filters"] = {
