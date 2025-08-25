@@ -1,3 +1,4 @@
+import datetime
 import inspect
 import itertools
 import json
@@ -18,9 +19,6 @@ from time import perf_counter
 from typing import Any
 from typing import ClassVar
 
-import datetime
-import pyarrow
-import pyarrow.parquet as pq
 import dash
 import dash_bootstrap_components as dbc
 import dash_leaflet as dl
@@ -29,6 +27,8 @@ import matplotlib
 import numpy as np
 import pandas as pd
 import polars as pl
+import pyarrow
+import pyarrow.parquet as pq
 import sgis as sg
 import shapely
 from dash import Dash
@@ -46,11 +46,10 @@ from geopandas import GeoDataFrame
 from geopandas import GeoSeries
 from jenkspy import jenks_breaks
 from pandas.api.types import is_datetime64_any_dtype
-from shapely.errors import GEOSException
-from shapely.geometry import Polygon
-from shapely.geometry import Point
 from sgis.io.dapla_functions import _get_geo_metadata
-
+from shapely.errors import GEOSException
+from shapely.geometry import Point
+from shapely.geometry import Polygon
 
 from .file_browser import FileBrowser
 from .fs import LocalFileSystem

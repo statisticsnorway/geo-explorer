@@ -9,8 +9,8 @@ sys.path.insert(0, src)
 
 
 import sgis as sg
-
 from dash import Dash
+
 from geo_explorer import GeoExplorer
 from geo_explorer import LocalFileSystem
 from geo_explorer.geo_explorer import DEBUG

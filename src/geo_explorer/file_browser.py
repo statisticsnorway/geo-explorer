@@ -1,11 +1,11 @@
-import time
-from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor
 import datetime
+import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
-import numpy as np
 import dash
 import dash_bootstrap_components as dbc
+import numpy as np
 from dash import Input
 from dash import Output
 from dash import State
