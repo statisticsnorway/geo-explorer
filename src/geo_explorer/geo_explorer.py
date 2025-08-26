@@ -630,7 +630,7 @@ class GeoExplorer:
         zoom_animation: bool = False,
         splitted: bool = False,
         hard_click: bool = False,
-        filters: dict[str, Callable | pl.Expr | str] | None = None,
+        filters: dict[str, str] | None = None,
     ) -> None:
         """Initialiser."""
         self.start_dir = start_dir
@@ -658,6 +658,8 @@ class GeoExplorer:
         self.max_rows = max_rows
         self.alpha = alpha
         self.filters = filters or {}
+        if not all(isinstance(x, str) for x in self.filters.values()):
+            raise TypeError("Values in 'filters' dict must be strings")
         self.bounds_series = GeoSeries()
         self.selected_files: dict[str, int] = {}
         self.loaded_data: dict[str, pl.DataFrame] = {}
