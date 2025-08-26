@@ -1,6 +1,6 @@
 # geo-explorer
 
-Explore geodata interactively in an app.
+Explore geodata interactively with a file browser.
 
 Opprettet av:
 ort <ort@ssb.no>
@@ -23,47 +23,108 @@ pip install geo-explorer
 
 It's best to run the app in the terminal.
 
-Create a python file like this:
-
-```python
-from geo_explorer import GeoExplorer
-from geo_explorer import LocalFileSystem
-
-explorer = GeoExplorer(
-    start_dir="/buckets/delt-kart/analyse_data/klargjorte-data/2025",
-    favorites=[
-        "/buckets/delt-kart/analyse_data/klargjorte-data/2025",
-        "/buckets/delt-kart/visualisering_data/klargjorte-data/2025/parquet",
-    ],
-    zoom=13,
-    center=(59.91740845, 10.71394444),
-    file_system=LocalFileSystem(),
-    port=3000,
-).run()
-```
-
-And run the file.
-
-You can also use other file systems, for instance GCSFileSystem for Google Cloud Storage:
+Create a simple python file and run it:
 
 ```python
 from geo_explorer import GeoExplorer
 from gcsfs import GCSFileSystem
 
+DELT_KART = "ssb-areal-data-delt-kart-prod"
+YEAR = 2025
+
 GeoExplorer(
-    start_dir="ssb-areal-data-delt-kart-prod/analyse_data/klargjorte-data/2025",
+    start_dir=f"{DELT_KART}/analyse_data/klargjorte-data/{YEAR}",
     favorites=[
-        "ssb-areal-data-delt-kart-prod/analyse_data/klargjorte-data/2025",
-        "ssb-areal-data-delt-kart-prod/visualisering_data/klargjorte-data/2025/parquet",
+        f"{DELT_KART}/analyse_data/klargjorte-data/{YEAR}",
+        f"{DELT_KART}/visualisering_data/klargjorte-data/{YEAR}/parquet",
     ],
-    zoom=13,
     center=(59.91740845, 10.71394444),
+    zoom=13,
     file_system=GCSFileSystem(),
     port=3000,
 ).run()
 ```
 
-The file system should act like fsspec's AbstractFileSystem and implement the methods *ls* and *glob*.
+```shell
+poetry run python my_file.py
+# or
+python my_file.py
+```
+
+### Export as code
+The export button can be used to "save" your map. Copy the printed code and paste it into a new file. Running this file will give you an app with the same bounds, data, coloring and attribute table.
+
+### Starting the app with data already loaded, filtered and colored
+Use the 'data' argument to add data to the map at startup. 'data' can be:
+- a list of file paths
+- a dict with GeoDataFrames as values and labels as keys
+- a dict with file paths as keys and filter function (or None) as value (note that the filter function must be formated as a string!)
+
+Set 'column' to color the geometries.
+
+Optionally specify the colors with the 'color_dict' argument (with column values as dict keys and color codes (hex) or named colors (https://matplotlib.org/stable/gallery/color/named_colors.html) as dict values).
+
+Here is an example of a GeoExplorer app where data is loaded, filtered and colored:
+
+```python
+import sgis as sg
+
+# Create a custom GeoDataFrame to add to the map
+jernbanetorget = sg.to_gdf([10.7535581, 59.9110967], crs=4326).to_crs(25833)
+jernbanetorget.geometry = jernbanetorget.buffer(500)
+jernbanetorget["what"] = "Jernbanetorget buffered 500 meters"
+
+GeoExplorer(
+    start_dir=f"{DELT_KART}/analyse_data/klargjorte-data/{YEAR}",
+    favorites=[
+        f"{DELT_KART}/analyse_data/klargjorte-data/{YEAR}",
+        f"{DELT_KART}/visualisering_data/klargjorte-data/{YEAR}/parquet",
+    ],
+    data={
+        "jernbanetorget_500m": jernbanetorget,
+        f"{DELT_KART}/analyse_data/klargjorte-data/{YEAR}/ENTUR_Holdeplasser_punkt_p{YEAR}_v1.parquet": "kjoeretoey != 'fly'",
+    },
+    column="kjoeretoey",
+    color_dict={
+        "jernbane": "darkgreen",
+        "buss": "red",
+        "trikk": "deepskyblue",
+        "tbane": "yellow",
+        "baat": "navy",
+    },
+    center=(59.91740845, 10.71394444),
+    zoom=13,
+    file_system=GCSFileSystem(),
+    port=3000,
+).run()
+```
+
+### filter functions
+Filtering data can be done in the GeoExplorer init, as shown above, or in the app.
+
+Filter functions can be:
+- polars expression or an iterable of such, e.g.: *(pl.col("FYLKE") != "50", pl.col("FYLKE") != "03")*
+- lambda functions accepted by pandas.loc, e.g. *lambda x: x["kjoeretoey"] != "fly"*
+- queries accepted by pandas.query, e.g. *kjoeretoey != "fly"*
+
+Note that the filter functions must be wrapped in quotation marks ("") if used in the GeoExplorer init.
+
+For large datasets, the polars approach might be noticeably faster, both because polars is faster and because the data is stored as polars.DataFrames and converted to pandas and back if the polars filtering fails.
+
+### Local files
+For local files, use the LocalFileSystem class, which simply implements glob and ls methods based on the standard library (os and glob).
+
+```python
+from geo_explorer import GeoExplorer
+from geo_explorer import LocalFileSystem
+
+GeoExplorer(
+    start_dir="ssb-areal-data-delt-kart-prod/analyse_data/klargjorte-data/2025",
+    file_system=GCSFileSystem(),
+).run()
+```
+
+Other file systems can be used, as long as it acts like fsspec's AbstractFileSystem and implement the methods *ls* and *glob*. The methods should take the argument 'detail', which, if set to True, will return a dict for each listed path with the keys "updated" (timestamp), "size" (bytes), "name" (full path) and "type" ("directory" or "file").
 
 ## Developer information
 

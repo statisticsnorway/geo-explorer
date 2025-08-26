@@ -19,6 +19,7 @@ from time import perf_counter
 from typing import Any
 from typing import ClassVar
 
+import matplotlib.colors as mcolors
 import dash
 import dash_bootstrap_components as dbc
 import dash_leaflet as dl
@@ -129,13 +130,20 @@ def _change_order(explorer, n_clicks_list, ids, buttons, what: str):
     return buttons, True
 
 
+def _named_color_to_hex(color: str) -> str:
+    return mcolors.to_hex(color)
+
+
 def _get_colorpicker_container(color_dict: dict[str, str]) -> html.Div:
     def to_python_type(x):
         if isinstance(x, Number):
             return float(x)
         return x
 
-    color_dict = {to_python_type(key): value for key, value in color_dict.items()}
+    color_dict = {
+        to_python_type(column_value): color
+        for column_value, color in color_dict.items()
+    }
 
     return html.Div(
         [
@@ -146,7 +154,7 @@ def _get_colorpicker_container(color_dict: dict[str, str]) -> html.Div:
                             type="color",
                             id={
                                 "type": "colorpicker",
-                                "column_value": value,
+                                "column_value": column_value,
                             },
                             value=color,
                             style={"width": 50, "height": 50},
@@ -154,7 +162,7 @@ def _get_colorpicker_container(color_dict: dict[str, str]) -> html.Div:
                         width="auto",
                     ),
                     dbc.Col(
-                        dbc.Label([value]),
+                        dbc.Label([column_value]),
                         width="auto",
                     ),
                     dbc.Col(
@@ -162,7 +170,7 @@ def _get_colorpicker_container(color_dict: dict[str, str]) -> html.Div:
                             "❌",
                             id={
                                 "type": "delete-cat-btn",
-                                "index": value,
+                                "index": column_value,
                             },
                             n_clicks=0,
                             style={
@@ -184,7 +192,7 @@ def _get_colorpicker_container(color_dict: dict[str, str]) -> html.Div:
                     "marginBottom": "5px",
                 },
             )
-            for value, color in color_dict.items()
+            for column_value, color in color_dict.items()
         ],
         id="color-container",
     )
@@ -613,7 +621,7 @@ class GeoExplorer:
         favorites: list[str] | None = None,
         port: int = 8055,
         file_system: AbstractFileSystem | None = None,
-        data: list[str] | None = None,
+        data: dict[str, str | GeoDataFrame] | list[str | dict] | None = None,
         selected_features: list[str] | None = None,
         column: str | None = None,
         wms=None,
@@ -630,7 +638,6 @@ class GeoExplorer:
         zoom_animation: bool = False,
         splitted: bool = False,
         hard_click: bool = False,
-        filters: dict[str, str] | None = None,
     ) -> None:
         """Initialiser."""
         self.start_dir = start_dir
@@ -641,6 +648,11 @@ class GeoExplorer:
         self.bounds = None
         self.column = column
         self.color_dict = color_dict or {}
+        self.color_dict = {
+            key: (color if color.startswith("#") else _named_color_to_hex(color))
+            for key, color in self.color_dict.items()
+        }
+
         self.wms = dict(wms or {})
         for wms_name, constructor in self._wms_constructors.items():
             if constructor in {type(x) for x in self.wms.values()}:
@@ -657,9 +669,6 @@ class GeoExplorer:
         self.hard_click = hard_click
         self.max_rows = max_rows
         self.alpha = alpha
-        self.filters = filters or {}
-        if not all(isinstance(x, str) for x in self.filters.values()):
-            raise TypeError("Values in 'filters' dict must be strings")
         self.bounds_series = GeoSeries()
         self.selected_files: dict[str, int] = {}
         self.loaded_data: dict[str, pl.DataFrame] = {}
@@ -1012,20 +1021,28 @@ class GeoExplorer:
 
         error_mess = "'data' must be a list of file paths or a dict of GeoDataFrames."
         bounds_series_dict = {}
+        if isinstance(data, dict):
+            data = [data]
+
+        self._filters = {}
         for x in data or []:
             if isinstance(x, (str | os.PathLike | PurePath)):
                 self.selected_files[_standardize_path(x)] = True
                 continue
             elif not isinstance(x, dict):
                 raise ValueError(error_mess)
-            for key, df in x.items():
-                if not isinstance(df, GeoDataFrame):
-                    raise ValueError(error_mess)
+            for key, value in x.items():
                 key = _standardize_path(key)
-                df = _fix_df(df)
-                bounds_series_dict[key] = shapely.box(*df.total_bounds)
+                if value is not None and not isinstance(value, (GeoDataFrame | str)):
+                    raise ValueError(error_mess)
+                elif not isinstance(value, GeoDataFrame):
+                    self.selected_files[key] = True
+                    self._filters[key] = value
+                    continue
+                value = _fix_df(value)
+                bounds_series_dict[key] = shapely.box(*value.total_bounds)
                 self.loaded_data[key] = pl.from_pandas(
-                    df.assign(geometry=df.geometry.to_wkb())
+                    value.assign(geometry=value.geometry.to_wkb())
                 )
                 self.selected_files[key] = True
 
@@ -1422,7 +1439,7 @@ class GeoExplorer:
             for path in self.selected_files:
                 try:
                     filter_function = get_index(filter_functions, filter_ids, path)
-                    self.filters[path] = filter_function
+                    self._filters[path] = filter_function
                 except ValueError:
                     pass
 
@@ -1559,7 +1576,7 @@ class GeoExplorer:
                         dbc.Row(
                             [
                                 dcc.Input(
-                                    self.filters.get(path, None),
+                                    self._filters.get(path, None),
                                     placeholder="Filter (with polars or pandas). E.g. komm_nr == '0301'",
                                     id={
                                         "type": "filter",
@@ -2684,8 +2701,8 @@ class GeoExplorer:
                 if not len(df):
                     continue
                 # filtering by function after collect because LazyFrame doesnt implement to_pandas.
-                if self.filters.get(path, None) is not None:
-                    df, alert = _filter_data(df, self.filters[path])
+                if self._filters.get(path, None) is not None:
+                    df, alert = _filter_data(df, self._filters[path])
                     alerts.add(alert)
                 if not len(df):
                     continue
@@ -2862,16 +2879,15 @@ class GeoExplorer:
         }
 
         if self.selected_files:
-            data = {"data": list(data.pop("selected_files", [])), **data}
+            data = {
+                "data": {
+                    key: self._filters.get(key)
+                    for key in data.pop("selected_files", [])
+                },
+                **data,
+            }
         else:
             data.pop("selected_files", [])
-
-        if "filters" in data:
-            data["filters"] = {
-                key: func for key, func in data["filters"].items() if func is not None
-            }
-        if not data.get("filters", None):
-            data.pop("filters", None)
 
         if self._file_browser.favorites:
             data["favorites"] = self._file_browser.favorites

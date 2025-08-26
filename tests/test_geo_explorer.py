@@ -57,27 +57,20 @@ def not_test_geo_explorer_locally():
             "C:/users/ort/OneDrive - Statistisk sentralbyrå/data",
             "C:/users/ort",
         ],
-        data=[
-            "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/N5000_fylke_flate_2023.parquet",
-            "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/N5000_fylke_flate_2024.parquet",
-            "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/ABAS_kommune_flate_p2023_v1.parquet",
-            {
-                "df1": sg.to_gdf((10.8, 59.9), 4326).assign(num_col=100),
-                "df2": sg.to_gdf([(10.8, 59.9), (10.8001, 59.9001)], 4326)
-                .to_crs(3035)
-                .pipe(sg.buff, 1000)
-                .assign(num_col=1000),
-                "df3": sg.to_gdf((10.8, 59.9), 4326)
-                .to_crs(3035)
-                .pipe(sg.buff, 1000)
-                .pipe(sg.to_lines)
-                .assign(num_col=10000),
-            },
-        ],
-        filters={
+        data={
             "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/N5000_fylke_flate_2023.parquet": 'lambda x: x["FYLKE"] != "50"',
             "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/N5000_fylke_flate_2024.parquet": "FYLKE != '50'",
-            "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/ABAS_kommune_flate_p2023_v1.parquet": 'pl.col("FYLKE") != "50"',
+            "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/ABAS_kommune_flate_p2023_v1.parquet": '(pl.col("FYLKE") != "50", pl.col("FYLKE") != "03")',
+            "df1": sg.to_gdf((10.8, 59.9), 4326).assign(num_col=100),
+            "df2": sg.to_gdf([(10.8, 59.9), (10.8001, 59.9001)], 4326)
+            .to_crs(3035)
+            .pipe(sg.buff, 1000)
+            .assign(num_col=1000),
+            "df3": sg.to_gdf((10.8, 59.9), 4326)
+            .to_crs(3035)
+            .pipe(sg.buff, 1000)
+            .pipe(sg.to_lines)
+            .assign(num_col=10000),
         },
         wms={
             "norge_i_bilder": sg.NorgeIBilderWms(
