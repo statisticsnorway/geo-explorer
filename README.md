@@ -62,6 +62,8 @@ Here is an example of a GeoExplorer app where data is loaded, filtered and color
 ```python
 import sgis as sg
 
+entur_path = f"{DELT_KART}/analyse_data/klargjorte-data/{YEAR}/ENTUR_Holdeplasser_punkt_p{YEAR}_v1.parquet"
+
 # Create a custom GeoDataFrame to add to the map
 jernbanetorget = sg.to_gdf([10.7535581, 59.9110967], crs=4326).to_crs(25833)
 jernbanetorget.geometry = jernbanetorget.buffer(500)
@@ -75,9 +77,9 @@ GeoExplorer(
     ],
     data={
         "jernbanetorget_500m": jernbanetorget,
-        f"{DELT_KART}/analyse_data/klargjorte-data/{YEAR}/ENTUR_Holdeplasser_punkt_p{YEAR}_v1.parquet": "kjoeretoey != 'fly'",
+        entur_path: "kjoeretoey != 'fly'",
     },
-    column="kjoeretoey",
+    column="kjoeretoey", # column to color the data
     color_dict={
         "jernbane": "darkgreen",
         "buss": "red",
@@ -92,14 +94,14 @@ GeoExplorer(
 ).run()
 ```
 
-Use the 'data' argument to add data to the map at startup. 'data' can be:
+The 'data' argument can be either:
 - a list of file paths
-- a dict with GeoDataFrames as values and labels as keys
+- a dict with labels as keys and GeoDataFrames as values
 - a dict with file paths as keys and filter function (or None) as value (note that the filter function must be formated as a string!)
 
-Set 'column' to color the geometries.
+Set the 'column' argument to color the geometries.
 
-Optionally specify the colors with the 'color_dict' argument (with column values as dict keys and color codes (hex) or named colors (https://matplotlib.org/stable/gallery/color/named_colors.html) as dict values).
+Optionally specify what colors with the 'color_dict' argument (with column values as dict keys and color codes (hex) or named colors (https://matplotlib.org/stable/gallery/color/named_colors.html) as dict values).
 
 ### Filter functions
 Filtering data can be done in the GeoExplorer init, as shown above, or in the app.
