@@ -54,7 +54,7 @@ python my_file.py
 ```
 
 ### Export as code
-The export button can be used to "save" your map. Copy the printed code and paste it into a new file. Running this file will give you an app with the same bounds, data, coloring and attribute table.
+The export button can be used to "save" your map. Copy the printed code and paste it into a new file. Running this file will give you an app with the same bounds, data and coloring.
 
 ### Starting the app with data loaded, filtered and colored
 Here is an example of a GeoExplorer app where data is loaded, filtered and colored:
@@ -79,7 +79,7 @@ GeoExplorer(
         "jernbanetorget_500m": jernbanetorget,
         entur_path: "kjoeretoey != 'fly'",
     },
-    column="kjoeretoey", # column to color the data
+    column="kjoeretoey",
     color_dict={
         "jernbane": "darkgreen",
         "buss": "red",

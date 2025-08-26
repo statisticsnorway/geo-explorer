@@ -61,9 +61,6 @@ from .utils import get_button_with_tooltip
 
 OFFWHITE: str = "#ebebeb"
 FILE_CHECKED_COLOR: str = "#3e82ff"
-TABLE_TITLE_SUFFIX: str = (
-    "(NOTE: to properly zoom to a feature, you may need to click on two separate cells on the same row)"
-)
 DEFAULT_ZOOM: int = 10
 DEFAULT_CENTER: tuple[float, float] = (59.91740845, 10.71394444)
 CURRENT_YEAR: int = datetime.datetime.now().year
@@ -199,8 +196,6 @@ def _get_colorpicker_container(color_dict: dict[str, str]) -> html.Div:
 
 
 def _get_df(path, loaded_data, paths_concatted, override: bool = False):
-    # cols_to_keep = ["_unique_id", "minx", "miny", "maxx", "maxy", "geometry"]
-
     t = perf_counter()
     debug_print("_get_df", path, path in loaded_data, path in paths_concatted)
     if path in loaded_data and not override and path in paths_concatted:
@@ -1211,7 +1206,7 @@ class GeoExplorer:
             Output("map", "bounds"),
             Output("map", "zoom"),
             Output("map", "center"),
-            State("map-bounds", "data"),
+            Input("map-bounds", "data"),
             Input("map-zoom", "data"),
             State("map-center", "data"),
             prevent_initial_call=True,
@@ -2111,7 +2106,7 @@ class GeoExplorer:
         def update_clicked_features_title(features):
             if not features:
                 return dash.no_update
-            return (f"Clicked features (n={len(features)}) {TABLE_TITLE_SUFFIX}",)
+            return (f"Clicked features (n={len(features)})",)
 
         @callback(
             Output("all-features-title", "children"),
@@ -2121,8 +2116,8 @@ class GeoExplorer:
             if not features:
                 return dash.no_update
             return (
-                f"All features (n={len(features)}) {TABLE_TITLE_SUFFIX}"
-                " (also note that for partitioned files, only partitions in bounds are loaded)",
+                f"All features (n={len(features)})"
+                " (note that for partitioned files, only partitions in bounds are loaded)",
             )
 
         @callback(
@@ -2274,7 +2269,19 @@ class GeoExplorer:
 
             df, _ = self._concat_data(bounds=None, paths=[clicked_path])
             if df is None or not len(df):
-                return None
+                _read_files(
+                    self,
+                    [
+                        x
+                        for x in self.bounds_series[
+                            lambda x: x.index.str.contains(clicked_path)
+                        ].index
+                        if x not in self.loaded_data
+                    ],
+                )
+                df, _ = self._concat_data(bounds=None, paths=[clicked_path])
+                if df is None or not len(df):
+                    return None
             df = df.drop("geometry")
             if not len(df.columns):
                 return None
@@ -2287,12 +2294,12 @@ class GeoExplorer:
             Output("feature-table-rows", "style_table"),
             Output("feature-table-rows", "hidden_columns"),
             Input("all-features", "data"),
-            State("column-dropdown", "options"),
             State("feature-table-rows", "style_table"),
-            # prevent_initial_call=True,
         )
-        def update_table(data, column_dropdown, style_table):
-            return self._update_table(data, column_dropdown, style_table)
+        def update_table(data, style_table):
+            return self._update_table(
+                data, column_dropdown=_UseColumns(), style_table=style_table
+            )
 
         @callback(
             Output("feature-table-rows-clicked", "columns"),
@@ -2302,7 +2309,6 @@ class GeoExplorer:
             Input("clicked-features", "data"),
             State("column-dropdown", "options"),
             State("feature-table-rows-clicked", "style_table"),
-            # prevent_initial_call=True,
         )
         def update_table_clicked(data, column_dropdown, style_table):
             return self._update_table(data, column_dropdown, style_table)
@@ -2326,8 +2332,13 @@ class GeoExplorer:
                 if active is None:
                     return dash.no_update, dash.no_update, dash.no_update
                 unique_id = active_clicked["row_id"]
+
+            i = int(unique_id)
+            file = list(self.loaded_data)[i]
+            df, _ = self._concat_data(bounds=None, paths=[file])
+
             matches = (
-                self.concatted_data.lazy()
+                df.lazy()
                 .filter(pl.col("_unique_id") == unique_id)
                 .select("minx", "miny", "maxx", "maxy")
                 .collect()
@@ -2611,7 +2622,13 @@ class GeoExplorer:
     def _update_table(self, data, column_dropdown, style_table):
         if not data:
             return None, None, style_table | {"height": "1vh"}, None
-        if column_dropdown is None:
+        if isinstance(column_dropdown, _UseColumns):
+            column_dropdown = [
+                {"label": col}
+                for col in next(iter(data))
+                if col not in ["minx", "miny", "maxx", "maxy", "__file_path"]
+            ]
+        elif column_dropdown is None:
             column_dropdown = self._get_column_dropdown_options()
         all_columns = {x["label"] for x in column_dropdown}
         if not self.splitted:
@@ -2675,9 +2692,9 @@ class GeoExplorer:
         dfs = []
         alerts = set()
         for path in self.selected_files:
-            if paths and path not in paths:
-                continue
             for key in self.loaded_data:
+                if paths and (path not in paths and key not in paths):
+                    continue
                 if path not in key:
                     continue
                 df = self.loaded_data[key].lazy().with_columns(__file_path=pl.lit(key))
@@ -3107,3 +3124,7 @@ def _get_force_categorical_button(
                 "color": "white",
             },
         )
+
+
+class _UseColumns:
+    pass
