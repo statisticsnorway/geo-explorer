@@ -2269,6 +2269,7 @@ class GeoExplorer:
 
             df, _ = self._concat_data(bounds=None, paths=[clicked_path])
             if df is None or not len(df):
+                # read data out of bounds to get table
                 _read_files(
                     self,
                     [
