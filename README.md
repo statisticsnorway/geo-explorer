@@ -23,7 +23,7 @@ pip install geo-explorer
 
 It's best to run the app in the terminal.
 
-Create a simple python file and run it:
+Create a simple python file:
 
 ```python
 from geo_explorer import GeoExplorer
@@ -45,6 +45,8 @@ GeoExplorer(
 ).run()
 ```
 
+And run it:
+
 ```shell
 poetry run python my_file.py
 # or
@@ -54,16 +56,7 @@ python my_file.py
 ### Export as code
 The export button can be used to "save" your map. Copy the printed code and paste it into a new file. Running this file will give you an app with the same bounds, data, coloring and attribute table.
 
-### Starting the app with data already loaded, filtered and colored
-Use the 'data' argument to add data to the map at startup. 'data' can be:
-- a list of file paths
-- a dict with GeoDataFrames as values and labels as keys
-- a dict with file paths as keys and filter function (or None) as value (note that the filter function must be formated as a string!)
-
-Set 'column' to color the geometries.
-
-Optionally specify the colors with the 'color_dict' argument (with column values as dict keys and color codes (hex) or named colors (https://matplotlib.org/stable/gallery/color/named_colors.html) as dict values).
-
+### Starting the app with data loaded, filtered and colored
 Here is an example of a GeoExplorer app where data is loaded, filtered and colored:
 
 ```python
@@ -99,7 +92,16 @@ GeoExplorer(
 ).run()
 ```
 
-### filter functions
+Use the 'data' argument to add data to the map at startup. 'data' can be:
+- a list of file paths
+- a dict with GeoDataFrames as values and labels as keys
+- a dict with file paths as keys and filter function (or None) as value (note that the filter function must be formated as a string!)
+
+Set 'column' to color the geometries.
+
+Optionally specify the colors with the 'color_dict' argument (with column values as dict keys and color codes (hex) or named colors (https://matplotlib.org/stable/gallery/color/named_colors.html) as dict values).
+
+### Filter functions
 Filtering data can be done in the GeoExplorer init, as shown above, or in the app.
 
 Filter functions can be:
