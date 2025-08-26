@@ -630,7 +630,7 @@ class GeoExplorer:
         zoom_animation: bool = False,
         splitted: bool = False,
         hard_click: bool = False,
-        filters: dict[str, Callable | pl.Expr | str] | None = None,
+        filters: dict[str, str] | None = None,
     ) -> None:
         """Initialiser."""
         self.start_dir = start_dir
@@ -658,6 +658,8 @@ class GeoExplorer:
         self.max_rows = max_rows
         self.alpha = alpha
         self.filters = filters or {}
+        if not all(isinstance(x, str) for x in self.filters.values()):
+            raise TypeError("Values in 'filters' dict must be strings")
         self.bounds_series = GeoSeries()
         self.selected_files: dict[str, int] = {}
         self.loaded_data: dict[str, pl.DataFrame] = {}
@@ -2372,6 +2374,7 @@ class GeoExplorer:
                     not_contains = None
                     contains = None
                     style = {"display": "none"}
+                    # TODO close wms also on reload
 
                 items.append(
                     dbc.Row(
@@ -2801,11 +2804,11 @@ class GeoExplorer:
         self, triggered, what: str, from_year_values, to_year_values, ids
     ):
         if triggered is None:
-            return dash.no_update, dash.no_update
+            return dash.no_update, [dash.no_update for _ in ids]
         wms_name = triggered["index"]
         i = [x["index"] for x in ids].index(wms_name)
         if from_year_values[i] is None or to_year_values[i] is None:
-            return dash.no_update, dash.no_update
+            return dash.no_update, [dash.no_update for _ in ids]
         from_year = max(from_year_values[i], self.wms[wms_name]._min_year)
         from_year_values[i] = from_year
         to_year = min(to_year_values[i], CURRENT_YEAR)
