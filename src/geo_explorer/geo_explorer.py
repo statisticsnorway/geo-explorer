@@ -2372,6 +2372,7 @@ class GeoExplorer:
                     not_contains = None
                     contains = None
                     style = {"display": "none"}
+                    # TODO close wms also on reload
 
                 items.append(
                     dbc.Row(
@@ -2801,11 +2802,11 @@ class GeoExplorer:
         self, triggered, what: str, from_year_values, to_year_values, ids
     ):
         if triggered is None:
-            return dash.no_update, dash.no_update
+            return dash.no_update, [dash.no_update for _ in ids]
         wms_name = triggered["index"]
         i = [x["index"] for x in ids].index(wms_name)
         if from_year_values[i] is None or to_year_values[i] is None:
-            return dash.no_update, dash.no_update
+            return dash.no_update, [dash.no_update for _ in ids]
         from_year = max(from_year_values[i], self.wms[wms_name]._min_year)
         from_year_values[i] = from_year
         to_year = min(to_year_values[i], CURRENT_YEAR)
