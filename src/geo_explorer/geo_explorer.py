@@ -305,6 +305,7 @@ class GeoExplorer:
                     dbc.Row(html.Div(id="alert2")),
                     dbc.Row(html.Div(id="alert3")),
                     dbc.Row(html.Div(id="alert4")),
+                    dbc.Row(html.Div(id="alert5")),
                     dbc.Row(html.Div(id="new-file-added")),
                     html.Div(id="file-deleted"),
                     dbc.Row(
@@ -644,9 +645,13 @@ class GeoExplorer:
                     self._filters[key] = value
                     continue
                 value = _fix_df(value)
-                bounds_series_dict[key] = shapely.box(*value.total_bounds)
-                self.loaded_data[key] = pl.from_pandas(
-                    value.assign(geometry=value.geometry.to_wkb())
+                value = pl.from_pandas(value)
+                self.loaded_data[key] = value
+                bounds_series_dict[key] = shapely.box(
+                    float(value["minx"].min()),
+                    float(value["miny"].min()),
+                    float(value["maxx"].max()),
+                    float(value["maxy"].max()),
                 )
                 self.selected_files[key] = True
 
@@ -659,8 +664,8 @@ class GeoExplorer:
             minx, miny, maxx, maxy = None, None, None, None
 
         if not self.selected_files:
-            self.center = DEFAULT_CENTER
-            self.zoom = DEFAULT_ZOOM
+            self.center = center if center is not None else DEFAULT_CENTER
+            self.zoom = zoom or DEFAULT_ZOOM
             self.app.layout = get_layout
             self._register_callbacks()
             return
@@ -1002,15 +1007,14 @@ class GeoExplorer:
             Output("is_splitted", "data"),
             Output("column-dropdown", "value"),
             Input("splitter", "n_clicks"),
-            Input("file-deleted", "children"),
+            Input("alert5", "children"),
         )
-        def set_column_to_split_index(splitter_clicks, file_deleted):
+        def set_column_to_split_index(splitter_clicks, alert):
             if not self.selected_files:
                 return False, None
             triggered = dash.callback_context.triggered_id
-            if triggered == "file-deleted":
-                # TODO: why is this needed?
-                return dash.no_update, dash.no_update
+            if triggered == "alert5":
+                return False, None
             if triggered is not None:
                 self.splitted = not self.splitted
             if self.splitted:
@@ -1465,6 +1469,7 @@ class GeoExplorer:
             Output("is-numeric", "children"),
             Output("force-categorical", "children"),
             Output("colors-are-updated", "data"),
+            Output("alert5", "children"),
             Input("cmap-placeholder", "value"),
             Input("k", "value"),
             Input("force-categorical", "n_clicks"),
@@ -1488,14 +1493,21 @@ class GeoExplorer:
             if not self.selected_files:
                 self.column = None
                 self.color_dict = {}
-                return html.Div(), None, False, None, 1
+                return html.Div(), None, False, None, 1, None
             elif column and column != self.column:
                 self.color_dict = {}
                 self.column = column
             elif not column and triggered is None:
                 column = self.column
             elif self.concatted_data is None:
-                return [], None, dash.no_update, dash.no_update, dash.no_update
+                return (
+                    [],
+                    None,
+                    dash.no_update,
+                    dash.no_update,
+                    dash.no_update,
+                    None,
+                )
             else:
                 self.column = column
 
@@ -1536,6 +1548,7 @@ class GeoExplorer:
                     False,
                     None,
                     1,
+                    None,
                 )
 
             bounds = self._nested_bounds_to_bounds(bounds)
@@ -1545,7 +1558,20 @@ class GeoExplorer:
                 bounds,
             )[column]
             values_no_nans = values.drop_nans().drop_nulls()
-            values_no_nans_unique = set(values_no_nans.unique())
+            try:
+                values_no_nans_unique = set(values_no_nans.unique())
+            except TypeError as e:
+                self.column = None
+                self.color_dict = {}
+                alert = dbc.Alert(str(e), color="warning", dismissable=True)
+                return (
+                    dash.no_update,
+                    dash.no_update,
+                    dash.no_update,
+                    dash.no_update,
+                    dash.no_update,
+                    alert,
+                )
 
             force_categorical_button = _get_force_categorical_button(
                 values_no_nans, force_categorical_clicks
@@ -1628,6 +1654,7 @@ class GeoExplorer:
                 is_numeric,
                 force_categorical_button,
                 1,
+                None,
             )
 
         @callback(
@@ -1789,7 +1816,7 @@ class GeoExplorer:
             Output("clicked-ids", "data"),
             Output("alert4", "children"),
             Input("clear-table-clicked", "n_clicks"),
-            Input("update-table", "n_clicks"),
+            Input("update-table", "data"),
             Input({"type": "geojson", "filename": dash.ALL}, "n_clicks"),
             State({"type": "geojson", "filename": dash.ALL}, "clickData"),
             State({"type": "geojson", "filename": dash.ALL}, "id"),
@@ -3007,6 +3034,8 @@ def _fix_df(df: GeoDataFrame) -> GeoDataFrame:
         df = df.to_crs(4326)
     bounds = df.geometry.bounds.astype("float32[pyarrow]")
     df[["minx", "miny", "maxx", "maxy"]] = bounds[["minx", "miny", "maxx", "maxy"]]
+    df = pd.DataFrame(df)
+    df["geometry"] = shapely.to_wkb(df["geometry"].values)
     return df
 
 
@@ -3038,8 +3067,6 @@ def _read_files(explorer, paths: list[str], **kwargs) -> None:
         df["__file_path"] = path
         explorer._max_unique_id_int += 1
         df["_unique_id"] = _get_unique_id(df, explorer._max_unique_id_int)
-        if isinstance(df, GeoDataFrame):
-            df = df.assign(geometry=df.geometry.to_wkb())
         df = pl.from_pandas(df)
         explorer.loaded_data[path] = df
 
