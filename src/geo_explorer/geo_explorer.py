@@ -307,8 +307,22 @@ class GeoExplorer:
                     dbc.Row(html.Div(id="alert4")),
                     dbc.Row(html.Div(id="new-file-added")),
                     html.Div(id="file-deleted"),
-                    dbc.Row(dbc.Col(html.Div(id="loading", style={"height": "3vh"}))),
-                    dbc.Row(id="urls"),
+                    dbc.Row(
+                        [
+                            dbc.Col(
+                                html.Div(id="loading", style={"height": "3vh"}),
+                                width={
+                                    "size": 3,
+                                    "order": "first",
+                                },
+                            ),
+                        ],
+                        justify="between",
+                        id="urls",
+                        style={
+                            "width": "50vh",
+                        },
+                    ),
                     dbc.Row(
                         [
                             dbc.Col(
@@ -1332,22 +1346,35 @@ class GeoExplorer:
         @callback(
             Output("urls", "children"),
             Input("map", "center"),
+            State("urls", "children"),
         )
-        def update_urls(_):
-            return [f"  center={[round(x,4) for x in self.center]}"] + [
-                dbc.Col(
-                    [html.A(txt, href=url, target="_blank", id=txt)],
-                    # style={
-                    #     "font-size": "23px",
-                    #     "padding": "3px",
-                        "whiteSpace": "nowrap",
-                    # },
-                )
-                for txt, url in [
-                    ("Google earth", get_google_earth_url(self.center)),
-                    ("Google maps", get_google_maps_url(self.center)),
+        def update_urls(_, urls):
+            return (
+                [urls[0]]
+                + [
+                    dbc.Col(
+                        [html.A(txt, href=url, target="_blank", id=txt)],
+                        # width=2,
+                        width={
+                            "size": 2,
+                            "order": "last",
+                        },
+                    )
+                    for txt, url in [
+                        ("Google earth", get_google_earth_url(self.center)),
+                        ("Google maps", get_google_maps_url(self.center)),
+                    ]
                 ]
-            ]
+                + [
+                    dbc.Col(
+                        ", ".join(str(round(x, 4)) for x in self.center),
+                        width={
+                            "size": 2,
+                            "order": "last",
+                        },
+                    )
+                ]
+            )
 
         @callback(
             Output("loading", "children", allow_duplicate=True),
@@ -1603,8 +1630,8 @@ class GeoExplorer:
         )
         def update_loading(_):
             if self.concatted_data is None or not len(self.concatted_data):
-                return f"center={self.center}"
-            return f"Finished loading. center={self.center}"
+                return None
+            return "Finished loading"
 
         @callback(
             Output("lc", "children"),
