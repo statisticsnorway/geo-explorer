@@ -67,7 +67,6 @@ entur_path = f"{DELT_KART}/analyse_data/klargjorte-data/{YEAR}/ENTUR_Holdeplasse
 # Create a custom GeoDataFrame to add to the map
 jernbanetorget = sg.to_gdf([10.7535581, 59.9110967], crs=4326).to_crs(25833)
 jernbanetorget.geometry = jernbanetorget.buffer(500)
-jernbanetorget["what"] = "Jernbanetorget buffered 500 meters"
 
 GeoExplorer(
     start_dir=f"{DELT_KART}/analyse_data/klargjorte-data/{YEAR}",
