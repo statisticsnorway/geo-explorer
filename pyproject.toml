@@ -20,7 +20,7 @@ Changelog = "https://github.com/statisticsnorway/geo-explorer/releases"
 [tool.poetry.dependencies]
 python = ">=3.11,<4"
 geopandas = ">=0.14.0"
-ssb-sgis = ">=1.3.0"
+ssb-sgis = "^1.3.0"
 jenkspy = ">=0.3.2"
 matplotlib = ">=3.7.0"
 numpy = ">=1.26.4"

@@ -19,19 +19,18 @@ from time import perf_counter
 from typing import Any
 from typing import ClassVar
 
-import matplotlib.colors as mcolors
 import dash
 import dash_bootstrap_components as dbc
 import dash_leaflet as dl
 import joblib
 import matplotlib
+import matplotlib.colors as mcolors
 import numpy as np
 import pandas as pd
 import polars as pl
 import pyarrow
 import pyarrow.parquet as pq
 import sgis as sg
-from sgis.maps.wms import WmsLoader
 import shapely
 from dash import Dash
 from dash import Input
@@ -49,9 +48,9 @@ from geopandas import GeoSeries
 from jenkspy import jenks_breaks
 from pandas.api.types import is_datetime64_any_dtype
 from sgis.io.dapla_functions import _get_geo_metadata
+from sgis.maps.wms import WmsLoader
 from shapely.errors import GEOSException
 from shapely.geometry import Point
-from shapely.geometry import Polygon
 
 from .file_browser import FileBrowser
 from .fs import LocalFileSystem
@@ -269,6 +268,7 @@ class GeoExplorer:
         self._file_browser = FileBrowser(
             start_dir, file_system=file_system, favorites=favorites
         )
+        self._current_table_view = None
 
         if is_jupyter():
             service_prefix = os.environ["JUPYTERHUB_SERVICE_PREFIX"].strip("/")
@@ -583,6 +583,7 @@ class GeoExplorer:
                     ),
                     *self._file_browser.get_file_browser_components(),
                     dcc.Store(id="is_splitted", data=False),
+                    dcc.Store(id="update-table", data=None),
                     dcc.Store(id="column-dropdown2", data=None),
                     dcc.Input(
                         id="debounced_bounds",
@@ -1052,8 +1053,17 @@ class GeoExplorer:
                 except ValueError:
                     pass
 
+            if triggered == "file-deleted":
+                self._max_unique_id_int = 0
+                for path, df in self.loaded_data.items():
+                    self.loaded_data[path] = df.with_columns(
+                        _unique_id=_get_unique_id(df, self._max_unique_id_int)
+                    )
+                    self._max_unique_id_int += 1
+
             df, alerts = self._concat_data(bounds)
             self.concatted_data = df
+
             debug_print(
                 "concat_data finished after",
                 perf_counter() - t,
@@ -1278,32 +1288,37 @@ class GeoExplorer:
         @callback(
             Output("file-deleted", "children", allow_duplicate=True),
             Output("alert3", "children", allow_duplicate=True),
+            Output("update-table", "data", allow_duplicate=True),
             Input({"type": "delete-btn", "index": dash.ALL}, "n_clicks"),
             State({"type": "delete-btn", "index": dash.ALL}, "id"),
             prevent_initial_call=True,
         )
         def delete_file(n_clicks_list, delete_ids):
-            return self._delete_file(n_clicks_list, delete_ids)
+            return (*self._delete_file(n_clicks_list, delete_ids), True)
 
         @callback(
             Output("file-deleted", "children", allow_duplicate=True),
             Output("alert3", "children", allow_duplicate=True),
+            Output("update-table", "data", allow_duplicate=True),
             Output("color-container", "children", allow_duplicate=True),
             Input({"type": "delete-cat-btn", "index": dash.ALL}, "n_clicks"),
             State({"type": "delete-cat-btn", "index": dash.ALL}, "id"),
-            State("color-container", "children"),
             prevent_initial_call=True,
         )
-        def delete_category(n_clicks_list, delete_ids, color_container):
+        def delete_category(n_clicks_list, delete_ids):
             path_to_delete = get_index_if_clicks(n_clicks_list, delete_ids)
             if path_to_delete is None:
-                return dash.no_update, dash.no_update, dash.no_update
+                return dash.no_update, dash.no_update, dash.no_update, dash.no_update
             debug_print(f"path to delete: {path_to_delete}")
             if not self.column:
-                return (*self._delete_file(n_clicks_list, delete_ids), dash.no_update)
+                return (
+                    *self._delete_file(n_clicks_list, delete_ids),
+                    True,
+                    dash.no_update,
+                )
             else:
                 self._deleted_categories.add(path_to_delete)
-                return None, None, dash.no_update
+                return None, None, True, dash.no_update
 
         @callback(
             Output("file-deleted", "children", allow_duplicate=True),
@@ -1681,7 +1696,7 @@ class GeoExplorer:
                 "\n\nadd_data",
                 dash.callback_context.triggered_id,
                 len(self.loaded_data),
-                f"{column=}" f"{self.column=}",
+                f"{column=}{self.column=}",
             )
             t = perf_counter()
 
@@ -1772,6 +1787,7 @@ class GeoExplorer:
             Output("clicked-ids", "data"),
             Output("alert4", "children"),
             Input("clear-table-clicked", "n_clicks"),
+            Input("update-table", "n_clicks"),
             Input({"type": "geojson", "filename": dash.ALL}, "n_clicks"),
             State({"type": "geojson", "filename": dash.ALL}, "clickData"),
             State({"type": "geojson", "filename": dash.ALL}, "id"),
@@ -1780,6 +1796,7 @@ class GeoExplorer:
         )
         def display_clicked_feature_attributes(
             clear_table,
+            update_table,
             geojson_n_clicks,
             features,
             feature_ids,
@@ -1792,7 +1809,7 @@ class GeoExplorer:
                 self.selected_features = {}
                 return [], [], None
             if triggered is None or (
-                self.selected_features and not features or not any(features)
+                (self.selected_features and not features) or not any(features)
             ):
                 clicked_ids = list(self.selected_features)
                 clicked_features = list(self.selected_features.values())
@@ -1897,22 +1914,30 @@ class GeoExplorer:
         @callback(
             Output("all-features", "data"),
             Input("clear-table", "n_clicks"),
+            Input("update-table", "data"),
             Input({"type": "table-btn", "index": dash.ALL}, "n_clicks"),
             State({"type": "table-btn", "index": dash.ALL}, "id"),
+            State("all-features", "data"),
         )
         def display_all_feature_attributes(
-            clear_table, table_btn_n_clicks, table_btn_ids
+            clear_table, update_table, table_btn_n_clicks, table_btn_ids, all_features
         ):
             triggered = dash.callback_context.triggered_id
             debug_print("display_all_feature_attributes", triggered)
             if triggered == "clear-table":
+                self._current_table_view = None
                 return []
             if triggered is None:
                 return dash.no_update
 
-            clicked_path = get_index_if_clicks(table_btn_n_clicks, table_btn_ids)
+            if triggered == "update-table":
+                clicked_path = self._current_table_view
+            else:
+                clicked_path = get_index_if_clicks(table_btn_n_clicks, table_btn_ids)
             if clicked_path is None:
                 return dash.no_update
+
+            self._current_table_view = clicked_path
 
             df, _ = self._concat_data(bounds=None, paths=[clicked_path])
             if df is None or not len(df):
@@ -2311,6 +2336,7 @@ class GeoExplorer:
         self.bounds_series = self.bounds_series[
             lambda x: ~x.index.str.contains(path_to_delete)
         ]
+
         return None, None
 
     def _nested_bounds_to_bounds(
@@ -3084,7 +3110,6 @@ def get_zoom_from_bounds(
     Returns:
         Approximate zoom level (can be float)
     """
-
     # Earth's circumference in meters (WGS 84)
     C = 40075016.686
 

@@ -5,7 +5,6 @@ from pathlib import Path
 
 import dash
 import dash_bootstrap_components as dbc
-import numpy as np
 from dash import Input
 from dash import Output
 from dash import State
