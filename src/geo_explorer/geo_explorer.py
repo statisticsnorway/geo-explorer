@@ -1021,6 +1021,7 @@ class GeoExplorer:
             Output("data-was-concatted", "children"),
             Output("data-was-changed", "children"),
             Output("alert2", "children"),
+            Output("update-table", "data", allow_duplicate=True),
             Input("new-data-read", "children"),
             Input("file-deleted", "children"),
             Input("is_splitted", "data"),
@@ -1042,7 +1043,7 @@ class GeoExplorer:
 
             t = perf_counter()
             if not new_data_read:
-                return dash.no_update, 1, dash.no_update
+                return dash.no_update, 1, dash.no_update, dash.no_update
 
             bounds = self._nested_bounds_to_bounds(bounds)
 
@@ -1053,13 +1054,16 @@ class GeoExplorer:
                 except ValueError:
                     pass
 
-            if triggered == "file-deleted":
+            if triggered in ["file-deleted", "ned-data-read"]:
                 self._max_unique_id_int = 0
                 for path, df in self.loaded_data.items():
                     self.loaded_data[path] = df.with_columns(
                         _unique_id=_get_unique_id(df, self._max_unique_id_int)
                     )
                     self._max_unique_id_int += 1
+                update_table = True
+            else:
+                update_table = dash.no_update
 
             df, alerts = self._concat_data(bounds)
             self.concatted_data = df
@@ -1070,13 +1074,12 @@ class GeoExplorer:
                 len(self.concatted_data) if self.concatted_data is not None else None,
             )
 
-            return 1, 1, alerts
+            return 1, 1, alerts, update_table
 
         @callback(
             Output("file-control-panel", "children"),
             Output("order-was-changed", "data"),
             Input("data-was-changed", "children"),
-            # Input("map", "bounds"),
             Input("file-deleted", "children"),
             Input({"type": "order-button-up", "index": dash.ALL}, "n_clicks"),
             Input({"type": "order-button-down", "index": dash.ALL}, "n_clicks"),
@@ -1369,7 +1372,6 @@ class GeoExplorer:
                 + [
                     dbc.Col(
                         [html.A(txt, href=url, target="_blank", id=txt)],
-                        # width=2,
                         width={
                             "size": 2,
                             "order": "last",
@@ -1384,7 +1386,7 @@ class GeoExplorer:
                     dbc.Col(
                         ", ".join(str(round(x, 4)) for x in self.center),
                         width={
-                            "size": 2,
+                            "size": 3,
                             "order": "last",
                         },
                     )
