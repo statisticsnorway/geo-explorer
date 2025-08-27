@@ -1013,7 +1013,10 @@ class GeoExplorer:
             if not self.selected_files:
                 return False, None
             triggered = dash.callback_context.triggered_id
-            if triggered == "alert5":
+            print("set_column_to_split_index", triggered)
+            if triggered == "alert5" and alert is None:
+                return dash.no_update, dash.no_update
+            if triggered == "alert5" and alert is not None:
                 return False, None
             if triggered is not None:
                 self.splitted = not self.splitted
