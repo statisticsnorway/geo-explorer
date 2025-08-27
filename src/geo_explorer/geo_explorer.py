@@ -307,11 +307,8 @@ class GeoExplorer:
                     dbc.Row(html.Div(id="alert4")),
                     dbc.Row(html.Div(id="new-file-added")),
                     html.Div(id="file-deleted"),
-                    dbc.Row(
-                        [
-                            dbc.Col(html.Div(id="loading", style={"height": "3vh"})),
-                        ]
-                    ),
+                    dbc.Row(dbc.Col(html.Div(id="loading", style={"height": "3vh"}))),
+                    dbc.Row(id="urls"),
                     dbc.Row(
                         [
                             dbc.Col(
@@ -1333,6 +1330,26 @@ class GeoExplorer:
                 return _unclicked_button_style()
 
         @callback(
+            Output("urls", "children"),
+            Input("map", "center"),
+        )
+        def update_urls(_):
+            return [f"  center={[round(x,4) for x in self.center]}"] + [
+                dbc.Col(
+                    [html.A(txt, href=url, target="_blank", id=txt)],
+                    # style={
+                    #     "font-size": "23px",
+                    #     "padding": "3px",
+                        "whiteSpace": "nowrap",
+                    # },
+                )
+                for txt, url in [
+                    ("Google earth", get_google_earth_url(self.center)),
+                    ("Google maps", get_google_maps_url(self.center)),
+                ]
+            ]
+
+        @callback(
             Output("loading", "children", allow_duplicate=True),
             Input({"type": "load-parquet", "index": dash.ALL}, "n_clicks"),
             Input("map", "bounds"),
@@ -1586,8 +1603,8 @@ class GeoExplorer:
         )
         def update_loading(_):
             if self.concatted_data is None or not len(self.concatted_data):
-                return None
-            return "Finished loading"
+                return f"center={self.center}"
+            return f"Finished loading. center={self.center}"
 
         @callback(
             Output("lc", "children"),
@@ -3235,3 +3252,14 @@ def _get_file_system(path, file_system) -> AbstractFileSystem:
 
         return GCSFileSystem()
     return LocalFileSystem()
+
+
+def get_google_earth_url(center, zoom_m: int = 150) -> str:
+    y, x = center
+    return f"https://earth.google.com/web/@{y},{x},{zoom_m}a,70.30108914d,35y,0h,0t,0r/data=CgwqBggBEgAYAUICCAE6AwoBMEICCABKDQj___________8BEAA"
+
+
+def get_google_maps_url(center, zoom_m: int = 150) -> str:
+    y, x = center
+    url = f"https://www.google.com/maps/@{y},{x},{zoom_m}m/data=!3m1!1e3?entry=ttu&g_ep=EgoyMDI0MTEyNC4xIKXMDSoASAFQAw%3D%3D"
+    return url
