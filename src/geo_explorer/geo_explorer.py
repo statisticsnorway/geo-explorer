@@ -31,6 +31,7 @@ import polars as pl
 import pyarrow
 import pyarrow.parquet as pq
 import sgis as sg
+from sgis.maps.wms import WmsLoader
 import shapely
 from dash import Dash
 from dash import Input
@@ -61,7 +62,7 @@ from .utils import get_button_with_tooltip
 
 OFFWHITE: str = "#ebebeb"
 FILE_CHECKED_COLOR: str = "#3e82ff"
-DEFAULT_ZOOM: int = 10
+DEFAULT_ZOOM: int = 12
 DEFAULT_CENTER: tuple[float, float] = (59.91740845, 10.71394444)
 CURRENT_YEAR: int = datetime.datetime.now().year
 
@@ -78,503 +79,97 @@ else:
         pass
 
 
-def _buffer_box(box: Polygon, meters: int) -> Polygon:
-    try:
-        return sg.to_gdf(box, 4326).to_crs(3035).buffer(meters).to_crs(4326).union_all()
-    except GEOSException:
-        return box
+class GeoExplorer:
+    """Class for exploring geodata interactively.
 
+    It's best to run the app in the terminal, but it works in jupyter as well.
 
-def _get_max_rows_displayed_component(max_rows: int):
-    return [
-        dbc.Row(html.Div("Max rows displayed")),
-        dbc.Row(
-            dbc.Input(
-                id="max_rows_value",
-                value=max_rows,
-                type="number",
-                debounce=1,
-            ),
-            style={"width": "13vh"},
-        ),
-        dbc.Tooltip(
-            "Set number of rows rendered. Currently showing random sample of data to avoid crashing.",
-            target="max_rows_value",
-            delay={"show": 500, "hide": 100},
-        ),
-    ]
+    The main arguments in the class initializer are 'start_dir', 'favorites', 'file_system' and 'port'.
 
-
-def _change_order(explorer, n_clicks_list, ids, buttons, what: str):
-    if what not in ["up", "down"]:
-        raise ValueError(what)
-    path = get_index_if_clicks(n_clicks_list, ids)
-    if path is None or not buttons:
-        return dash.no_update, dash.no_update
-    i = list(reversed(explorer.selected_files)).index(path)
-    if (what == "up" and i == 0) or (what == "down" and i == len(buttons) - 1):
-        return dash.no_update, dash.no_update
-    if what == "up":
-        i2 = i - 1
-    else:
-        i2 = i + 1
-    buttons[i], buttons[i2] = buttons[i2], buttons[i]
-    keys = list(reversed(explorer.selected_files))
-    values = list(reversed(explorer.selected_files.values()))
-    keys[i], keys[i2] = keys[i2], keys[i]
-    values[i], values[i2] = values[i2], values[i]
-    explorer.selected_files = dict(reversed(list(zip(keys, values, strict=False))))
-    return buttons, True
-
-
-def _named_color_to_hex(color: str) -> str:
-    return mcolors.to_hex(color)
-
-
-def _get_colorpicker_container(color_dict: dict[str, str]) -> html.Div:
-    def to_python_type(x):
-        if isinstance(x, Number):
-            return float(x)
-        return x
-
-    color_dict = {
-        to_python_type(column_value): color
-        for column_value, color in color_dict.items()
-    }
-
-    return html.Div(
-        [
-            dbc.Row(
-                [
-                    dbc.Col(
-                        dbc.Input(
-                            type="color",
-                            id={
-                                "type": "colorpicker",
-                                "column_value": column_value,
-                            },
-                            value=color,
-                            style={"width": 50, "height": 50},
-                        ),
-                        width="auto",
-                    ),
-                    dbc.Col(
-                        dbc.Label([column_value]),
-                        width="auto",
-                    ),
-                    dbc.Col(
-                        get_button_with_tooltip(
-                            "❌",
-                            id={
-                                "type": "delete-cat-btn",
-                                "index": column_value,
-                            },
-                            n_clicks=0,
-                            style={
-                                "color": "red",
-                                "border": "none",
-                                "background": "none",
-                                "cursor": "pointer",
-                                "marginLeft": "auto",
-                            },
-                            tooltip_text="Remove all data in this category",
-                        ),
-                        width="auto",
-                    ),
-                ],
-                style={
-                    "display": "flex",
-                    "justifyContent": "flex-start",
-                    "alignItems": "center",
-                    "marginBottom": "5px",
-                },
-            )
-            for column_value, color in color_dict.items()
-        ],
-        id="color-container",
-    )
-
-
-def _get_df(path, loaded_data, paths_concatted, override: bool = False):
-    t = perf_counter()
-    debug_print("_get_df", path, path in loaded_data, path in paths_concatted)
-    if path in loaded_data and not override and path in paths_concatted:
-        debug_print("_get_df", "00000")
-        return []
-    if path in loaded_data:
-        debug_print("_get_df", "11111", path)
-        df = loaded_data[path].with_columns(__file_path=pl.lit(path))
-        return [df]
-
-    if paths_concatted:  # is not None and len(concatted_data):
-        debug_print("_get_df", "222")
-        matches = [
-            key
-            for key in loaded_data
-            if path in key and (override or key not in paths_concatted)
-        ]
-        if matches:
-            matches = [
-                loaded_data[key].with_columns(__file_path=pl.lit(key))
-                for key in matches
-            ]
-
-    else:
-        debug_print("_get_df", "333")
-        matches = [
-            df.with_columns(__file_path=pl.lit(key))
-            for key, df in loaded_data.items()
-            if path in key
-        ]
-    debug_print(len(matches), "matches for", path)
-    return matches
-
-
-def _add_data_one_path(
-    path,
-    bounds,
-    column,
-    is_numeric,
-    color_dict,
-    bins,
-    max_rows,
-    concatted_data,
-    nan_color,
-    alpha,
-):
-    ns = Namespace("onEachFeatureToggleHighlight", "default")
-    data = []
-    if concatted_data is None:
-        return (
-            [
-                dl.Overlay(
-                    dl.GeoJSON(id={"type": "geojson", "filename": path}),
-                    name=_get_name(path),
-                    id={"type": "geojson-overlay", "filename": path},
-                    checked=True,
-                )
-            ],
-            None,
-            False,
-        )
-    try:
-        df = concatted_data.filter(pl.col("__file_path").str.contains(path))
-    except Exception as e:
-        raise type(e)(f"{e}: {path} - {concatted_data['__file_path']}")
-
-    if not len(df):
-        return (
-            [
-                dl.Overlay(
-                    dl.GeoJSON(id={"type": "geojson", "filename": path}),
-                    name=_get_name(path),
-                    id={"type": "geojson-overlay", "filename": path},
-                    checked=True,
-                )
-            ],
-            None,
-            False,
-        )
-
-    df = filter_by_bounds(df, bounds)
-
-    rows_are_hidden = len(df) > max_rows
-
-    if len(df) > max_rows:
-        df = df.sample(max_rows)
-    df = df.to_pandas()
-    df["geometry"] = shapely.from_wkb(df["geometry"])
-    df = GeoDataFrame(df, crs=4326)
-
-    out_alert = None
-
-    if column and column in df and not is_numeric:
-        df["_color"] = df[column].map(color_dict)
-    elif column and bins is None:
-        df["_color"] = nan_color
-    elif column and column in df:
-        notnas = df[df[column].notna()]
-        if bins is not None and len(bins) == 1:
-            notnas["_color"] = next(
-                iter(color for color in color_dict.values() if color != nan_color)
-            )
-        else:
-            conditions = [
-                (notnas[column] < bins[1]) & (notnas[column].notna()),
-                *[
-                    (notnas[column] >= bins[i])
-                    & (notnas[column] < bins[i + 1])
-                    & (notnas[column].notna())
-                    for i in np.arange(2, len(bins) - 1)
-                ],
-                (notnas[column] >= bins[-1]) & (notnas[column].notna()),
-            ]
-            choices = np.arange(len(conditions)) if bins is not None else None
-            try:
-                notnas["_color"] = [
-                    color_dict[x] for x in np.select(conditions, choices)
-                ]
-            except KeyError as e:
-                raise KeyError(e, color_dict, conditions, choices, bins) from e
-        df = pd.concat([notnas, df[df[column].isna()]])
-    if column and column not in df:
-        data.append(
-            dl.Overlay(
-                dl.GeoJSON(
-                    data=df.__geo_interface__,
-                    style={
-                        "color": nan_color,
-                        "fillColor": nan_color,
-                        "weight": 2,
-                        "fillOpacity": alpha,
-                    },
-                    onEachFeature=ns("yellowIfHighlighted"),
-                    pointToLayer=ns("pointToLayerCircle"),
-                    hideout=dict(
-                        circleOptions=dict(fillOpacity=1, stroke=False, radius=5),
-                    ),
-                    id={"type": "geojson", "filename": path},
-                ),
-                name=_get_name(path),
-                checked=True,
-                id={"type": "geojson-overlay", "filename": path},
-            )
-        )
-    elif column:
-        data.append(
-            dl.Overlay(
-                dl.LayerGroup(
-                    [
-                        dl.GeoJSON(
-                            data=(df[df["_color"] == color_]).__geo_interface__,
-                            style={
-                                "color": color_,
-                                "fillColor": color_,
-                                "weight": 2,
-                                "fillOpacity": alpha,
-                            },
-                            onEachFeature=ns("yellowIfHighlighted"),
-                            pointToLayer=ns("pointToLayerCircle"),
-                            id={
-                                "type": "geojson",
-                                "filename": path + color_,
-                            },
-                            hideout=dict(
-                                circleOptions=dict(
-                                    fillOpacity=1, stroke=False, radius=5
-                                ),
-                            ),
-                        )
-                        for color_ in df["_color"].unique()
-                        if pd.notna(color_)
-                    ]
-                    + [
-                        dl.GeoJSON(
-                            data=df[df[column].isna()].__geo_interface__,
-                            style={
-                                "color": nan_color,
-                                "fillColor": nan_color,
-                                "weight": 2,
-                                "fillOpacity": alpha,
-                            },
-                            id={
-                                "type": "geojson",
-                                "filename": path + "_nan",
-                            },
-                            onEachFeature=ns("yellowIfHighlighted"),
-                            pointToLayer=ns("pointToLayerCircle"),
-                            hideout=dict(
-                                circleOptions=dict(
-                                    fillOpacity=1, stroke=False, radius=5
-                                ),
-                            ),
-                        )
-                    ]
-                ),
-                name=_get_name(path),
-                checked=True,
-                id={"type": "geojson-overlay", "filename": path},
-            )
-        )
-    else:
-        # no column
-        color = color_dict[_get_name(path)]
-        data.append(
-            dl.Overlay(
-                dl.GeoJSON(
-                    data=df.__geo_interface__,
-                    style={
-                        "color": color,
-                        "fillColor": color,
-                        "weight": 2,
-                        "fillOpacity": alpha,
-                    },
-                    onEachFeature=ns("yellowIfHighlighted"),
-                    pointToLayer=ns("pointToLayerCircle"),
-                    hideout=dict(
-                        circleOptions=dict(fillOpacity=1, stroke=False, radius=5),
-                    ),
-                    id={"type": "geojson", "filename": path},
-                ),
-                name=_get_name(path),
-                checked=True,
-                id={"type": "geojson-overlay", "filename": path},
-            )
-        )
-    return data, out_alert, rows_are_hidden
-
-
-def polars_isna(df):
-    try:
-        return (df.is_nan()) | (df.is_null())
-    except pl.exceptions.InvalidOperationError:
-        return df.is_null()
-
-
-def filter_by_bounds(df: pl.DataFrame, bounds: tuple[float]) -> pl.DataFrame:
-    minx, miny, maxx, maxy = bounds
-
-    df = df.filter(
-        (pl.col("minx") <= float(maxx))
-        & (pl.col("maxx") >= float(minx))
-        & (pl.col("miny") <= float(maxy))
-        & (pl.col("maxy") >= float(miny))
-    )
-    return df
-
-
-def read_nrows(file, nrow: int, nth_batch: int, file_system) -> pyarrow.Table:
-    """Read first n rows of a parquet file."""
-    for _, batch in zip(
-        range(nth_batch + 1),
-        pq.ParquetFile(file, filesystem=file_system).iter_batches(nrow),
-        strict=False,
-    ):
-        pass
-    return pyarrow.Table.from_batches([batch]).to_pandas()
-
-
-def _read_and_to_4326(path: str, file_system, **kwargs) -> GeoDataFrame:
-    if "-_-" in path:
-        rows = path.split("-_-")[-1]
-        nrow, nth_batch = rows.split("-")
-        nrow = int(nrow)
-        nth_batch = int(nth_batch)
-        path = path.split("-_-")[0]
-        try:
-            df = read_nrows(path, nrow, nth_batch, file_system=file_system)
-        except Exception:
-            df = read_nrows(path, nrow, nth_batch, file_system=None)
-        metadata = _get_geo_metadata(path, file_system)
-        primary_column = metadata["primary_column"]
-        geo_metadata = metadata["columns"][primary_column]
-        crs = geo_metadata["crs"]
-        df["geometry"] = GeoSeries.from_wkb(df[primary_column])
-        if primary_column != "geometry":
-            df = df.drop(primary_column, axis=1)
-        df = GeoDataFrame(df, crs=crs)
-        return _fix_df(df)
-    df = sg.read_geopandas(path, file_system=file_system, **kwargs)
-    return _fix_df(df)
-
-
-def _fix_df(df: GeoDataFrame) -> GeoDataFrame:
-    df["area"] = df.area
-    if df["area"].median() > 10:
-        df["area"] = df["area"].astype(int)
-    if df.crs is not None:
-        df = df.to_crs(4326)
-    bounds = df.geometry.bounds.astype("float32[pyarrow]")
-    df[["minx", "miny", "maxx", "maxy"]] = bounds[["minx", "miny", "maxx", "maxy"]]
-    return df
-
-
-def _get_unique_id(df, i):
-    """Float column of 0.0, 0.01, ..., 3.1211 etc."""
-    divider = 10 ** len(str(len(df)))
-    return (np.array(range(len(df))) / divider) + i
-
-
-def _read_files(explorer, paths: list[str], **kwargs) -> None:
-    if not paths:
-        return
-    paths = list(paths)
-    backend = "threading" if len(paths) <= 3 else "loky"
-    with joblib.Parallel(len(paths), backend=backend) as parallel:
-        more_data = parallel(
-            joblib.delayed(_read_and_to_4326)(
-                path, file_system=explorer.file_system, **kwargs
-            )
-            for path in paths
-        )
-    for path, df in zip(paths, more_data, strict=True):
-        for col in df.columns:
-            if is_datetime64_any_dtype(df[col]):
-                try:
-                    df[col] = [str(x) for x in df[col].dt.round("d")]
-                except Exception:
-                    df = df.drop(col, axis=1)
-        df["__file_path"] = path
-        explorer._max_unique_id_int += 1
-        df["_unique_id"] = _get_unique_id(df, explorer._max_unique_id_int)
-        if isinstance(df, GeoDataFrame):
-            df = df.assign(geometry=df.geometry.to_wkb())
-        df = pl.from_pandas(df)
-        explorer.loaded_data[path] = df
-
-
-def _random_color(min_diff: int = 50) -> str:
-    """Get a random hex color code that is not too gray.
+    The rest of the arguments can be fetched with the "Export as code" button in the app.
+    Copy the code into a new python program and run it to get an app that opens with
+    the same bounds, data, filtering and coloring.
 
     Args:
-        min_diff: minimum total distance between red, green and blue.
-            Maximum possible value will be 510, if one value is 0 and another is 255 (the third one will not matter).
+        start_dir: Directory to list files at init.
+        favorites: List of directories to quick-jump to.
+        port: default to 8050. Set to None if running locally.
+        file_system: File system used to list and read files.
+            Must act like fsspec's AbstractFileSystem and
+            implement the methods *ls* and *glob*. The methods
+            should take the argument 'detail', which, if set to True,
+            will return a dict for each listed path with the keys
+            "updated" (timestamp), "size" (bytes), "name" (full path)
+            and "type" ("directory" or "file").
+        data: Optional data to load at start. Either a list of file paths,
+            a dict of file paths as keys and filter strings as values
+            or a dict of GeoDataFrames.
+        column: Column to color the data.
+        color_dict: Optionally set the coloring when when 'column' is
+            a non-numeric column. Dict keys must be valid column values
+            and dict values can be hex color code or a named color
+            (https://matplotlib.org/stable/gallery/color/named_colors.html).
+        center: y and x coordinates to use as map center as init.
+        zoom: zoom level to use at init.
+        wms: dict of wms loaders, e.g. a sg.NorgeIBilderWms instance.
+            Can also be added after app is started.
+        wms_layers_checked: dict where keys correspond to the keys in the "wms"
+            dict and the values are a list of wms layer names to be shown at init.
+        max_rows: Max number of rows to sample per dataset if number of feature in bounds excedes.
+            Note that rendering more than the default (10,000) might crash the server, especially for
+            polygon features.
+        selected_features: list of indices of features (rows) to show in attribute table
+            at init. Fetch this list with the "Export as code" button.
+        hard_click: If True, clicking on a geometry triggers all overlapping geometries to be marked.
+        splitted: If True, all rows will have a separate label and color.
+        alpha: Opacity/transparency of the geometries.
+        nan_color: Color for missing values. Defaults to a shade of gray.
+        nan_label: Defaults to "Missing".
+        **kwargs: Additional keyword arguments passed to dash_leaflet.Map: https://www.dash-leaflet.com/components/map_container.
+
+    A "clean" GeoExplorer can be initialized like this:
+
+    >>> from geo_explorer import GeoExplorer
+    >>> from geo_explorer import LocalFileSystem
+    >>> GeoExplorer(
+    ...     start_dir="dir1",
+    ...     favorites=["dir1", "dir2"],
+    ...     file_system=LocalFileSystem(),
+    ...     port=3000
+    ... ).run()
+
+    Starting a custom GeoExplorer with data loaded, filtered and colored:
+
+    >>> from geo_explorer import GeoExplorer
+    >>> from gcsfs import GCSFileSystem
+    >>> import sgis as sg
+    >>> DELT_KART = "ssb-areal-data-delt-kart-prod"
+    >>> YEAR = 2025
+    >>> entur_path = f"{DELT_KART}/analyse_data/klargjorte-data/{YEAR}/ENTUR_Holdeplasser_punkt_p{YEAR}_v1.parquet"
+    >>> GeoExplorer(
+    ...     start_dir=f"{DELT_KART}/analyse_data/klargjorte-data/{YEAR}",
+    ...     favorites=[
+    ...         f"{DELT_KART}/analyse_data/klargjorte-data/{YEAR}",
+    ...         f"{DELT_KART}/visualisering_data/klargjorte-data/{YEAR}/parquet",
+    ...     ],
+    ...     data={
+    ...         "jernbanetorget": sg.to_gdf([10.7535581, 59.9110967], crs=4326), # GeoDataFrame
+    ...         entur_path: "kjoeretoey != 'fly'", # file path and filter function
+    ...     },
+    ...     column="kjoeretoey",
+    ...     color_dict={
+    ...         "jernbane": "darkgreen",
+    ...         "buss": "red",
+    ...         "trikk": "deepskyblue",
+    ...         "tbane": "yellow",
+    ...         "baat": "navy",
+    ...     },
+    ...     center=(59.91740845, 10.71394444),
+    ...     zoom=13,
+    ...     file_system=GCSFileSystem(),
+    ...     port=3000,
+    ... ).run()
     """
-    while True:
-        r, g, b = np.random.choice(range(256), size=3)
-        if abs(r - g) + abs(r - b) > min_diff:
-            return f"#{r:02x}{g:02x}{b:02x}"
-
-
-def _get_name(path):
-    return Path(path).stem
-
-
-def _get_child_paths(paths, file_system):
-    child_paths = []
-    for path in paths:
-        suffix = Path(path).suffix
-        if suffix:
-            these_child_paths = list(
-                file_system.glob(str(Path(path) / f"**/*{suffix}"))
-            )
-            if not these_child_paths:
-                child_paths.append(path)
-            else:
-                child_paths += these_child_paths
-        else:
-            child_paths.append(path)
-    return child_paths
-
-
-def _get_bounds_series(path, file_system):
-    paths = [
-        _standardize_path(path)
-        for path in (
-            set(file_system.glob(str(Path(path) / "*.parquet")))
-            | set(file_system.glob(str(Path(path) / "**/*.parquet")))
-        )
-    ]
-    if not paths:
-        paths = [path]
-    bounds_series = sg.get_bounds_series(paths, file_system=file_system)
-    if len(bounds_series):
-        bounds_series = bounds_series.to_crs(4326)
-    return bounds_series
-
-
-class GeoExplorer:
-    """Class for exploring geodata interactively."""
 
     _wms_constructors: ClassVar[dict[str, Callable]] = {
         "Norge i bilder": sg.NorgeIBilderWms,
@@ -612,34 +207,33 @@ class GeoExplorer:
 
     def __init__(
         self,
-        start_dir: str = "/buckets",
+        start_dir: str,
+        *,
         favorites: list[str] | None = None,
-        port: int = 8055,
+        port: int = 8050,
         file_system: AbstractFileSystem | None = None,
         data: dict[str, str | GeoDataFrame] | list[str | dict] | None = None,
-        selected_features: list[str] | None = None,
         column: str | None = None,
-        wms=None,
-        wms_layers_checked: dict[str, list[str]] | None = None,
+        color_dict: dict | None = None,
         center: tuple[float, float] | None = None,
         zoom: int | None = None,
+        wms: dict[str, WmsLoader] | None = None,
+        wms_layers_checked: dict[str, list[str]] | None = None,
+        max_rows: int = 10_000,
+        selected_features: list[str] | None = None,
+        hard_click: bool = False,
+        splitted: bool = False,
+        alpha: float = 0.6,
         nan_color: str = "#969696",
         nan_label: str = "Missing",
-        color_dict: dict | None = None,
-        max_zoom: int = 40,
-        min_zoom: int = 4,
-        max_rows: int = 10_000,
-        alpha: float = 0.7,
-        zoom_animation: bool = False,
-        splitted: bool = False,
-        hard_click: bool = False,
+        **kwargs,
     ) -> None:
         """Initialiser."""
         self.start_dir = start_dir
         self.port = port
-        self.max_zoom = max_zoom
-        self.min_zoom = min_zoom
-        self.zoom_animation = zoom_animation
+        self._kwargs = kwargs  # store kwargs for the "export" button
+        self.maxZoom = kwargs.get("maxZoom", 40)
+        self.minZoom = kwargs.get("minZoom", 4)
         self.bounds = None
         self.column = column
         self.color_dict = color_dict or {}
@@ -657,7 +251,7 @@ class GeoExplorer:
         self.wms_layers_checked = {
             wms_name: wms_layers_checked.get(wms_name, []) for wms_name in self.wms
         }
-        self.file_system = file_system or LocalFileSystem()
+        self.file_system = _get_file_system(self.start_dir, file_system)
         self.nan_color = nan_color
         self.nan_label = nan_label
         self.splitted = splitted
@@ -720,7 +314,10 @@ class GeoExplorer:
                     ),
                     dbc.Row(
                         [
-                            dbc.Col(self._map_constructor(html.Div(id="lc")), width=9),
+                            dbc.Col(
+                                self._map_constructor(html.Div(id="lc"), **kwargs),
+                                width=9,
+                            ),
                             dbc.Col(
                                 [
                                     dbc.Row(
@@ -762,7 +359,7 @@ class GeoExplorer:
                                                             [
                                                                 dbc.ModalHeader(
                                                                     dbc.ModalTitle(
-                                                                        "Code to reproduce current view"
+                                                                        "Copy the code below to reproduce current view"
                                                                     ),
                                                                     close_button=False,
                                                                 ),
@@ -1184,7 +781,13 @@ class GeoExplorer:
             triggered = dash.callback_context.triggered_id
             if triggered in ["file-deleted", "close-export"] or not export_clicks:
                 return None, False
-            return html.Div(f"{self}.run()"), True
+            data = self._get_self_as_dict()
+            defaults = inspect.getfullargspec(self.__class__).kwonlydefaults
+            data = {
+                key: value for key, value in data.items() if value != defaults.get(key)
+            } | self._kwargs
+            txt = self._get_self_as_string(data)
+            return html.Div(f"{txt}.run()"), True
 
         @callback(
             Output("debounced_bounds", "value"),
@@ -2353,8 +1956,8 @@ class GeoExplorer:
             width = int(viewport["width"] * 0.7)
             height = int(viewport["height"] * 0.7)
             zoom_level = get_zoom_from_bounds(minx, miny, maxx, maxy, width, height)
-            zoom_level = min(zoom_level, self.max_zoom)
-            zoom_level = max(zoom_level, self.min_zoom)
+            zoom_level = min(zoom_level, self.maxZoom)
+            zoom_level = max(zoom_level, self.minZoom)
             return bounds, int(zoom_level), center
 
         @callback(
@@ -2742,20 +2345,21 @@ class GeoExplorer:
 
         return df, alerts
 
-    def _map_constructor(self, data: dl.LayersControl) -> dl.Map:
+    def _map_constructor(
+        self, data: dl.LayersControl, preferCanvas=True, zoomAnimation=False, **kwargs
+    ) -> dl.Map:
         return dl.Map(
             center=self.center,
             bounds=self.bounds,
             zoom=self.zoom,
-            maxZoom=self.max_zoom,
-            minZoom=self.min_zoom,
             children=self._map_children + [data],
-            preferCanvas=True,
-            zoomAnimation=self.zoom_animation,
+            preferCanvas=preferCanvas,
+            zoomAnimation=zoomAnimation,
             id="map",
             style={
                 "height": "90vh",
             },
+            **kwargs,
         )
 
     def _add_wms(self, wms_checklist, bounds):
@@ -2855,14 +2459,13 @@ class GeoExplorer:
 
     def _construct_wms_obj(self, wms_name: str, **kwargs):
         constructor = self.wms[wms_name].__class__
-        defaults = {
-            arg: default
-            for arg, default in zip(
+        defaults = dict(
+            zip(
                 inspect.getfullargspec(constructor).args[1:],
                 inspect.getfullargspec(constructor).defaults,
                 strict=True,
             )
-        }
+        )
 
         if wms_name in self.wms:
             current_kwargs = {
@@ -2877,9 +2480,7 @@ class GeoExplorer:
 
         self.wms[wms_name] = constructor(**(current_kwargs | kwargs))
 
-    def __str__(self) -> str:
-        """String representation."""
-
+    def _get_self_as_dict(self) -> dict[str, Any]:
         data = {
             key: value
             for key, value in self.__dict__.items()
@@ -2916,7 +2517,9 @@ class GeoExplorer:
             data["selected_features"] = [
                 x["_unique_id"] for x in data["selected_features"].values()
             ]
+        return data
 
+    def _get_self_as_string(self, data: dict[str, Any]) -> str:
         def maybe_to_string(key: str, value: Any):
             if isinstance(value, str) and key not in ["file_system"]:
                 return f"'{value}'"
@@ -2924,6 +2527,499 @@ class GeoExplorer:
 
         txt = ", ".join(f"{k}={maybe_to_string(k, v)}" for k, v in data.items())
         return f"{self.__class__.__name__}({txt})"
+
+    def __str__(self) -> str:
+        """String representation."""
+        data = self._get_self_as_dict()
+        return self._get_self_as_string(data)
+
+
+def _get_max_rows_displayed_component(max_rows: int):
+    return [
+        dbc.Row(html.Div("Max rows displayed")),
+        dbc.Row(
+            dbc.Input(
+                id="max_rows_value",
+                value=max_rows,
+                type="number",
+                debounce=1,
+            ),
+            style={"width": "13vh"},
+        ),
+        dbc.Tooltip(
+            "Set number of rows rendered. Currently showing random sample of data to avoid crashing.",
+            target="max_rows_value",
+            delay={"show": 500, "hide": 100},
+        ),
+    ]
+
+
+def _change_order(explorer, n_clicks_list, ids, buttons, what: str):
+    if what not in ["up", "down"]:
+        raise ValueError(what)
+    path = get_index_if_clicks(n_clicks_list, ids)
+    if path is None or not buttons:
+        return dash.no_update, dash.no_update
+    i = list(reversed(explorer.selected_files)).index(path)
+    if (what == "up" and i == 0) or (what == "down" and i == len(buttons) - 1):
+        return dash.no_update, dash.no_update
+    if what == "up":
+        i2 = i - 1
+    else:
+        i2 = i + 1
+    buttons[i], buttons[i2] = buttons[i2], buttons[i]
+    keys = list(reversed(explorer.selected_files))
+    values = list(reversed(explorer.selected_files.values()))
+    keys[i], keys[i2] = keys[i2], keys[i]
+    values[i], values[i2] = values[i2], values[i]
+    explorer.selected_files = dict(reversed(list(zip(keys, values, strict=False))))
+    return buttons, True
+
+
+def _named_color_to_hex(color: str) -> str:
+    return mcolors.to_hex(color)
+
+
+def _get_colorpicker_container(color_dict: dict[str, str]) -> html.Div:
+    def to_python_type(x):
+        if isinstance(x, Number):
+            return float(x)
+        return x
+
+    color_dict = {
+        to_python_type(column_value): color
+        for column_value, color in color_dict.items()
+    }
+
+    return html.Div(
+        [
+            dbc.Row(
+                [
+                    dbc.Col(
+                        dbc.Input(
+                            type="color",
+                            id={
+                                "type": "colorpicker",
+                                "column_value": column_value,
+                            },
+                            value=color,
+                            style={"width": 50, "height": 50},
+                        ),
+                        width="auto",
+                    ),
+                    dbc.Col(
+                        dbc.Label([column_value]),
+                        width="auto",
+                    ),
+                    dbc.Col(
+                        get_button_with_tooltip(
+                            "❌",
+                            id={
+                                "type": "delete-cat-btn",
+                                "index": column_value,
+                            },
+                            n_clicks=0,
+                            style={
+                                "color": "red",
+                                "border": "none",
+                                "background": "none",
+                                "cursor": "pointer",
+                                "marginLeft": "auto",
+                            },
+                            tooltip_text="Remove all data in this category",
+                        ),
+                        width="auto",
+                    ),
+                ],
+                style={
+                    "display": "flex",
+                    "justifyContent": "flex-start",
+                    "alignItems": "center",
+                    "marginBottom": "5px",
+                },
+            )
+            for column_value, color in color_dict.items()
+        ],
+        id="color-container",
+    )
+
+
+def _get_df(path, loaded_data, paths_concatted, override: bool = False):
+    t = perf_counter()
+    debug_print("_get_df", path, path in loaded_data, path in paths_concatted)
+    if path in loaded_data and not override and path in paths_concatted:
+        debug_print("_get_df", "00000")
+        return []
+    if path in loaded_data:
+        debug_print("_get_df", "11111", path)
+        df = loaded_data[path].with_columns(__file_path=pl.lit(path))
+        return [df]
+
+    if paths_concatted:  # is not None and len(concatted_data):
+        debug_print("_get_df", "222")
+        matches = [
+            key
+            for key in loaded_data
+            if path in key and (override or key not in paths_concatted)
+        ]
+        if matches:
+            matches = [
+                loaded_data[key].with_columns(__file_path=pl.lit(key))
+                for key in matches
+            ]
+
+    else:
+        debug_print("_get_df", "333")
+        matches = [
+            df.with_columns(__file_path=pl.lit(key))
+            for key, df in loaded_data.items()
+            if path in key
+        ]
+    debug_print(len(matches), "matches for", path)
+    return matches
+
+
+def _add_data_one_path(
+    path,
+    bounds,
+    column,
+    is_numeric,
+    color_dict,
+    bins,
+    max_rows,
+    concatted_data,
+    nan_color,
+    alpha,
+):
+    ns = Namespace("onEachFeatureToggleHighlight", "default")
+    data = []
+    if concatted_data is None:
+        return (
+            [
+                dl.Overlay(
+                    dl.GeoJSON(id={"type": "geojson", "filename": path}),
+                    name=_get_name(path),
+                    id={"type": "geojson-overlay", "filename": path},
+                    checked=True,
+                )
+            ],
+            None,
+            False,
+        )
+    try:
+        df = concatted_data.filter(pl.col("__file_path").str.contains(path))
+    except Exception as e:
+        raise type(e)(f"{e}: {path} - {concatted_data['__file_path']}")
+
+    if not len(df):
+        return (
+            [
+                dl.Overlay(
+                    dl.GeoJSON(id={"type": "geojson", "filename": path}),
+                    name=_get_name(path),
+                    id={"type": "geojson-overlay", "filename": path},
+                    checked=True,
+                )
+            ],
+            None,
+            False,
+        )
+
+    df = filter_by_bounds(df, bounds)
+
+    rows_are_hidden = len(df) > max_rows
+
+    if len(df) > max_rows:
+        df = df.sample(max_rows)
+    df = df.to_pandas()
+    df["geometry"] = shapely.from_wkb(df["geometry"])
+    df = GeoDataFrame(df, crs=4326)
+
+    out_alert = None
+
+    if column and column in df and not is_numeric:
+        df["_color"] = df[column].map(color_dict)
+    elif column and bins is None:
+        df["_color"] = nan_color
+    elif column and column in df:
+        notnas = df[df[column].notna()]
+        if bins is not None and len(bins) == 1:
+            notnas["_color"] = next(
+                iter(color for color in color_dict.values() if color != nan_color)
+            )
+        else:
+            conditions = [
+                (notnas[column] < bins[1]) & (notnas[column].notna()),
+                *[
+                    (notnas[column] >= bins[i])
+                    & (notnas[column] < bins[i + 1])
+                    & (notnas[column].notna())
+                    for i in np.arange(2, len(bins) - 1)
+                ],
+                (notnas[column] >= bins[-1]) & (notnas[column].notna()),
+            ]
+            choices = np.arange(len(conditions)) if bins is not None else None
+            try:
+                notnas["_color"] = [
+                    color_dict[x] for x in np.select(conditions, choices)
+                ]
+            except KeyError as e:
+                raise KeyError(e, color_dict, conditions, choices, bins) from e
+        df = pd.concat([notnas, df[df[column].isna()]])
+    if column and column not in df:
+        data.append(
+            dl.Overlay(
+                dl.GeoJSON(
+                    data=df.__geo_interface__,
+                    style={
+                        "color": nan_color,
+                        "fillColor": nan_color,
+                        "weight": 2,
+                        "fillOpacity": alpha,
+                    },
+                    onEachFeature=ns("yellowIfHighlighted"),
+                    pointToLayer=ns("pointToLayerCircle"),
+                    hideout=dict(
+                        circleOptions=dict(fillOpacity=1, stroke=False, radius=5),
+                    ),
+                    id={"type": "geojson", "filename": path},
+                ),
+                name=_get_name(path),
+                checked=True,
+                id={"type": "geojson-overlay", "filename": path},
+            )
+        )
+    elif column:
+        data.append(
+            dl.Overlay(
+                dl.LayerGroup(
+                    [
+                        dl.GeoJSON(
+                            data=(df[df["_color"] == color_]).__geo_interface__,
+                            style={
+                                "color": color_,
+                                "fillColor": color_,
+                                "weight": 2,
+                                "fillOpacity": alpha,
+                            },
+                            onEachFeature=ns("yellowIfHighlighted"),
+                            pointToLayer=ns("pointToLayerCircle"),
+                            id={
+                                "type": "geojson",
+                                "filename": path + color_,
+                            },
+                            hideout=dict(
+                                circleOptions=dict(
+                                    fillOpacity=1, stroke=False, radius=5
+                                ),
+                            ),
+                        )
+                        for color_ in df["_color"].unique()
+                        if pd.notna(color_)
+                    ]
+                    + [
+                        dl.GeoJSON(
+                            data=df[df[column].isna()].__geo_interface__,
+                            style={
+                                "color": nan_color,
+                                "fillColor": nan_color,
+                                "weight": 2,
+                                "fillOpacity": alpha,
+                            },
+                            id={
+                                "type": "geojson",
+                                "filename": path + "_nan",
+                            },
+                            onEachFeature=ns("yellowIfHighlighted"),
+                            pointToLayer=ns("pointToLayerCircle"),
+                            hideout=dict(
+                                circleOptions=dict(
+                                    fillOpacity=1, stroke=False, radius=5
+                                ),
+                            ),
+                        )
+                    ]
+                ),
+                name=_get_name(path),
+                checked=True,
+                id={"type": "geojson-overlay", "filename": path},
+            )
+        )
+    else:
+        # no column
+        color = color_dict[_get_name(path)]
+        data.append(
+            dl.Overlay(
+                dl.GeoJSON(
+                    data=df.__geo_interface__,
+                    style={
+                        "color": color,
+                        "fillColor": color,
+                        "weight": 2,
+                        "fillOpacity": alpha,
+                    },
+                    onEachFeature=ns("yellowIfHighlighted"),
+                    pointToLayer=ns("pointToLayerCircle"),
+                    hideout=dict(
+                        circleOptions=dict(fillOpacity=1, stroke=False, radius=5),
+                    ),
+                    id={"type": "geojson", "filename": path},
+                ),
+                name=_get_name(path),
+                checked=True,
+                id={"type": "geojson-overlay", "filename": path},
+            )
+        )
+    return data, out_alert, rows_are_hidden
+
+
+def polars_isna(df):
+    try:
+        return (df.is_nan()) | (df.is_null())
+    except pl.exceptions.InvalidOperationError:
+        return df.is_null()
+
+
+def filter_by_bounds(df: pl.DataFrame, bounds: tuple[float]) -> pl.DataFrame:
+    minx, miny, maxx, maxy = bounds
+
+    df = df.filter(
+        (pl.col("minx") <= float(maxx))
+        & (pl.col("maxx") >= float(minx))
+        & (pl.col("miny") <= float(maxy))
+        & (pl.col("maxy") >= float(miny))
+    )
+    return df
+
+
+def read_nrows(file, nrow: int, nth_batch: int, file_system) -> pyarrow.Table:
+    """Read first n rows of a parquet file."""
+    for _, batch in zip(
+        range(nth_batch + 1),
+        pq.ParquetFile(file, filesystem=file_system).iter_batches(nrow),
+        strict=False,
+    ):
+        pass
+    return pyarrow.Table.from_batches([batch]).to_pandas()
+
+
+def _read_and_to_4326(path: str, file_system, **kwargs) -> GeoDataFrame:
+    if "-_-" in path:
+        rows = path.split("-_-")[-1]
+        nrow, nth_batch = rows.split("-")
+        nrow = int(nrow)
+        nth_batch = int(nth_batch)
+        path = path.split("-_-")[0]
+        try:
+            df = read_nrows(path, nrow, nth_batch, file_system=file_system)
+        except Exception:
+            df = read_nrows(path, nrow, nth_batch, file_system=None)
+        metadata = _get_geo_metadata(path, file_system)
+        primary_column = metadata["primary_column"]
+        geo_metadata = metadata["columns"][primary_column]
+        crs = geo_metadata["crs"]
+        df["geometry"] = GeoSeries.from_wkb(df[primary_column])
+        if primary_column != "geometry":
+            df = df.drop(primary_column, axis=1)
+        df = GeoDataFrame(df, crs=crs)
+        return _fix_df(df)
+    df = sg.read_geopandas(path, file_system=file_system, **kwargs)
+    return _fix_df(df)
+
+
+def _fix_df(df: GeoDataFrame) -> GeoDataFrame:
+    df["area"] = df.area
+    if df["area"].median() > 10:
+        df["area"] = df["area"].astype(int)
+    if df.crs is not None:
+        df = df.to_crs(4326)
+    bounds = df.geometry.bounds.astype("float32[pyarrow]")
+    df[["minx", "miny", "maxx", "maxy"]] = bounds[["minx", "miny", "maxx", "maxy"]]
+    return df
+
+
+def _get_unique_id(df, i):
+    """Float column of 0.0, 0.01, ..., 3.1211 etc."""
+    divider = 10 ** len(str(len(df)))
+    return (np.array(range(len(df))) / divider) + i
+
+
+def _read_files(explorer, paths: list[str], **kwargs) -> None:
+    if not paths:
+        return
+    paths = list(paths)
+    backend = "threading" if len(paths) <= 3 else "loky"
+    with joblib.Parallel(len(paths), backend=backend) as parallel:
+        more_data = parallel(
+            joblib.delayed(_read_and_to_4326)(
+                path, file_system=explorer.file_system, **kwargs
+            )
+            for path in paths
+        )
+    for path, df in zip(paths, more_data, strict=True):
+        for col in df.columns:
+            if is_datetime64_any_dtype(df[col]):
+                try:
+                    df[col] = [str(x) for x in df[col].dt.round("d")]
+                except Exception:
+                    df = df.drop(col, axis=1)
+        df["__file_path"] = path
+        explorer._max_unique_id_int += 1
+        df["_unique_id"] = _get_unique_id(df, explorer._max_unique_id_int)
+        if isinstance(df, GeoDataFrame):
+            df = df.assign(geometry=df.geometry.to_wkb())
+        df = pl.from_pandas(df)
+        explorer.loaded_data[path] = df
+
+
+def _random_color(min_diff: int = 50) -> str:
+    """Get a random hex color code that is not too gray.
+
+    Args:
+        min_diff: minimum total distance between red, green and blue.
+            Maximum possible value will be 510, if one value is 0 and another is 255 (the third one will not matter).
+    """
+    while True:
+        r, g, b = np.random.choice(range(256), size=3)
+        if abs(r - g) + abs(r - b) > min_diff:
+            return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def _get_name(path):
+    return Path(path).stem
+
+
+def _get_child_paths(paths, file_system):
+    child_paths = []
+    for path in paths:
+        suffix = Path(path).suffix
+        if suffix:
+            these_child_paths = list(
+                file_system.glob(str(Path(path) / f"**/*{suffix}"))
+            )
+            if not these_child_paths:
+                child_paths.append(path)
+            else:
+                child_paths += these_child_paths
+        else:
+            child_paths.append(path)
+    return child_paths
+
+
+def _get_bounds_series(path, file_system):
+    paths = [
+        _standardize_path(path)
+        for path in (
+            set(file_system.glob(str(Path(path) / "*.parquet")))
+            | set(file_system.glob(str(Path(path) / "**/*.parquet")))
+        )
+    ]
+    if not paths:
+        paths = [path]
+    bounds_series = sg.get_bounds_series(paths, file_system=file_system)
+    if len(bounds_series):
+        bounds_series = bounds_series.to_crs(4326)
+    return bounds_series
 
 
 def get_index(values: list[Any], ids: list[Any], index: Any):
@@ -3129,3 +3225,13 @@ def _get_force_categorical_button(
 
 class _UseColumns:
     pass
+
+
+def _get_file_system(path, file_system) -> AbstractFileSystem:
+    if file_system is not None:
+        return file_system
+    if str(path).startswith("gs://"):
+        from gcsfs import GCSFileSystem
+
+        return GCSFileSystem()
+    return LocalFileSystem()

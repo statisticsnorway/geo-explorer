@@ -82,10 +82,14 @@ def not_test_geo_explorer_locally():
         selected_features=[1, 1.05],
         column="FYLKE",
         zoom=13,
-        center=(59.91740845, 10.71394444),
+        center=(59.91740845, 10.71394454),
         file_system=LocalFileSystem(),
         port=None,
+        zoomDelta=0.5,
+        maxZoom=16,
+        minZoom=6,
     )
+    print(explorer)
     explorer.run(debug=True)
 
 
