@@ -305,7 +305,6 @@ class GeoExplorer:
                     dbc.Row(html.Div(id="alert2")),
                     dbc.Row(html.Div(id="alert3")),
                     dbc.Row(html.Div(id="alert4")),
-                    dbc.Row(html.Div(id="alert5")),
                     dbc.Row(html.Div(id="new-file-added")),
                     html.Div(id="file-deleted"),
                     dbc.Row(
@@ -585,7 +584,6 @@ class GeoExplorer:
                     *self._file_browser.get_file_browser_components(),
                     dcc.Store(id="is_splitted", data=False),
                     dcc.Store(id="update-table", data=None),
-                    dcc.Store(id="column-dropdown2", data=None),
                     dcc.Input(
                         id="debounced_bounds",
                         value=None,
@@ -1007,16 +1005,11 @@ class GeoExplorer:
             Output("is_splitted", "data"),
             Output("column-dropdown", "value"),
             Input("splitter", "n_clicks"),
-            Input("alert5", "children"),
         )
-        def set_column_to_split_index(splitter_clicks, alert):
+        def set_column_to_split_index(splitter_clicks):
             if not self.selected_files:
                 return False, None
             triggered = dash.callback_context.triggered_id
-            if triggered == "alert5" and alert is None:
-                return dash.no_update, dash.no_update
-            if triggered == "alert5" and alert is not None:
-                return False, None
             if triggered is not None:
                 self.splitted = not self.splitted
             if self.splitted:
@@ -1471,7 +1464,6 @@ class GeoExplorer:
             Output("is-numeric", "children"),
             Output("force-categorical", "children"),
             Output("colors-are-updated", "data"),
-            Output("alert5", "children"),
             Input("cmap-placeholder", "value"),
             Input("k", "value"),
             Input("force-categorical", "n_clicks"),
@@ -1495,7 +1487,7 @@ class GeoExplorer:
             if not self.selected_files:
                 self.column = None
                 self.color_dict = {}
-                return html.Div(), None, False, None, 1, None
+                return html.Div(), None, False, None, 1
             elif column and column != self.column:
                 self.color_dict = {}
                 self.column = column
@@ -1508,7 +1500,6 @@ class GeoExplorer:
                     dash.no_update,
                     dash.no_update,
                     dash.no_update,
-                    None,
                 )
             else:
                 self.column = column
@@ -1522,6 +1513,24 @@ class GeoExplorer:
                 self.concatted_data is not None and column not in self.concatted_data
             ):
                 new_values = [_get_name(value) for value in self.selected_files]
+                if len(set(new_values)) < len(new_values):
+                    new_values = [
+                        (
+                            _get_name_from_parent(value)
+                            if sum(x == name for x in new_values) > 1
+                            else _get_name(value)
+                        )
+                        for value, name in zip(
+                            self.selected_files, new_values, strict=True
+                        )
+                    ]
+                    for label, path in zip(
+                        new_values, self.selected_files, strict=True
+                    ):
+                        name = _get_name(path)
+                        if name in self.color_dict:
+                            self.color_dict[label] = self.color_dict.pop(name)
+
                 new_colors = (
                     default_colors
                     + [
@@ -1538,19 +1547,12 @@ class GeoExplorer:
                 color_dict |= self.color_dict
                 self.color_dict = color_dict
 
-                color_dict = {
-                    key: color
-                    for key, color in color_dict.items()
-                    if any(str(key) == Path(x).stem for x in self.selected_files)
-                }
-
                 return (
                     _get_colorpicker_container(color_dict),
                     None,
                     False,
                     None,
                     1,
-                    None,
                 )
 
             bounds = self._nested_bounds_to_bounds(bounds)
@@ -1560,20 +1562,7 @@ class GeoExplorer:
                 bounds,
             )[column]
             values_no_nans = values.drop_nans().drop_nulls()
-            try:
-                values_no_nans_unique = set(values_no_nans.unique())
-            except TypeError as e:
-                self.column = None
-                self.color_dict = {}
-                alert = dbc.Alert(str(e), color="warning", dismissable=True)
-                return (
-                    dash.no_update,
-                    dash.no_update,
-                    dash.no_update,
-                    dash.no_update,
-                    dash.no_update,
-                    alert,
-                )
+            values_no_nans_unique = set(values_no_nans.unique())
 
             force_categorical_button = _get_force_categorical_button(
                 values_no_nans, force_categorical_clicks
@@ -1656,7 +1645,6 @@ class GeoExplorer:
                 is_numeric,
                 force_categorical_button,
                 1,
-                None,
             )
 
         @callback(
@@ -2310,7 +2298,13 @@ class GeoExplorer:
     def _get_column_dropdown_options(self):
         if self.concatted_data is None:
             return []
-        columns = set(self.concatted_data.columns).difference(
+        columns = {
+            col
+            for col, dtype in zip(
+                self.concatted_data.columns, self.concatted_data.dtypes, strict=True
+            )
+            if not dtype.is_nested()
+        }.difference(
             {
                 "__file_path",
                 "_unique_id",
@@ -2948,7 +2942,10 @@ def _add_data_one_path(
         )
     else:
         # no column
-        color = color_dict[_get_name(path)]
+        try:
+            color = color_dict[_get_name(path)]
+        except KeyError:
+            color = color_dict[_get_name_from_parent(path)]
         data.append(
             dl.Overlay(
                 dl.GeoJSON(
@@ -3088,6 +3085,12 @@ def _random_color(min_diff: int = 50) -> str:
 
 def _get_name(path):
     return Path(path).stem
+
+
+def _get_name_from_parent(path):
+    name = Path(path).stem
+    parent_name = Path(path).parent.stem
+    return f"{parent_name}/{name}"
 
 
 def _get_child_paths(paths, file_system):
