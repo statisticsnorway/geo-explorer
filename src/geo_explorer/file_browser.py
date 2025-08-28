@@ -391,15 +391,18 @@ def _list_dir(
     try:
         paths = _ls(path)
     except Exception as e:
-        return (
-            [],
-            [],
-            dbc.Alert(
-                f"Couldn't list files in {path}. {type(e)}: {e}",
-                color="warning",
-                dismissable=True,
-            ),
-        )
+        try:
+            paths = _try_glob(path, file_system)
+        except Exception:
+            return (
+                [],
+                [],
+                dbc.Alert(
+                    f"Couldn't list files in {path}. {type(e)}: {e}",
+                    color="warning",
+                    dismissable=True,
+                ),
+            )
 
     if not paths:
         paths = _try_glob(path, file_system)
