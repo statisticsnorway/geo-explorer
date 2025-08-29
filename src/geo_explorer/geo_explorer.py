@@ -698,7 +698,7 @@ class GeoExplorer:
             #     ].index
             # ),
             [x for x in self.selected_files if x not in self._loaded_data],
-            mask=Point(temp_center),
+            mask=Point(reversed(temp_center)),
         )
 
         # dataframe dicts as input data are currently sorted first because they were added to loaded_data first.
@@ -710,6 +710,8 @@ class GeoExplorer:
             if isinstance(x, dict):
                 for key in x:
                     key = _standardize_path(key)
+                    if key not in self._loaded_data:
+                        continue
                     df = self._loaded_data[key]
                     loaded_data_sorted[key] = df.with_columns(
                         _unique_id=_get_unique_id(df, self._max_unique_id_int)
@@ -3094,11 +3096,16 @@ def _datetime_to_string(df):
     return df
 
 
-def _read_files(explorer, paths: list[str], **kwargs) -> None:
-    print("_read_files", paths)
+def _read_files(explorer, paths: list[str], mask=None, **kwargs) -> None:
     if not paths:
         return
-    paths = list(paths)
+    paths = [
+        path
+        for path in paths
+        if mask is None or shapely.intersects(mask, explorer._bounds_series.get(path))
+    ]
+    if not paths:
+        return
     # loky because to_crs is slow with threading
     backend = "threading" if len(paths) <= 3 else "loky"
     with joblib.Parallel(len(paths), backend=backend) as parallel:
@@ -3112,7 +3119,6 @@ def _read_files(explorer, paths: list[str], **kwargs) -> None:
         explorer._loaded_data[path] = df.with_columns(
             _unique_id=_get_unique_id(df, explorer._max_unique_id_int)
         )
-        # explorer._loaded_data[path] = df
         explorer._max_unique_id_int += 1
 
 

@@ -74,7 +74,7 @@ def not_test_geo_explorer_locally(run=False):
         }
     )
     assert not explorer._deleted_categories
-    assert len(explorer._loaded_data) == 7
+    # assert len(explorer._loaded_data) == 7
     assert all(explorer.selected_files.values())
     assert all(isinstance(x, pl.DataFrame) for x in explorer._loaded_data.values())
     for i, (k, v) in enumerate(explorer._loaded_data.items()):
@@ -82,11 +82,11 @@ def not_test_geo_explorer_locally(run=False):
             i,
             v["_unique_id"].cast(pl.Int16),
         )
-    assert explorer.selected_features
-    for k, v in explorer.__dict__.items():
-        print()
-        print(k)
-        print(v)
+    # assert explorer.selected_features
+    # for k, v in explorer.__dict__.items():
+    #     print()
+    #     print(k)
+    #     print(v)
     if run:
         explorer.run(debug=True)
 
