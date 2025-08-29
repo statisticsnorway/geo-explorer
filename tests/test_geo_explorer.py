@@ -76,11 +76,15 @@ def not_test_geo_explorer_locally(run=False):
     assert not explorer._deleted_categories
     # assert len(explorer._loaded_data) == 7
     assert all(explorer.selected_files.values())
-    assert all(isinstance(x, pl.DataFrame) for x in explorer._loaded_data.values())
+    assert all(isinstance(x, pl.LazyFrame) for x in explorer._loaded_data.values()), [
+        type(x) for x in explorer._loaded_data.values()
+    ]
     for i, (k, v) in enumerate(explorer._loaded_data.items()):
-        assert (v["_unique_id"].cast(pl.Int16) == i).all(), (
+        assert (
+            v.select("_unique_id").cast(pl.Int16).collect()["_unique_id"] == i
+        ).all(), (
             i,
-            v["_unique_id"].cast(pl.Int16),
+            v.select("_unique_id").cast(pl.Int16).collect()["_unique_id"],
         )
     # assert explorer.selected_features
     # for k, v in explorer.__dict__.items():

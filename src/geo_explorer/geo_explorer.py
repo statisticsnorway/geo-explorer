@@ -261,7 +261,7 @@ class GeoExplorer:
         self.alpha = alpha
         self._bounds_series = GeoSeries()
         self.selected_files: dict[str, int] = {}
-        self._loaded_data: dict[str, pl.DataFrame] = {}
+        self._loaded_data: dict[str, pl.LazyFrame] = {}
         self._max_unique_id_int: int = 0
         self._loaded_data_sizes: dict[str, int] = {}
         self._concatted_data: pl.DataFrame | None = None
@@ -650,13 +650,13 @@ class GeoExplorer:
                     self._filters[key] = value
                     continue
                 value = _gdf_to_polars(value, key)
-                self._loaded_data[key] = value
                 bounds_series_dict[key] = shapely.box(
                     float(value["minx"].min()),
                     float(value["miny"].min()),
                     float(value["maxx"].max()),
                     float(value["maxy"].max()),
                 )
+                self._loaded_data[key] = value.lazy()
                 self.selected_files[key] = True
 
         self._bounds_series = GeoSeries(bounds_series_dict)
@@ -1056,7 +1056,7 @@ class GeoExplorer:
             if triggered in ["file-deleted"]:
                 self._max_unique_id_int = 0
                 for path, df in self._loaded_data.items():
-                    id_prev = int(next(iter(df["_unique_id"])))
+                    id_prev = df.select(pl.col("_unique_id").first()).collect().item()
                     self._loaded_data[path] = df.with_columns(
                         _unique_id=_get_unique_id(df, self._max_unique_id_int)
                     )
@@ -2050,8 +2050,7 @@ class GeoExplorer:
 
             df = list(self._loaded_data.values())[i]
             matches = (
-                df.lazy()
-                .filter(pl.col("_unique_id") == unique_id)
+                df.filter(pl.col("_unique_id") == unique_id)
                 .select("minx", "miny", "maxx", "maxy")
                 .collect()
             )
@@ -2424,7 +2423,7 @@ class GeoExplorer:
                     continue
                 if path not in key:
                     continue
-                df = self._loaded_data[key].lazy()
+                df = self._loaded_data[key]
                 if self.splitted:
                     df = get_split_index(df)
                 if bounds is not None:
@@ -2966,7 +2965,7 @@ def polars_isna(df):
         return df.is_null()
 
 
-def filter_by_bounds(df: pl.DataFrame, bounds: tuple[float]) -> pl.DataFrame:
+def filter_by_bounds(df: pl.LazyFrame, bounds: tuple[float]) -> pl.LazyFrame:
     minx, miny, maxx, maxy = bounds
 
     df = df.filter(
@@ -2999,7 +2998,7 @@ def _read_polars(path, file_system, primary_column, **kwargs):
         )
 
 
-def _read_and_to_4326(path: str, file_system, **kwargs) -> pl.DataFrame:
+def _read_and_to_4326(path: str, file_system, **kwargs) -> pl.LazyFrame:
     if FILE_SPLITTER_TXT not in path:
         try:
             # metadata = _get_geo_metadata(path, file_system)
@@ -3007,13 +3006,13 @@ def _read_and_to_4326(path: str, file_system, **kwargs) -> pl.DataFrame:
             # df = _read_polars(
             #     path, file_system=file_system, primary_column=primary_column, **kwargs
             # )
-            # return _prepare_df(df, path, metadata, file_system)
+            # return _prepare_df(df, path, metadata)
             table = _read_pyarrow(path, file_system=file_system, **kwargs)
             return _pyarrow_to_polars(table, path, file_system)
         except Exception as e:
             debug_print(f"{type(e)}: {e} for {path}")
             df = sg.read_geopandas(path, file_system=file_system, **kwargs)
-            return _gdf_to_polars(df, path)
+            return _gdf_to_polars(df, path).lazy()
     rows = path.split(FILE_SPLITTER_TXT)[-1]
     nrow, nth_batch = rows.split("-")
     nrow = int(nrow)
@@ -3030,20 +3029,15 @@ def _pyarrow_to_polars(table, path, file_system):
     metadata = _get_geo_metadata(path, file_system)
     primary_column = metadata["primary_column"]
     try:
-        df = pl.scan_pyarrow_dataset(
-            table, schema_overrides={primary_column: pl.Binary()}
-        )
+        df = pl.from_arrow(table, schema_overrides={primary_column: pl.Binary()}).lazy()
     except Exception as e:
         if DEBUG:
             raise e
-        df = pl.from_pandas(table.to_pandas())
-    return _prepare_df(df, path, metadata, file_system)
+        df = pl.from_pandas(table.to_pandas()).lazy()
+    return _prepare_df(df, path, metadata)
 
 
-def _prepare_df(df: pl.DataFrame, path, metadata, file_system) -> pl.DataFrame:
-    print(type(df))
-    print(type(df))
-    # df = df.lazy()
+def _prepare_df(df: pl.LazyFrame, path, metadata) -> pl.LazyFrame:
     primary_column = metadata["primary_column"]
     geo_metadata = metadata["columns"][primary_column]
     crs = geo_metadata["crs"]
@@ -3062,7 +3056,7 @@ def _prepare_df(df: pl.DataFrame, path, metadata, file_system) -> pl.DataFrame:
         pl.Series("maxx", bounds[:, 2]),
         pl.Series("maxy", bounds[:, 3]),
         __file_path=pl.lit(path),
-    ).collect()
+    )
 
 
 def _get_area_and_bounds(geometries: GeometryArray | GeoSeries):
@@ -3090,23 +3084,19 @@ def _gdf_to_polars(df: GeoDataFrame, path) -> GeoDataFrame:
     return df
 
 
-def _get_divider(df):
-    return 10 ** len(str(len(df)))
+def _get_divider_lf() -> pl.Expr:
+    """Compute 10 ** len(str(n_rows)) lazily."""
+    return (pl.count().cast(pl.Utf8).str.len_chars()).map_elements(
+        lambda n: 10**n, return_dtype=pl.Int64
+    )
 
 
-def _get_unique_id(df, i):
-    """Float column of 0.0, 0.01, ..., 3.1211 etc."""
-    return (np.array(range(len(df))) / _get_divider(df)) + i
-
-
-def _datetime_to_string(df):
-    for col in df.columns:
-        if is_datetime64_any_dtype(df[col]):
-            try:
-                df[col] = [str(x) for x in df[col].dt.round("d")]
-            except Exception:
-                df = df.drop(col, axis=1)
-    return df
+def _get_unique_id(df, i: float) -> pl.Expr:
+    """Lazy float column: 0.0, 0.01, ..., N / divider + i."""
+    divider = _get_divider_lf()
+    return (pl.int_range(pl.len(), eager=False).cast(pl.Float64) / divider + i).round(
+        10
+    )
 
 
 def _read_files(explorer, paths: list[str], mask=None, **kwargs) -> None:
@@ -3305,7 +3295,7 @@ def is_jupyter():
     )
 
 
-def get_split_index(df: pl.DataFrame) -> pl.DataFrame:
+def get_split_index(df: pl.LazyFrame) -> pl.LazyFrame:
     return df.with_columns(
         (
             pl.col("__file_path").map_elements(_get_name, return_dtype=pl.Utf8)
@@ -3417,11 +3407,11 @@ def get_google_maps_url(center, zoom_m: int = 150) -> str:
 
 
 def _get_selected_feature(
-    unique_id: float, loaded_data: dict[str, pl.DataFrame]
+    unique_id: float, loaded_data: dict[str, pl.LazyFrame]
 ) -> dict[str, str | Number]:
     i = int(unique_id)
     df = list(loaded_data.values())[i]
-    row = df.filter(pl.col("_unique_id") == unique_id)
+    row = df.filter(pl.col("_unique_id") == unique_id).collect()
     columns = [col for col in row.columns if col != "geometry"]
     features = GeoDataFrame(
         row.drop("geometry"),
