@@ -68,7 +68,7 @@ DEFAULT_CENTER: tuple[float, float] = (59.91740845, 10.71394444)
 CURRENT_YEAR: int = datetime.datetime.now().year
 FILE_SPLITTER_TXT: str = "-_-"
 
-DEBUG: bool = False
+DEBUG: bool = 1
 
 if DEBUG:
 
@@ -2989,15 +2989,25 @@ def read_nrows(file, nrow: int, nth_batch: int, file_system) -> pyarrow.Table:
     return pyarrow.Table.from_batches([batch])
 
 
-def _read_polars(path, file_system, **kwargs):
+def _read_polars(path, file_system, primary_column, **kwargs):
     with file_system.open(path, "rb") as file:
-        return pl.scan_parquet(file, **kwargs)
+        return pl.scan_parquet(
+            file,
+            schema={primary_column: pl.Binary()},
+            missing_columns="insert",
+            **kwargs,
+        )
 
 
 def _read_and_to_4326(path: str, file_system, **kwargs) -> pl.DataFrame:
     if FILE_SPLITTER_TXT not in path:
         try:
-            # df = _read_polars(path, file_system=file_system, **kwargs)
+            # metadata = _get_geo_metadata(path, file_system)
+            # primary_column = metadata["primary_column"]
+            # df = _read_polars(
+            #     path, file_system=file_system, primary_column=primary_column, **kwargs
+            # )
+            # return _prepare_df(df, path, metadata, file_system)
             table = _read_pyarrow(path, file_system=file_system, **kwargs)
             return _pyarrow_to_polars(table, path, file_system)
         except Exception as e:
@@ -3020,7 +3030,9 @@ def _pyarrow_to_polars(table, path, file_system):
     metadata = _get_geo_metadata(path, file_system)
     primary_column = metadata["primary_column"]
     try:
-        df = pl.from_arrow(table, schema_overrides={primary_column: pl.Binary()})
+        df = pl.scan_pyarrow_dataset(
+            table, schema_overrides={primary_column: pl.Binary()}
+        )
     except Exception as e:
         if DEBUG:
             raise e
@@ -3029,7 +3041,9 @@ def _pyarrow_to_polars(table, path, file_system):
 
 
 def _prepare_df(df: pl.DataFrame, path, metadata, file_system) -> pl.DataFrame:
-    df = df.lazy()
+    print(type(df))
+    print(type(df))
+    # df = df.lazy()
     primary_column = metadata["primary_column"]
     geo_metadata = metadata["columns"][primary_column]
     crs = geo_metadata["crs"]
