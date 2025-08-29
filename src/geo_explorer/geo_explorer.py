@@ -2999,8 +2999,7 @@ def _read_and_to_4326(path: str, file_system, **kwargs) -> pl.DataFrame:
         try:
             # df = _read_polars(path, file_system=file_system, **kwargs)
             table = _read_pyarrow(path, file_system=file_system, **kwargs)
-            df = pl.from_arrow(table)
-            return _prepare_df(df, path, file_system=file_system)
+            return _pyarrow_to_polars(table, path, file_system)
         except Exception as e:
             debug_print(f"{type(e)}: {e} for {path}")
             df = sg.read_geopandas(path, file_system=file_system, **kwargs)
@@ -3014,13 +3013,23 @@ def _read_and_to_4326(path: str, file_system, **kwargs) -> pl.DataFrame:
         table = read_nrows(path, nrow, nth_batch, file_system=file_system)
     except Exception:
         table = read_nrows(path, nrow, nth_batch, file_system=None)
-    df = pl.from_arrow(table)
-    return _prepare_df(df, path, file_system)
+    return _pyarrow_to_polars(table, path, file_system)
 
 
-def _prepare_df(df: pl.DataFrame, path, file_system) -> pl.DataFrame:
-    df = df.lazy()
+def _pyarrow_to_polars(table, path, file_system):
     metadata = _get_geo_metadata(path, file_system)
+    primary_column = metadata["primary_column"]
+    try:
+        df = pl.from_arrow(table, schema_overrides={primary_column: pl.Binary()})
+    except Exception as e:
+        if DEBUG:
+            raise e
+        df = pl.from_pandas(table.to_pandas())
+    return _prepare_df(df, path, metadata, file_system)
+
+
+def _prepare_df(df: pl.DataFrame, path, metadata, file_system) -> pl.DataFrame:
+    df = df.lazy()
     primary_column = metadata["primary_column"]
     geo_metadata = metadata["columns"][primary_column]
     crs = geo_metadata["crs"]
