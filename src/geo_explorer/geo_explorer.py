@@ -68,7 +68,7 @@ DEFAULT_CENTER: tuple[float, float] = (59.91740845, 10.71394444)
 CURRENT_YEAR: int = datetime.datetime.now().year
 FILE_SPLITTER_TXT: str = "-_-"
 
-DEBUG: bool = 1
+DEBUG: bool = False
 
 if DEBUG:
 
@@ -691,12 +691,6 @@ class GeoExplorer:
         temp_center = center if center is not None else DEFAULT_CENTER
         _read_files(
             self,
-            # list(
-            #     self._bounds_series[
-            #         lambda x: (x.intersects(Point(temp_center)))
-            #         & (~x.index.isin(self._loaded_data))
-            #     ].index
-            # ),
             [x for x in self.selected_files if x not in self._loaded_data],
             mask=Point(reversed(temp_center)),
         )
@@ -905,9 +899,6 @@ class GeoExplorer:
                 triggered,
                 f"{len(missing or [])=}, {len(self._loaded_data)=}",
             )
-
-            if triggered is None:
-                return dash.no_update, dash.no_update, dash.no_update
 
             if isinstance(triggered, dict) and triggered["type"] == "checked-btn":
                 path = get_index_if_clicks(checked_clicks, checked_ids)
@@ -3004,7 +2995,6 @@ def _read_polars(path, file_system, **kwargs):
 
 
 def _read_and_to_4326(path: str, file_system, **kwargs) -> pl.DataFrame:
-    debug_print("_read_and_to_4326", path, kwargs)
     if FILE_SPLITTER_TXT not in path:
         try:
             # df = _read_polars(path, file_system=file_system, **kwargs)
