@@ -10,6 +10,7 @@ sys.path.insert(0, src)
 
 import sgis as sg
 from dash import Dash
+import polars as pl
 
 from geo_explorer import GeoExplorer
 from geo_explorer import LocalFileSystem
@@ -20,38 +21,8 @@ def test_debugging_is_off():
     assert not DEBUG, DEBUG
 
 
-def test_geo_explorer():
-    explorer = GeoExplorer(
-        start_dir=src,
-        data=[
-            "tests/data/test_path_p2025_v2.parquet",
-            "tests/data/test_path_p2025-01_v1.parquet",
-            {
-                "df1": sg.to_gdf((10.8, 59.9), 4326).assign(num_col=100),
-                "df2": sg.to_gdf([(10.8, 59.9), (10.8001, 59.9001)], 4326)
-                .to_crs(3035)
-                .pipe(sg.buff, 1000)
-                .assign(num_col=1000),
-            },
-            {
-                "df3": sg.to_gdf((10.8, 59.9), 4326)
-                .to_crs(3035)
-                .pipe(sg.buff, 1000)
-                .pipe(sg.to_lines)
-                .assign(num_col=10000),
-            },
-        ],
-        column="num_col",
-        zoom=15,
-        center=(59.91740845, 10.71394444),
-        file_system=LocalFileSystem(),
-        port=3000,
-    )
-    assert isinstance(explorer.app, Dash)
-
-
-def not_test_geo_explorer_locally():
-    explorer = GeoExplorer(
+def _get_explorer():
+    return GeoExplorer(
         start_dir="C:/users/ort/OneDrive - Statistisk sentralbyrå/data",
         favorites=[
             "C:/users/ort/OneDrive - Statistisk sentralbyrå/data",
@@ -60,17 +31,18 @@ def not_test_geo_explorer_locally():
         data={
             "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/N5000_fylke_flate_2023.parquet": 'lambda x: x["FYLKE"] != "50"',
             "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/N5000_fylke_flate_2024.parquet": "FYLKE != '50'",
-            "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/ABAS_kommune_flate_p2023_v1.parquet": '(pl.col("FYLKE") != "50", pl.col("FYLKE") != "03")',
-            "df1": sg.to_gdf((10.8, 59.9), 4326).assign(num_col=100),
+            "df1": sg.to_gdf((10.8, 59.9), 4326).assign(num_col=10),
             "df2": sg.to_gdf([(10.8, 59.9), (10.8001, 59.9001)], 4326)
             .to_crs(3035)
             .pipe(sg.buff, 1000)
-            .assign(num_col=1000),
+            .assign(num_col=[100, 111]),
             "df3": sg.to_gdf((10.8, 59.9), 4326)
             .to_crs(3035)
             .pipe(sg.buff, 1000)
             .pipe(sg.to_lines)
             .assign(num_col=10000),
+            "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/ABAS_kommune_flate_p2023_v1.parquet": '(pl.col("FYLKE") != "50", pl.col("FYLKE") != "03")',
+            "df_out_of_bounds": sg.to_gdf((10.8, 61.0), 4326).assign(num_col=-1),
         },
         wms={
             "norge_i_bilder": sg.NorgeIBilderWms(
@@ -89,8 +61,34 @@ def not_test_geo_explorer_locally():
         maxZoom=16,
         minZoom=6,
     )
+
+
+def not_test_geo_explorer_locally(run=False):
+    explorer = _get_explorer()
     print(explorer)
-    explorer.run(debug=True)
+    assert explorer._filters == (
+        {
+            "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/N5000_fylke_flate_2023.parquet": 'lambda x: x["FYLKE"] != "50"',
+            "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/N5000_fylke_flate_2024.parquet": "FYLKE != '50'",
+            "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/ABAS_kommune_flate_p2023_v1.parquet": '(pl.col("FYLKE") != "50", pl.col("FYLKE") != "03")',
+        }
+    )
+    assert not explorer._deleted_categories
+    assert len(explorer._loaded_data) == 7
+    assert all(explorer.selected_files.values())
+    assert all(isinstance(x, pl.DataFrame) for x in explorer._loaded_data.values())
+    for i, (k, v) in enumerate(explorer._loaded_data.items()):
+        assert (v["_unique_id"].cast(pl.Int16) == i).all(), (
+            i,
+            v["_unique_id"].cast(pl.Int16),
+        )
+    assert explorer.selected_features
+    for k, v in explorer.__dict__.items():
+        print()
+        print(k)
+        print(v)
+    if run:
+        explorer.run(debug=True)
 
 
 def not_test_geo_explorer_dapla():
@@ -114,6 +112,7 @@ def not_test_geo_explorer_dapla():
                 .pipe(sg.buff, 1000)
                 .pipe(sg.to_lines)
                 .assign(num_col=10000),
+                "df_out_of_bounds": sg.to_gdf((10.8, 61.0), 4326).assign(num_col=-1),
             },
         ],
         selected_features=[1, 1.05],
@@ -131,4 +130,4 @@ if __name__ == "__main__":
     if any("dapla" in key.lower() for key in os.environ):
         not_test_geo_explorer_dapla()
     else:
-        not_test_geo_explorer_locally()
+        not_test_geo_explorer_locally(run=True)
