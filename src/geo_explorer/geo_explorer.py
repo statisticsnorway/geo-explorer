@@ -564,24 +564,12 @@ class GeoExplorer:
                                         },
                                     ),
                                     dbc.Row(
-                                        [
-                                            dbc.Col(
-                                                get_button_with_tooltip(
-                                                    "Reload categories",
-                                                    id="reload-categories",
-                                                    n_clicks=0,
-                                                    tooltip_text="Get back categories that have been X-ed out",
-                                                ),
-                                            ),
-                                            dbc.Col(
-                                                get_button_with_tooltip(
-                                                    "Get query examples",
-                                                    id="query-examples",
-                                                    n_clicks=0,
-                                                    tooltip_text="Get examples on querying your data",
-                                                ),
-                                            ),
-                                        ],
+                                        get_button_with_tooltip(
+                                            "Reload categories",
+                                            id="reload-categories",
+                                            n_clicks=0,
+                                            tooltip_text="Get back categories that have been X-ed out",
+                                        ),
                                     ),
                                     dbc.Row(
                                         id="colorpicker-container",
@@ -602,8 +590,22 @@ class GeoExplorer:
                         n_clicks=int(self.hard_click),
                         tooltip_text="'Hard' click means that clicking on a geometry triggers all overlapping geometries to be marked",
                     ),
-                    dbc.Row(html.Div(children=None, id="query-notepad")),
-                    # dbc.Row(dcc.Input(value=None, type="text", id="query-notepad")),
+                    dbc.Row(
+                        dbc.Col(
+                            [
+                                dbc.Row(
+                                    html.Button(
+                                        "❌ Clear query tips",
+                                        id="clear-query-tips",
+                                        style={"width": "20vh"},
+                                    )
+                                ),
+                                dbc.Row(html.Div(children=None, id="query-text")),
+                            ],
+                            id="query-row",
+                            style={"display": "none"},
+                        )
+                    ),
                     get_data_table(
                         title_id="clicked-features-title",
                         table_id="feature-table-rows-clicked",
@@ -658,7 +660,7 @@ class GeoExplorer:
         if isinstance(data, dict):
             data = [data]
 
-        self._filters = {}
+        self._queries = {}
         for x in data or []:
             if isinstance(x, (str | os.PathLike | PurePath)):
                 self.selected_files[_standardize_path(x)] = True
@@ -671,7 +673,7 @@ class GeoExplorer:
                     raise ValueError(error_mess)
                 elif not isinstance(value, GeoDataFrame):
                     self.selected_files[key] = True
-                    self._filters[key] = value
+                    self._queries[key] = value
                     continue
                 value = _gdf_to_polars(value, key)
                 bounds_series_dict[key] = shapely.box(
@@ -1049,8 +1051,8 @@ class GeoExplorer:
             Input("new-data-read", "children"),
             Input("file-deleted", "children"),
             Input("is_splitted", "data"),
-            Input({"type": "filter", "index": dash.ALL}, "value"),
-            Input({"type": "filter", "index": dash.ALL}, "id"),
+            Input({"type": "query", "index": dash.ALL}, "value"),
+            Input({"type": "query", "index": dash.ALL}, "id"),
             State("debounced_bounds", "value"),
             prevent_initial_call=True,
         )
@@ -1071,10 +1073,21 @@ class GeoExplorer:
 
             bounds = self._nested_bounds_to_bounds(bounds)
 
+            out_alerts = []
             for path in self.selected_files:
                 try:
-                    filter_function = get_index(filter_functions, filter_ids, path)
-                    self._filters[path] = filter_function
+                    query = get_index(filter_functions, filter_ids, path)
+                    self._check_for_circular_queries(query, path)
+                    self._queries[path] = query
+                except RecursionError as e:
+                    out_alerts.append(
+                        dbc.Alert(
+                            str(e),
+                            color="warning",
+                            dismissable=True,
+                        )
+                    )
+                    break
                 except ValueError:
                     pass
 
@@ -1089,14 +1102,11 @@ class GeoExplorer:
                         if int(idx) != id_prev:
                             continue
 
-                        # rounding values to avoid floating point precicion problemns
+                        # rounding values to avoid floating point precicion problems
                         new_idx = round(idx - id_prev + self._max_unique_id_int, 10)
                         feature = self.selected_features.pop(idx)
                         feature["_unique_id"] = new_idx
                         self.selected_features[new_idx] = feature
-
-                        # for path in self.selected_files:
-                        #     if self._filters.get(path) and f" df{i}" in path:
 
                     self._max_unique_id_int += 1
                 update_table = True
@@ -1104,6 +1114,8 @@ class GeoExplorer:
                 update_table = dash.no_update
 
             df, alerts = self._concat_data(bounds)
+            if alerts:
+                out_alerts += alerts
             self._concatted_data = df
 
             debug_print(
@@ -1112,7 +1124,7 @@ class GeoExplorer:
                 len(self._concatted_data) if self._concatted_data is not None else None,
             )
 
-            return 1, 1, alerts, update_table
+            return 1, 1, out_alerts, update_table
 
         @callback(
             Output("file-control-panel", "children"),
@@ -1234,22 +1246,39 @@ class GeoExplorer:
                         dbc.Col(html.Span(path)),
                         dbc.Row(
                             [
-                                dcc.Input(
-                                    self._filters.get(path, None),
-                                    placeholder="Filter (with polars, pandas or sql). E.g. komm_nr == '0301'",
-                                    id={
-                                        "type": "filter",
-                                        "index": path,
-                                    },
-                                    debounce=3,
+                                dbc.Col(
+                                    [
+                                        dcc.Input(
+                                            self._queries.get(path, None),
+                                            placeholder="Query (with polars, pandas or sql). E.g. komm_nr == '0301'",
+                                            id={
+                                                "type": "query",
+                                                "index": path,
+                                            },
+                                            debounce=3,
+                                        ),
+                                        dbc.Tooltip(
+                                            "E.g. komm_nr == '0301' or pl.col('komm_nr') == '0301'",
+                                            target={
+                                                "type": "query",
+                                                "index": path,
+                                            },
+                                            delay={"show": 500, "hide": 100},
+                                        ),
+                                    ],
+                                    width=11,
                                 ),
-                                dbc.Tooltip(
-                                    "E.g. komm_nr == '0301' or pl.col('komm_nr') == '0301'",
-                                    target={
-                                        "type": "filter",
-                                        "index": path,
-                                    },
-                                    delay={"show": 500, "hide": 100},
+                                dbc.Col(
+                                    get_button_with_tooltip(
+                                        "Tips",
+                                        id={
+                                            "type": "query-tips",
+                                            "index": path,
+                                        },
+                                        tooltip_text="Get query examples for this table",
+                                        style={"width": "5vh"},
+                                    ),
+                                    width=1,
                                 ),
                             ],
                         ),
@@ -1361,30 +1390,79 @@ class GeoExplorer:
                 return None, None, True, dash.no_update
 
         @callback(
-            Output("query-notepad", "children", allow_duplicate=True),
-            Input("query-examples", "n_clicks"),
+            Output("query-row", "style", allow_duplicate=True),
+            Input("clear-query-tips", "n_clicks"),
             prevent_initial_call=True,
         )
-        def get_query_tips(n_clicks):
-            if not n_clicks:
-                return dash.no_update
+        def clear_query_tips(n_clicks):
+            return {"display": "none"} if n_clicks else dash.no_update
 
-            queries = []
+        @callback(
+            Output("query-text", "children", allow_duplicate=True),
+            Output("query-row", "style", allow_duplicate=True),
+            Input({"type": "query-tips", "index": dash.ALL}, "n_clicks"),
+            State({"type": "checked-btn", "index": dash.ALL}, "id"),
+            prevent_initial_call=True,
+        )
+        def get_query_tips(n_clicks, ids):
+            path = get_index_if_clicks(n_clicks, ids)
+            if not path:
+                return dash.no_update, dash.no_update
+
+            style = {
+                "border": "1px solid #ccc",
+                "border-radius": "5px",
+                "padding": "20px",
+                "background-color": OFFWHITE,
+            }
+
+            df_name = _get_stem(path)
+            if sum(_get_stem(x) == df_name for x in self.selected_files) > 1:
+                df_name = _get_stem_from_parent(path)
+
+            queries = [
+                html.B(f"Query tips for table: {df_name}", style={"font-size": 22}),
+                html.Br(),
+                html.Br(),
+                html.B("Single table queries:"),
+            ]
+
+            df, _ = self._concat_data(bounds=None, paths=[path], _filter=False)
+
+            for col in set(df.columns).difference(set(ADDED_COLUMNS)):
+                if df[col].dtype.is_numeric():
+                    value = df[col].mean()
+                    query = f"pl.col('{col}') > {value}"
+                else:
+                    if len(df[col].unique()) <= 1:
+                        continue
+                    value = df[col].mode().first()
+                    query = f"pl.col('{col}') == '{value}'"
+                try:
+                    df.filter(eval(query))
+                    queries.append(html.Br())
+                    queries.append(query)
+                    queries.append(html.Br())
+                except Exception as e:
+                    debug_print("get_query_tips", col, "-", value, "-", e)
 
             if len(self.selected_files) <= 1:
-                return queries
+                return queries, style
 
-            for i, path in enumerate(self.selected_files):
-                if i == 0:
-                    df, _ = self._concat_data(bounds=None, paths=[path])
+            queries.append(html.Br())
+            queries.append(html.B("Join queries:"))
+
+            for join_path in self.selected_files:
+                if join_path == path:
                     continue
-                join_df, _ = self._concat_data(bounds=None, paths=[path])
-                print("\n\nquery")
-                print(path)
-                for col in set(join_df.columns).difference(set(ADDED_COLUMNS)):
-                    if col not in df:
+                join_df, _ = self._concat_data(
+                    bounds=None, paths=[join_path], _filter=False
+                )
+                for col in set(join_df.columns).difference(
+                    set(ADDED_COLUMNS) | {"area"}
+                ):
+                    if col not in df or df[col].dtype.is_float():
                         continue
-                    print(col)
                     try:
                         joined = df.join(join_df, on=col, how="inner")
                     except Exception:
@@ -1392,12 +1470,12 @@ class GeoExplorer:
                     if not len(joined):
                         continue
 
-                    join_df_name = _get_stem(path)
+                    join_df_name = _get_stem(join_path)
                     if (
                         sum(_get_stem(x) == join_df_name for x in self.selected_files)
                         > 1
                     ):
-                        join_df_name = _get_stem_from_parent(path)
+                        join_df_name = _get_stem_from_parent(join_path)
                     cols_to_keep = [
                         col for col in join_df.columns if col not in df.columns
                     ]
@@ -1406,13 +1484,12 @@ class GeoExplorer:
                     cols_to_keep = ", ".join(
                         f"{join_df_name}.{col}" for col in cols_to_keep
                     )
-                    print(cols_to_keep)
-                    query = (
-                        f"select {cols_to_keep}, df.* from df inner join {join_df_name}"
-                    )
+                    query = f"select {cols_to_keep}, df.* from df inner join {join_df_name} using ({col})"
+                    queries.append(html.Br())
                     queries.append(query)
+                    queries.append(html.Br())
 
-            return queries
+            return queries, style
 
         @callback(
             Output("file-deleted", "children", allow_duplicate=True),
@@ -2510,11 +2587,43 @@ class GeoExplorer:
             for col, value in zip(columns, feature["properties"].values(), strict=True)
         }
 
+    def _check_for_circular_queries(self, query, path):
+        if query is None:
+            return
+        n = 0
+        for path2, query2 in self._queries.items():
+            if (
+                query2 is None
+                or path == path2
+                or " join " not in query
+                or " join " not in query2
+            ):
+                continue
+
+            stripped_query = query.replace(")", "").replace("(", "")
+            stripped_query2 = query2.replace(")", "").replace("(", "")
+            if (
+                f" {_get_stem(path)} " in stripped_query2
+                or f" {_get_stem_from_parent(path)} " in stripped_query2
+            ):
+                n += 1
+
+            if (
+                f" {_get_stem(path2)} " in stripped_query
+                or f" {_get_stem_from_parent(path2)} " in stripped_query
+            ):
+                n += 1
+        if n >= 2:
+            raise RecursionError(
+                f"Recursion error: Circular joins on {path} and {path}",
+            )
+
     def _concat_data(
         self,
         bounds,
         paths: list[str] | None = None,
         eagar: bool = True,
+        _filter: bool = True,
     ) -> tuple[pl.DataFrame | None, list[dbc.Alert] | None]:
         dfs = []
         alerts = set()
@@ -2544,9 +2653,12 @@ class GeoExplorer:
                 df = df.collect()
                 if not len(df):
                     continue
+                if not _filter:
+                    dfs.append(df)
+                    continue
                 # filtering by function after collect because LazyFrame doesnt implement to_pandas.
-                if self._filters.get(path, None) is not None:
-                    df, alert = self._filter_data(df, self._filters[path])
+                if self._queries.get(path, None) is not None:
+                    df, alert = self._filter_data(df, self._queries[path])
                     alerts.add(alert)
                 if not len(df):
                     continue
@@ -2596,11 +2708,7 @@ class GeoExplorer:
                 query = _add_cols_to_sql_query(filter_function.replace('"', "'"))
 
                 if " join " in query.lower():
-                    print("filter_data")
-                    print(query)
                     df = self._polars_sql_join(df, query)
-                    print(df)
-                    print("dkjfd")
                 elif " df " in query:
                     df = pl.sql(query).collect()
                 else:
@@ -2625,7 +2733,7 @@ class GeoExplorer:
                     if len(e2) > 1000:
                         e2 = e2[:997] + "... "
                     alert = (
-                        f"Filter function failed with polars ({e_name}: {e}) "
+                        f"Query function failed with polars ({e_name}: {e}) "
                         f"-- and pandas loc: ({e2_name}: {e2}) "
                         f"-- and pandas query: ({e3_name}: {e3}) "
                     )
@@ -2833,7 +2941,7 @@ class GeoExplorer:
         if self.selected_files:
             data = {
                 "data": {
-                    key: self._filters.get(key)
+                    key: self._queries.get(key)
                     for key in data.pop("selected_files", [])
                 },
                 **data,

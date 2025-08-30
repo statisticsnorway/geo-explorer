@@ -90,7 +90,7 @@ def not_test_geo_explorer_locally(run=False):
             )
         }
     ) == ({1.151: "Trøndelag", 5.13: "Troms", 0: -1}), features
-    assert explorer._filters == (
+    assert explorer._queries == (
         {
             "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/N5000_fylke_flate_2024.parquet": '(pl.col("FYLKE").str.starts_with("5"), pl.col("FYLKE") != "56")',
             "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/N5000_fylke_flate_2023.parquet": 'lambda x: x["FYLKE"].isin(["03", "30"])',
