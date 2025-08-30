@@ -22,6 +22,7 @@ def test_debugging_is_off():
 
 
 def _get_explorer():
+
     return GeoExplorer(
         start_dir="C:/users/ort/OneDrive - Statistisk sentralbyrå/data",
         favorites=[
@@ -29,9 +30,8 @@ def _get_explorer():
             "C:/users/ort",
         ],
         data={
-            "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/N5000_fylke_flate_2023.parquet": 'lambda x: x["FYLKE"] != "50"',
-            "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/N5000_fylke_flate_2024.parquet": "FYLKE != '50'",
             "df1": sg.to_gdf((10.8, 59.9), 4326).assign(num_col=10),
+            "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/N5000_fylke_flate_2024.parquet": '(pl.col("FYLKE").str.starts_with("50"), pl.col("FYLKE") != "55")',
             "df2": sg.to_gdf([(10.8, 59.9), (10.8001, 59.9001)], 4326)
             .to_crs(3035)
             .pipe(sg.buff, 1000)
@@ -41,7 +41,8 @@ def _get_explorer():
             .pipe(sg.buff, 1000)
             .pipe(sg.to_lines)
             .assign(num_col=10000),
-            "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/ABAS_kommune_flate_p2023_v1.parquet": '(pl.col("FYLKE") != "50", pl.col("FYLKE") != "03")',
+            "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/N5000_fylke_flate_2023.parquet": 'lambda x: x["FYLKE"].isin(["03", "30"])',
+            "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/ABAS_kommune_flate_p2023_v1.parquet": "select df1.FYLKESNAVN, df.* from df inner join df1 using (FYLKE)",
             "df_out_of_bounds": sg.to_gdf((10.8, 61.0), 4326).assign(num_col=-1),
         },
         wms={
@@ -51,7 +52,7 @@ def _get_explorer():
             ),
         },
         wms_layers_checked={"norge_i_bilder": ["Oslo kommune 2020"]},
-        selected_features=[1, 1.05],
+        selected_features=[1.05, 5.01, 0],
         column="FYLKE",
         zoom=13,
         center=(59.91740845, 10.71394454),
@@ -68,13 +69,13 @@ def not_test_geo_explorer_locally(run=False):
     print(explorer)
     assert explorer._filters == (
         {
-            "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/N5000_fylke_flate_2023.parquet": 'lambda x: x["FYLKE"] != "50"',
-            "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/N5000_fylke_flate_2024.parquet": "FYLKE != '50'",
-            "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/ABAS_kommune_flate_p2023_v1.parquet": '(pl.col("FYLKE") != "50", pl.col("FYLKE") != "03")',
+            "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/N5000_fylke_flate_2024.parquet": '(pl.col("FYLKE").str.starts_with("50"), pl.col("FYLKE") != "55")',
+            "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/N5000_fylke_flate_2023.parquet": 'lambda x: x["FYLKE"].isin(["03", "30"])',
+            "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/ABAS_kommune_flate_p2023_v1.parquet": "select df1.FYLKESNAVN, df.* from df inner join df1 using (FYLKE)",
         }
     )
     assert not explorer._deleted_categories
-    # assert len(explorer._loaded_data) == 7
+    assert len(explorer._loaded_data) == 7
     assert all(explorer.selected_files.values())
     assert all(isinstance(x, pl.LazyFrame) for x in explorer._loaded_data.values()), [
         type(x) for x in explorer._loaded_data.values()
@@ -86,7 +87,17 @@ def not_test_geo_explorer_locally(run=False):
             i,
             v.select("_unique_id").cast(pl.Int16).collect()["_unique_id"],
         )
-    # assert explorer.selected_features
+    assert (
+        features := {
+            key: value[col]
+            for col, (key, value) in zip(
+                ["FYLKESNAVN", "FYLKESNAVN", "num_col"],
+                explorer.selected_features.items(),
+                strict=True,
+            )
+        }
+    ) == ({1.05: "1108", 5.01: "Rogaland", 0: -1}), features
+    assert (explorer.selected_features) == 2, explorer.selected_features
     # for k, v in explorer.__dict__.items():
     #     print()
     #     print(k)

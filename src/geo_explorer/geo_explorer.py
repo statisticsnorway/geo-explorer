@@ -15,6 +15,7 @@ from multiprocessing import cpu_count
 from numbers import Number
 from pathlib import Path
 from pathlib import PurePath
+import re
 from time import perf_counter
 from typing import Any
 from typing import ClassVar
@@ -659,6 +660,7 @@ class GeoExplorer:
                 self._loaded_data[key] = value.lazy()
                 self.selected_files[key] = True
 
+        self.selected_files = dict(reversed(self.selected_files.items()))
         self._bounds_series = GeoSeries(bounds_series_dict)
 
         # storing bounds here before file paths are loaded. To avoid setting center as the entire map bounds if large data
@@ -700,9 +702,9 @@ class GeoExplorer:
         # also resetting id count. Only needed in init
         self._max_unique_id_int: int = 0
         loaded_data_sorted = {}
-        for x in data or []:
+        for x in reversed(data or []):
             if isinstance(x, dict):
-                for key in x:
+                for key in reversed(x):
                     key = _standardize_path(key)
                     if key not in self._loaded_data:
                         continue
@@ -738,7 +740,7 @@ class GeoExplorer:
         self.app.layout = get_layout
 
         for unique_id in selected_features if selected_features is not None else []:
-            self.selected_features[unique_id] = _get_selected_feature(
+            self.selected_features[unique_id] = self._get_selected_feature(
                 unique_id, self._loaded_data
             )
 
@@ -1038,7 +1040,7 @@ class GeoExplorer:
             bounds,
         ):
             triggered = dash.callback_context.triggered_id
-            debug_print("concat_data", triggered, new_data_read, self.splitted)
+            # debug_print("concat_data", triggered, new_data_read, self.splitted)
 
             t = perf_counter()
             if not new_data_read:
@@ -1232,7 +1234,7 @@ class GeoExplorer:
                         "marginBottom": "5px",
                     },
                 )
-                for path, checked in (reversed(self.selected_files.items()))
+                for path, checked in reversed(self.selected_files.items())
             ]
 
         @callback(
@@ -1491,9 +1493,6 @@ class GeoExplorer:
             bins,
         ):
             triggered = dash.callback_context.triggered_id
-            debug_print(
-                "\nget_column_value_color_dict, column=", column, self.column, triggered
-            )
 
             if not self.selected_files:
                 self.column = None
@@ -1516,8 +1515,13 @@ class GeoExplorer:
 
             default_colors = list(sg.maps.map._CATEGORICAL_CMAP.values())
 
-            debug_print(self.column, column)
-            debug_print(self.color_dict)
+            debug_print(
+                "get_column_value_color_dict, column=",
+                column,
+                self.column,
+                triggered,
+                self.color_dict,
+            )
 
             if not column or (
                 self._concatted_data is not None and column not in self._concatted_data
@@ -1637,8 +1641,6 @@ class GeoExplorer:
             elif self.nan_label not in color_dict and polars_isna(values).any():
                 color_dict[self.nan_label] = self.nan_color
 
-            debug_print("\n\ncolor_dict nederst")
-            debug_print(color_dict)
             if not is_numeric:
                 self.color_dict = color_dict
                 any_isnull = values.is_null().any()
@@ -1710,7 +1712,7 @@ class GeoExplorer:
             colorpicker_ids,
         ):
             debug_print(
-                "\n\nadd_data",
+                "\nadd_data",
                 dash.callback_context.triggered_id,
                 len(self._loaded_data),
                 f"{self.column=}",
@@ -1743,7 +1745,6 @@ class GeoExplorer:
                 alpha=alpha,
             )
 
-            # not parallelizing here because polars does and doesn't like double parallelization
             results = [
                 add_data_func(path)
                 for path, checked in self.selected_files.items()
@@ -1824,11 +1825,7 @@ class GeoExplorer:
             clicked_ids,
         ):
             triggered = dash.callback_context.triggered_id
-            debug_print(
-                "display_clicked_feature_attributes",
-                triggered,
-                list(self.selected_features),
-            )
+            debug_print("display_clicked_feature_attributes", triggered)
             if triggered == "clear-table-clicked":
                 self.selected_features = {}
                 return [], [], None
@@ -1956,10 +1953,9 @@ class GeoExplorer:
             Input("update-table", "data"),
             Input({"type": "table-btn", "index": dash.ALL}, "n_clicks"),
             State({"type": "table-btn", "index": dash.ALL}, "id"),
-            State("all-features", "data"),
         )
         def display_all_feature_attributes(
-            clear_table, update_table, table_btn_n_clicks, table_btn_ids, all_features
+            clear_table, update_table, table_btn_n_clicks, table_btn_ids
         ):
             triggered = dash.callback_context.triggered_id
             debug_print("display_all_feature_attributes", triggered)
@@ -2412,6 +2408,30 @@ class GeoExplorer:
         maxy, maxx = maxs
         return minx, miny, maxx, maxy
 
+    def _get_selected_feature(
+        self, unique_id: float, loaded_data: dict[str, pl.LazyFrame]
+    ) -> dict[str, str | Number]:
+        i = int(unique_id)
+        path = list(loaded_data)[i]
+        df, _ = self._concat_data(bounds=None, paths=[path])
+        row = df.filter(pl.col("_unique_id") == unique_id).collect()
+        columns = [col for col in row.columns if col != "geometry"]
+        features = GeoDataFrame(
+            row.drop("geometry"),
+            geometry=shapely.from_wkb(row["geometry"]),
+            crs=4326,
+        ).__geo_interface__["features"]
+        print(list(loaded_data))
+        print(i)
+        print(list(loaded_data)[i])
+        print(row)
+        print(len(features))
+        feature = next(iter(features))
+        return {
+            col: value
+            for col, value in zip(columns, feature["properties"].values(), strict=True)
+        }
+
     def _concat_data(
         self, bounds, paths: list[str] | None = None
     ) -> tuple[pl.DataFrame | None, list[dbc.Alert] | None]:
@@ -2445,7 +2465,7 @@ class GeoExplorer:
                     continue
                 # filtering by function after collect because LazyFrame doesnt implement to_pandas.
                 if self._filters.get(path, None) is not None:
-                    df, alert = _filter_data(df, self._filters[path])
+                    df, alert = self._filter_data(df, self._filters[path])
                     alerts.add(alert)
                 if not len(df):
                     continue
@@ -2466,6 +2486,84 @@ class GeoExplorer:
             ]
 
         return df, alerts
+
+    def _filter_data(
+        self, df: pl.DataFrame, filter_function: str | None
+    ) -> pl.DataFrame:
+        filter_function = filter_function.strip()
+        try:
+            filter_function = eval(filter_function)
+        except Exception:
+            pass
+
+        if filter_function is None or (
+            isinstance(filter_function, str) and filter_function == ""
+        ):
+            return df, None
+
+        alert = None
+
+        # try to filter with polars, then pandas.loc, then pandas.query
+        # no need for pretty code and specific exception handling here, as this a convenience feature
+        try:
+            # polars needs functions called, pandas does not
+            if callable(filter_function):
+                filter_function = filter_function(df)
+            if isinstance(filter_function, str) and filter_function.replace(
+                "\n", ""
+            ).strip().lower().startswith("select"):
+                query = _add_cols_to_sql_query(filter_function.replace('"', "'"))
+                if " join " in query.lower():
+                    df = self._polars_sql_join(df, query)
+                elif " df " in query:
+                    df = pl.sql(query).collect()
+                else:
+                    df = df.sql(query)
+            else:
+                df = df.filter(filter_function)
+        except Exception as e:
+            try:
+                df = pl.DataFrame(df.to_pandas().loc[filter_function])
+            except Exception as e2:
+                try:
+                    df = pl.DataFrame(df.to_pandas().query(filter_function))
+                except Exception as e3:
+                    e_name = type(e).__name__
+                    e2_name = type(e2).__name__
+                    e3_name = type(e3).__name__
+                    e = str(e)
+                    e2 = str(e2)
+                    e3 = str(e3)
+                    if len(e) > 1000:
+                        e = e[:997] + "... "
+                    if len(e2) > 1000:
+                        e2 = e2[:997] + "... "
+                    alert = (
+                        f"Filter function failed with polars ({e_name}: {e}) "
+                        f"-- and pandas loc: ({e2_name}: {e2}) "
+                        f"-- and pandas query: ({e3_name}: {e3}) "
+                    )
+
+        # debug_print("_filter_data", len(df), list(df.columns))
+        return df, alert
+
+    def _polars_sql_join(self, df, query):
+        if " df " not in query:
+            raise ValueError("Table to be queried must be referenced as 'df'.")
+        df_name: str = query.lower().split(" join ")[-1].split()[0]
+        try:
+            i = int(df_name.replace("df", ""))
+        except ValueError:
+            raise ValueError(
+                "Data to be joined must be named as df0, df1, ..., refering to the order of the data in the file panel",
+            )
+
+        path = list(reversed(self.selected_files))[i]
+        join_df, _ = self._concat_data(bounds=None, paths=[path])
+        # using literal 'join_df' in case 'i' is negative index
+        query = query.replace(df_name, "join_df")
+        ctx = pl.SQLContext(**{"df": df, "join_df": join_df})
+        return ctx.execute(query, eager=True)
 
     def _map_constructor(
         self, data: dl.LayersControl, preferCanvas=True, zoomAnimation=False, **kwargs
@@ -2788,11 +2886,7 @@ def _add_data_one_path(
             None,
             False,
         )
-    try:
-        df = concatted_data.filter(pl.col("__file_path").str.contains(path))
-    except Exception as e:
-        raise type(e)(f"{e}: {path} - {concatted_data['__file_path']}")
-
+    df = concatted_data.filter(pl.col("__file_path").str.contains(path))
     if not len(df):
         return (
             [
@@ -2807,12 +2901,12 @@ def _add_data_one_path(
             False,
         )
 
-    df = filter_by_bounds(df, bounds)
-
     rows_are_hidden = len(df) > max_rows
-
-    if len(df) > max_rows:
+    if rows_are_hidden:
         df = df.sample(max_rows)
+
+    # print(_geo_interface(df))
+
     df = df.to_pandas()
     df["geometry"] = shapely.from_wkb(df["geometry"])
     df = GeoDataFrame(df, crs=4326)
@@ -3048,14 +3142,19 @@ def _prepare_df(df: pl.LazyFrame, path, metadata) -> pl.LazyFrame:
         )
     )
     df = df.drop(primary_column)
-    return df.with_columns(
-        pl.Series("area", areas),
-        pl.Series("geometry", shapely.to_wkb(geometries)),
-        pl.Series("minx", bounds[:, 0]),
-        pl.Series("miny", bounds[:, 1]),
-        pl.Series("maxx", bounds[:, 2]),
-        pl.Series("maxy", bounds[:, 3]),
-        __file_path=pl.lit(path),
+    # collecting, then back to lazy to only do these calculations once
+    return (
+        df.with_columns(
+            pl.Series("area", areas),
+            pl.Series("geometry", shapely.to_wkb(geometries)),
+            pl.Series("minx", bounds[:, 0]),
+            pl.Series("miny", bounds[:, 1]),
+            pl.Series("maxx", bounds[:, 2]),
+            pl.Series("maxy", bounds[:, 3]),
+            __file_path=pl.lit(path),
+        )
+        .collect()
+        .lazy()
     )
 
 
@@ -3221,7 +3320,6 @@ def get_zoom_from_bounds(
 
     # Invert the meters/pixel formula:
     zoom = math.log2(C * math.cos(lat_rad) / (meters_per_pixel * 256))
-    debug_print("get_zoom_from_bounds", map_width_px, map_height_px, zoom)
     return round(zoom, 2)
 
 
@@ -3305,53 +3403,6 @@ def get_split_index(df: pl.LazyFrame) -> pl.LazyFrame:
     )
 
 
-def _filter_data(df: pl.DataFrame, filter_function: str | None) -> pl.DataFrame:
-    filter_function = filter_function.strip()
-    try:
-        filter_function = eval(filter_function)
-    except Exception:
-        pass
-
-    if filter_function is None or (
-        isinstance(filter_function, str) and filter_function == ""
-    ):
-        return df, None
-
-    alert = None
-
-    # try to filter with polars, then pandas.loc, then pandas.query
-    # no need for pretty code and specific exception handling here, as this a convenience feature
-    try:
-        # polars needs functions called, pandas does not
-        if callable(filter_function):
-            filter_function = filter_function(df)
-        df = df.filter(filter_function)
-    except Exception as e:
-        try:
-            df = pl.DataFrame(df.to_pandas().loc[filter_function])
-        except Exception as e2:
-            try:
-                df = pl.DataFrame(df.to_pandas().query(filter_function))
-            except Exception as e3:
-                e_name = type(e).__name__
-                e2_name = type(e2).__name__
-                e3_name = type(e3).__name__
-                e = str(e)
-                e2 = str(e2)
-                e3 = str(e3)
-                if len(e) > 1000:
-                    e = e[:997] + "... "
-                if len(e2) > 1000:
-                    e2 = e2[:997] + "... "
-                alert = (
-                    f"Filter function failed with polars ({e_name}: {e}) "
-                    f"-- and pandas loc: ({e2_name}: {e2}) "
-                    f"-- and pandas query: ({e3_name}: {e3}) "
-                )
-
-    return df, alert
-
-
 def _get_force_categorical_button(
     values_no_nans: pl.Series, force_categorical_clicks: int | None
 ):
@@ -3406,20 +3457,36 @@ def get_google_maps_url(center, zoom_m: int = 150) -> str:
     return url
 
 
-def _get_selected_feature(
-    unique_id: float, loaded_data: dict[str, pl.LazyFrame]
-) -> dict[str, str | Number]:
-    i = int(unique_id)
-    df = list(loaded_data.values())[i]
-    row = df.filter(pl.col("_unique_id") == unique_id).collect()
-    columns = [col for col in row.columns if col != "geometry"]
-    features = GeoDataFrame(
-        row.drop("geometry"),
-        geometry=shapely.from_wkb(row["geometry"]),
-        crs=4326,
-    ).__geo_interface__["features"]
-    feature = next(iter(features))
+def _geo_interface(df: pl.DataFrame) -> dict:
+    geometries = shapely.from_wkb(df["geometry"])
     return {
-        col: value
-        for col, value in zip(columns, feature["properties"].values(), strict=True)
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "id": str(i),
+                "type": "Feature",
+                "properties": {k: v for k, v in values.items() if k != "geometry"},
+                "geometry": geom.__geo_interface__,
+            }
+            for i, (values, geom) in enumerate(
+                zip(df.to_dicts(), geometries, strict=True)
+            )
+        ],
     }
+
+
+def _add_cols_to_sql_query(query: str) -> str:
+    pattern = r"^(SELECT\s+(?:DISTINCT\s+)?)(.+?)(?=\s+FROM|\s+WHERE|\s+GROUP BY|\s+ORDER BY|\s+JOIN|\s+LIMIT|$)"
+    match = re.search(pattern, query, re.IGNORECASE)
+    cols = match.group(2).strip()
+    if "*" in cols:
+        return query
+    cols = ", ".join(
+        dict.fromkeys(
+            cols.split(", ")
+            + ["minx", "miny", "maxx", "maxy", "_unique_id", "__file_path", "geometry"]
+        )
+    )
+    top = match.group(1).strip()
+    end = query[len(match.group(0)) :].strip()
+    return f"{top} {cols} {end}"
