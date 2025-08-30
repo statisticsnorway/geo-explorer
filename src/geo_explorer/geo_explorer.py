@@ -68,6 +68,15 @@ DEFAULT_ZOOM: int = 12
 DEFAULT_CENTER: tuple[float, float] = (59.91740845, 10.71394444)
 CURRENT_YEAR: int = datetime.datetime.now().year
 FILE_SPLITTER_TXT: str = "-_-"
+ADDED_COLUMNS = [
+    "minx",
+    "miny",
+    "maxx",
+    "maxy",
+    "_unique_id",
+    "__file_path",
+    "geometry",
+]
 
 DEBUG: bool = 1
 
@@ -554,13 +563,25 @@ class GeoExplorer:
                                             "margin-right": "0px",
                                         },
                                     ),
-                                    dbc.Col(
-                                        get_button_with_tooltip(
-                                            "Reload categories",
-                                            id="reload-categories",
-                                            n_clicks=0,
-                                            tooltip_text="Get back categories that have been X-ed out",
-                                        )
+                                    dbc.Row(
+                                        [
+                                            dbc.Col(
+                                                get_button_with_tooltip(
+                                                    "Reload categories",
+                                                    id="reload-categories",
+                                                    n_clicks=0,
+                                                    tooltip_text="Get back categories that have been X-ed out",
+                                                ),
+                                            ),
+                                            dbc.Col(
+                                                get_button_with_tooltip(
+                                                    "Get query examples",
+                                                    id="query-examples",
+                                                    n_clicks=0,
+                                                    tooltip_text="Get examples on querying your data",
+                                                ),
+                                            ),
+                                        ],
                                     ),
                                     dbc.Row(
                                         id="colorpicker-container",
@@ -581,6 +602,8 @@ class GeoExplorer:
                         n_clicks=int(self.hard_click),
                         tooltip_text="'Hard' click means that clicking on a geometry triggers all overlapping geometries to be marked",
                     ),
+                    dbc.Row(html.Div(children=None, id="query-notepad")),
+                    # dbc.Row(dcc.Input(value=None, type="text", id="query-notepad")),
                     get_data_table(
                         title_id="clicked-features-title",
                         table_id="feature-table-rows-clicked",
@@ -1071,6 +1094,10 @@ class GeoExplorer:
                         feature = self.selected_features.pop(idx)
                         feature["_unique_id"] = new_idx
                         self.selected_features[new_idx] = feature
+
+                        # for path in self.selected_files:
+                        #     if self._filters.get(path) and f" df{i}" in path:
+
                     self._max_unique_id_int += 1
                 update_table = True
             else:
@@ -1209,7 +1236,7 @@ class GeoExplorer:
                             [
                                 dcc.Input(
                                     self._filters.get(path, None),
-                                    placeholder="Filter (with polars or pandas). E.g. komm_nr == '0301'",
+                                    placeholder="Filter (with polars, pandas or sql). E.g. komm_nr == '0301'",
                                     id={
                                         "type": "filter",
                                         "index": path,
@@ -1332,6 +1359,60 @@ class GeoExplorer:
             else:
                 self._deleted_categories.add(path_to_delete)
                 return None, None, True, dash.no_update
+
+        @callback(
+            Output("query-notepad", "children", allow_duplicate=True),
+            Input("query-examples", "n_clicks"),
+            prevent_initial_call=True,
+        )
+        def get_query_tips(n_clicks):
+            if not n_clicks:
+                return dash.no_update
+
+            queries = []
+
+            if len(self.selected_files) <= 1:
+                return queries
+
+            for i, path in enumerate(self.selected_files):
+                if i == 0:
+                    df, _ = self._concat_data(bounds=None, paths=[path])
+                    continue
+                join_df, _ = self._concat_data(bounds=None, paths=[path])
+                print("\n\nquery")
+                print(path)
+                for col in set(join_df.columns).difference(set(ADDED_COLUMNS)):
+                    if col not in df:
+                        continue
+                    print(col)
+                    try:
+                        joined = df.join(join_df, on=col, how="inner")
+                    except Exception:
+                        continue
+                    if not len(joined):
+                        continue
+
+                    join_df_name = _get_stem(path)
+                    if (
+                        sum(_get_stem(x) == join_df_name for x in self.selected_files)
+                        > 1
+                    ):
+                        join_df_name = _get_stem_from_parent(path)
+                    cols_to_keep = [
+                        col for col in join_df.columns if col not in df.columns
+                    ]
+                    if not cols_to_keep:
+                        continue
+                    cols_to_keep = ", ".join(
+                        f"{join_df_name}.{col}" for col in cols_to_keep
+                    )
+                    print(cols_to_keep)
+                    query = (
+                        f"select {cols_to_keep}, df.* from df inner join {join_df_name}"
+                    )
+                    queries.append(query)
+
+            return queries
 
         @callback(
             Output("file-deleted", "children", allow_duplicate=True),
@@ -1526,13 +1607,13 @@ class GeoExplorer:
             if not column or (
                 self._concatted_data is not None and column not in self._concatted_data
             ):
-                new_values = [_get_name(value) for value in self.selected_files]
+                new_values = [_get_stem(value) for value in self.selected_files]
                 if len(set(new_values)) < len(new_values):
                     new_values = [
                         (
-                            _get_name_from_parent(value)
+                            _get_stem_from_parent(value)
                             if sum(x == name for x in new_values) > 1
-                            else _get_name(value)
+                            else _get_stem(value)
                         )
                         for value, name in zip(
                             self.selected_files, new_values, strict=True
@@ -1553,10 +1634,10 @@ class GeoExplorer:
                     raise ValueError(f"{e}: {new_values} - {new_colors}") from e
 
                 for label, path in zip(new_values, self.selected_files, strict=True):
-                    name = _get_name(path)
+                    name = _get_stem(path)
                     if name in self.color_dict:
                         color_dict[label] = self.color_dict.pop(name)
-                    name = _get_name_from_parent(path)
+                    name = _get_stem_from_parent(path)
                     if name in self.color_dict:
                         color_dict[label] = self.color_dict.pop(name)
 
@@ -2414,18 +2495,15 @@ class GeoExplorer:
         i = int(unique_id)
         path = list(loaded_data)[i]
         df, _ = self._concat_data(bounds=None, paths=[path])
-        row = df.filter(pl.col("_unique_id") == unique_id).collect()
+        row = df.filter(pl.col("_unique_id") == unique_id)  # .collect()
         columns = [col for col in row.columns if col != "geometry"]
+        print(path)
+        print(row)
         features = GeoDataFrame(
             row.drop("geometry"),
             geometry=shapely.from_wkb(row["geometry"]),
             crs=4326,
         ).__geo_interface__["features"]
-        print(list(loaded_data))
-        print(i)
-        print(list(loaded_data)[i])
-        print(row)
-        print(len(features))
         feature = next(iter(features))
         return {
             col: value
@@ -2433,7 +2511,10 @@ class GeoExplorer:
         }
 
     def _concat_data(
-        self, bounds, paths: list[str] | None = None
+        self,
+        bounds,
+        paths: list[str] | None = None,
+        eagar: bool = True,
     ) -> tuple[pl.DataFrame | None, list[dbc.Alert] | None]:
         dfs = []
         alerts = set()
@@ -2513,8 +2594,13 @@ class GeoExplorer:
                 "\n", ""
             ).strip().lower().startswith("select"):
                 query = _add_cols_to_sql_query(filter_function.replace('"', "'"))
+
                 if " join " in query.lower():
+                    print("filter_data")
+                    print(query)
                     df = self._polars_sql_join(df, query)
+                    print(df)
+                    print("dkjfd")
                 elif " df " in query:
                     df = pl.sql(query).collect()
                 else:
@@ -2549,19 +2635,49 @@ class GeoExplorer:
 
     def _polars_sql_join(self, df, query):
         if " df " not in query:
-            raise ValueError("Table to be queried must be referenced as 'df'.")
-        df_name: str = query.lower().split(" join ")[-1].split()[0]
-        try:
-            i = int(df_name.replace("df", ""))
-        except ValueError:
-            raise ValueError(
-                "Data to be joined must be named as df0, df1, ..., refering to the order of the data in the file panel",
+            raise ValueError("Table to be queried must be referenced to as 'df'.")
+        join_df_name: str = (
+            query.replace(" JOIN ", " join ").split(" join ")[-1].split()[0]
+        )
+        if join_df_name in self.selected_files:
+            path = join_df_name
+        elif sum(join_df_name == _get_stem(x) for x in self.selected_files) == 1:
+            path = next(
+                iter(x for x in self.selected_files if join_df_name == _get_stem(x))
             )
-
-        path = list(reversed(self.selected_files))[i]
+        elif (
+            sum(join_df_name == _get_stem_from_parent(x) for x in self.selected_files)
+            == 1
+        ):
+            path = next(
+                iter(
+                    x
+                    for x in self.selected_files
+                    if join_df_name == _get_stem_from_parent(x)
+                )
+            )
+        else:
+            try:
+                example_stem = Path(
+                    next(
+                        iter(
+                            {
+                                x
+                                for x in self.selected_files
+                                if len(list(Path(x).parts)) > 1
+                            }
+                        )
+                    )
+                ).stem
+            except StopIteration:
+                example_stem = "ABAS_kommune_flate_p2025_v1"
+            raise ValueError(
+                f"Join data must be referenced to by the file's stem without quotation marks, e.g. {example_stem}. "
+                "If multiple tables have same stem, the parent directory must be included as well.",
+            )
         join_df, _ = self._concat_data(bounds=None, paths=[path])
         # using literal 'join_df' in case 'i' is negative index
-        query = query.replace(df_name, "join_df")
+        query = query.replace(join_df_name, "join_df")
         ctx = pl.SQLContext(**{"df": df, "join_df": join_df})
         return ctx.execute(query, eager=True)
 
@@ -2878,7 +2994,7 @@ def _add_data_one_path(
             [
                 dl.Overlay(
                     dl.GeoJSON(id={"type": "geojson", "filename": path}),
-                    name=_get_name(path),
+                    name=_get_stem(path),
                     id={"type": "geojson-overlay", "filename": path},
                     checked=True,
                 )
@@ -2892,7 +3008,7 @@ def _add_data_one_path(
             [
                 dl.Overlay(
                     dl.GeoJSON(id={"type": "geojson", "filename": path}),
-                    name=_get_name(path),
+                    name=_get_stem(path),
                     id={"type": "geojson-overlay", "filename": path},
                     checked=True,
                 )
@@ -2960,7 +3076,7 @@ def _add_data_one_path(
                     ),
                     id={"type": "geojson", "filename": path},
                 ),
-                name=_get_name(path),
+                name=_get_stem(path),
                 checked=True,
                 id={"type": "geojson-overlay", "filename": path},
             )
@@ -3016,7 +3132,7 @@ def _add_data_one_path(
                         )
                     ]
                 ),
-                name=_get_name(path),
+                name=_get_stem(path),
                 checked=True,
                 id={"type": "geojson-overlay", "filename": path},
             )
@@ -3024,9 +3140,9 @@ def _add_data_one_path(
     else:
         # no column
         try:
-            color = color_dict[_get_name(path)]
+            color = color_dict[_get_stem(path)]
         except KeyError:
-            color = color_dict[_get_name_from_parent(path)]
+            color = color_dict[_get_stem_from_parent(path)]
         data.append(
             dl.Overlay(
                 dl.GeoJSON(
@@ -3044,7 +3160,7 @@ def _add_data_one_path(
                     ),
                     id={"type": "geojson", "filename": path},
                 ),
-                name=_get_name(path),
+                name=_get_stem(path),
                 checked=True,
                 id={"type": "geojson-overlay", "filename": path},
             )
@@ -3237,11 +3353,11 @@ def _random_color(min_diff: int = 50) -> str:
             return f"#{r:02x}{g:02x}{b:02x}"
 
 
-def _get_name(path):
+def _get_stem(path):
     return Path(path).stem
 
 
-def _get_name_from_parent(path):
+def _get_stem_from_parent(path):
     name = Path(path).stem
     parent_name = Path(path).parent.stem
     return f"{parent_name}/{name}"
@@ -3308,6 +3424,10 @@ def get_zoom_from_bounds(
     # Width and height in degrees
     lon_delta = abs(lon_max - lon_min)
     lat_delta = abs(lat_max - lat_min)
+
+    if not lon_delta + lon_delta:
+        # if point geometries
+        return 16
 
     # Adjusted width in meters at that latitude
     width_m = lon_delta * (C / 360.0) * math.cos(lat_rad)
@@ -3396,7 +3516,7 @@ def is_jupyter():
 def get_split_index(df: pl.LazyFrame) -> pl.LazyFrame:
     return df.with_columns(
         (
-            pl.col("__file_path").map_elements(_get_name, return_dtype=pl.Utf8)
+            pl.col("__file_path").map_elements(_get_stem, return_dtype=pl.Utf8)
             + " "
             + pl.col("__file_path").cum_count().over("__file_path").cast(pl.Utf8)
         ).alias("split_index")
@@ -3481,12 +3601,7 @@ def _add_cols_to_sql_query(query: str) -> str:
     cols = match.group(2).strip()
     if "*" in cols:
         return query
-    cols = ", ".join(
-        dict.fromkeys(
-            cols.split(", ")
-            + ["minx", "miny", "maxx", "maxy", "_unique_id", "__file_path", "geometry"]
-        )
-    )
+    cols = ", ".join(dict.fromkeys(cols.split(", ") + ADDED_COLUMNS))
     top = match.group(1).strip()
     end = query[len(match.group(0)) :].strip()
     return f"{top} {cols} {end}"
