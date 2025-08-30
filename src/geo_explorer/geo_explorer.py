@@ -1256,6 +1256,7 @@ class GeoExplorer:
                                                 "index": path,
                                             },
                                             debounce=3,
+                                            className="expandable-input-left-aligned",
                                         ),
                                         dbc.Tooltip(
                                             "E.g. komm_nr == '0301' or pl.col('komm_nr') == '0301'",
