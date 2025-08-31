@@ -1088,7 +1088,7 @@ class GeoExplorer:
             Input("new-data-read", "children"),
             Input("file-deleted", "children"),
             Input("is_splitted", "data"),
-            Output({"type": "query", "index": dash.ALL}, "value"),
+            Input({"type": "query", "index": dash.ALL}, "value"),
             State("debounced_bounds", "value"),
             prevent_initial_call=True,
         )
