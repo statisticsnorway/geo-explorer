@@ -8,9 +8,8 @@ src = str(Path(__file__).parent).replace("tests", "") + "src"
 sys.path.insert(0, src)
 
 
-import sgis as sg
-from dash import Dash
 import polars as pl
+import sgis as sg
 
 from geo_explorer import GeoExplorer
 from geo_explorer import LocalFileSystem

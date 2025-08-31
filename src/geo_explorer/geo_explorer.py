@@ -5,21 +5,21 @@ import json
 import logging
 import math
 import os
+import re
 import signal
 import sys
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
+from functools import wraps
 from multiprocessing import cpu_count
 from numbers import Number
 from pathlib import Path
 from pathlib import PurePath
-import re
 from time import perf_counter
 from typing import Any
 from typing import ClassVar
-from functools import wraps
 
 import dash
 import dash_bootstrap_components as dbc
@@ -27,9 +27,9 @@ import dash_leaflet as dl
 import joblib
 import matplotlib
 import matplotlib.colors as mcolors
+import msgspec
 import numpy as np
 import pandas as pd
-from shapely import Geometry
 import polars as pl
 import pyarrow
 import pyarrow.parquet as pq
@@ -50,13 +50,12 @@ from geopandas import GeoDataFrame
 from geopandas import GeoSeries
 from geopandas.array import GeometryArray
 from jenkspy import jenks_breaks
-from pandas.api.types import is_datetime64_any_dtype
 from sgis.io.dapla_functions import _get_geo_metadata
 from sgis.io.dapla_functions import _read_pyarrow
 from sgis.maps.wms import WmsLoader
+from shapely import Geometry
 from shapely.errors import GEOSException
 from shapely.geometry import Point
-import msgspec
 
 from .file_browser import FileBrowser
 from .fs import LocalFileSystem
@@ -82,7 +81,7 @@ ADDED_COLUMNS = {
     "geometry",
 }
 
-DEBUG: bool = 1
+DEBUG: bool = False
 
 if DEBUG:
 
@@ -3625,7 +3624,7 @@ def _pyarrow_to_polars(
         if DEBUG:
             raise e
         df = pl.from_pandas(table.to_pandas())
-    dtypes = dict(zip(df.columns, df.dtypes))
+    dtypes = dict(zip(df.columns, df.dtypes, strict=False))
     return _prepare_df(df.lazy(), path, metadata), dtypes
 
 
@@ -3669,7 +3668,7 @@ def _gdf_to_polars(df: GeoDataFrame, path) -> GeoDataFrame:
     geometries, areas, bounds = _get_area_and_bounds(geometries=df.geometry.values)
     df = df.drop(columns=df.geometry.name)
     df = pl.from_pandas(df)
-    dtypes = dict(zip(df.columns, df.dtypes))
+    dtypes = dict(zip(df.columns, df.dtypes, strict=False))
     df = df.with_columns(
         pl.Series("area", areas),
         pl.Series("geometry", shapely.to_wkb(geometries)),

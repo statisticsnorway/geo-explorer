@@ -1,7 +1,7 @@
-from pathlib import Path
 import time
 from functools import wraps
-from typing import Callable
+from pathlib import Path
+from collections.abc import Callable
 
 import dash_bootstrap_components as dbc
 from dash import html
