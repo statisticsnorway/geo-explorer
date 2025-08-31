@@ -1,4 +1,7 @@
 from pathlib import Path
+import time
+from functools import wraps
+from typing import Callable
 
 import dash_bootstrap_components as dbc
 from dash import html
@@ -39,3 +42,28 @@ def get_button_with_tooltip(
             delay={"show": 500, "hide": 100},
         ),
     ]
+
+
+def time_method_call(method_dict) -> Callable:
+    def decorator(method):
+        @wraps(method)
+        def wrapper(self, *args, **kwargs):
+            start_time = time.time()
+            result = method(self, *args, **kwargs)
+            end_time = time.time()
+            elapsed_time = end_time - start_time
+
+            # Get the method name
+            method_name = method.__name__
+
+            # Update the cumulative time in the dictionary
+            if method_name in method_dict:
+                method_dict[method_name] += elapsed_time
+            else:
+                method_dict[method_name] = elapsed_time
+
+            return result
+
+        return wrapper
+
+    return decorator

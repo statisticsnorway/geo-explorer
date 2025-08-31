@@ -19,6 +19,7 @@ import re
 from time import perf_counter
 from typing import Any
 from typing import ClassVar
+from functools import wraps
 
 import dash
 import dash_bootstrap_components as dbc
@@ -61,6 +62,7 @@ from .utils import _clicked_button_style
 from .utils import _standardize_path
 from .utils import _unclicked_button_style
 from .utils import get_button_with_tooltip
+from .utils import time_method_call
 
 OFFWHITE: str = "#ebebeb"
 FILE_CHECKED_COLOR: str = "#3e82ff"
@@ -78,7 +80,7 @@ ADDED_COLUMNS = [
     "geometry",
 ]
 
-DEBUG: bool = False
+DEBUG: bool = 1
 
 if DEBUG:
 
@@ -89,6 +91,16 @@ else:
 
     def debug_print(*args):
         pass
+
+    def time_method_call(method_dict) -> Callable:
+        def decorator(method):
+            @wraps(method)
+            def wrapper(self, *args, **kwargs):
+                return method(self, *args, **kwargs)
+
+            return wrapper
+
+        return decorator
 
 
 class GeoExplorer:
@@ -216,6 +228,8 @@ class GeoExplorer:
             primaryLengthUnit="meters",
         ),
     ]
+
+    _method_times = {}
 
     def __init__(
         self,
@@ -797,6 +811,12 @@ class GeoExplorer:
             export_clicks,
             file_deleted,
         ):
+            if DEBUG:
+                print("\nprofile")
+                for k, v in reversed(
+                    sorted(self._method_times.items(), key=lambda x: x[1])
+                ):
+                    print(k, v)
             triggered = dash.callback_context.triggered_id
             if triggered in ["file-deleted", "close-export"] or not export_clicks:
                 return None, False
@@ -846,6 +866,7 @@ class GeoExplorer:
             Input({"type": "load-parquet", "index": dash.ALL}, "id"),
             State({"type": "file-path", "index": dash.ALL}, "id"),
         )
+        @time_method_call(self._method_times)
         def append_path(load_parquet, load_parquet_ids, ids):
             triggered = dash.callback_context.triggered_id
             debug_print("append_path", triggered)
@@ -895,6 +916,7 @@ class GeoExplorer:
             Input({"type": "checked-btn", "index": dash.ALL}, "n_clicks"),
             State({"type": "checked-btn", "index": dash.ALL}, "id"),
         )
+        @time_method_call(self._method_times)
         def get_files_in_bounds(
             bounds,
             file_added,
@@ -1032,6 +1054,18 @@ class GeoExplorer:
             Output(
                 {"type": "query", "index": dash.MATCH}, "value", allow_duplicate=True
             ),
+            Input({"type": "query-view", "index": dash.ALL}, "is_open"),
+            prevent_initial_call=True,
+        )
+        def apply_query(is_open):
+            assert sum(is_open) in [0, 1], is_open
+            if any(is_open):
+                return dash.no_update
+            triggered = dash.callback_context.triggered_id
+            path = triggered["index"]
+            return self._queries.get(path)
+
+        @callback(
             Output(
                 {"type": "query-copy", "index": dash.MATCH},
                 "value",
@@ -1047,10 +1081,11 @@ class GeoExplorer:
             ),
             prevent_initial_call=True,
         )
-        def apply_query(n_clicks, ids):
+        def apply_query_copy(n_clicks, ids):
             path = get_index_if_clicks(n_clicks, ids)
             if not path:
-                return dash.no_update, dash.no_update
+                debug_print("apply_query", path)
+                return dash.no_update
             triggered = dash.callback_context.triggered_id
             query = triggered["query"]
             old_query = self._queries.get(path)
@@ -1060,17 +1095,18 @@ class GeoExplorer:
                 and query.startswith("pl.col")
             ):
                 query = f"{old_query}, {query}"
-            return query, query
+            debug_print("apply_query_copy", query)
+            self._queries[path] = query
+            return query
 
         @callback(
-            Output("query-updated", "children", allow_duplicate=True),
-            Input({"type": "query-copy", "index": dash.ALL}, "value"),
-            Input({"type": "query-copy", "index": dash.ALL}, "id"),
+            Input({"type": "query-copy", "index": dash.ALL}, "n_blur"),
+            State({"type": "query-copy", "index": dash.ALL}, "value"),
+            State({"type": "query-copy", "index": dash.ALL}, "id"),
             prevent_initial_call=True,
         )
-        def update_query_from_copy(queries: list[str], ids: list[str]):
-            alerts = self._update_query(queries, ids)
-            return alerts
+        def update_query_from_copy(n_blur, queries: list[str], ids: list[str]):
+            self._update_query(queries, ids)
 
         @callback(
             Output("query-updated", "children", allow_duplicate=True),
@@ -1097,6 +1133,7 @@ class GeoExplorer:
             State("debounced_bounds", "value"),
             prevent_initial_call=True,
         )
+        @time_method_call(self._method_times)
         def concat_data(
             new_data_read,
             file_deleted,
@@ -1105,10 +1142,10 @@ class GeoExplorer:
             bounds,
         ):
             triggered = dash.callback_context.triggered_id
-            # debug_print("concat_data", triggered, new_data_read, self.splitted)
+            debug_print("concat_data", triggered, new_data_read, self.splitted)
 
             t = perf_counter()
-            if not new_data_read:
+            if not new_data_read and not query_updated:
                 return dash.no_update, 1, dash.no_update, dash.no_update
 
             bounds = self._nested_bounds_to_bounds(bounds)
@@ -1157,6 +1194,7 @@ class GeoExplorer:
             State("file-control-panel", "children"),
             prevent_initial_call=True,
         )
+        @time_method_call(self._method_times)
         def render_items(
             _,
             file_deleted,
@@ -1275,7 +1313,8 @@ class GeoExplorer:
                                                 "type": "query",
                                                 "index": path,
                                             },
-                                            debounce=3,
+                                            style={"width": "100%"},
+                                            debounce=2,
                                         ),
                                         dbc.Tooltip(
                                             "E.g. komm_nr == '0301' or pl.col('komm_nr') == '0301'",
@@ -1286,17 +1325,16 @@ class GeoExplorer:
                                             delay={"show": 500, "hide": 100},
                                         ),
                                     ],
-                                    width=10,
+                                    width=9,
                                 ),
                                 dbc.Col(
                                     [
-                                        *get_button_with_tooltip(
+                                        html.Button(
                                             "Expand query",
                                             id={
                                                 "type": "query-expand-button",
                                                 "index": path,
                                             },
-                                            tooltip_text="Get query examples for this table",
                                         ),
                                         dbc.Modal(
                                             id={
@@ -1305,9 +1343,10 @@ class GeoExplorer:
                                             },
                                             is_open=False,
                                             style={"width": "250vh"},
+                                            backdrop="static",
                                         ),
                                     ],
-                                    width=2,
+                                    width=3,
                                 ),
                             ],
                         ),
@@ -1362,7 +1401,7 @@ class GeoExplorer:
             ),
             prevent_initial_call=True,
         )
-        def check_or_uncheck(n_clicks_list, ids):
+        def check_or_uncheck2(n_clicks_list, ids):
             triggered = dash.callback_context.triggered_id
             if triggered is None:
                 return dash.no_update, dash.no_update
@@ -1391,6 +1430,7 @@ class GeoExplorer:
             State({"type": "delete-btn", "index": dash.ALL}, "id"),
             prevent_initial_call=True,
         )
+        @time_method_call(self._method_times)
         def delete_file(n_clicks_list, delete_ids):
             return (*self._delete_file(n_clicks_list, delete_ids), True)
 
@@ -1403,6 +1443,7 @@ class GeoExplorer:
             State({"type": "delete-cat-btn", "index": dash.ALL}, "id"),
             prevent_initial_call=True,
         )
+        @time_method_call(self._method_times)
         def delete_category(n_clicks_list, delete_ids):
             path_to_delete = get_index_if_clicks(n_clicks_list, delete_ids)
             if path_to_delete is None:
@@ -1425,6 +1466,7 @@ class GeoExplorer:
             State({"type": "query-expand-button", "index": dash.ALL}, "id"),
             prevent_initial_call=True,
         )
+        @time_method_call(self._method_times)
         def expand_query_panel(n_clicks, ids):
             path = get_index_if_clicks(n_clicks, ids)
             if not path:
@@ -1437,7 +1479,9 @@ class GeoExplorer:
             queries = [
                 html.Br(),
                 html.Br(),
-                html.B(f"Query tips for table: {df_name}", style={"font-size": 16}),
+                html.B(
+                    f"Example queries for table: {df_name}", style={"font-size": 16}
+                ),
                 html.Br(),
                 html.B("Join queries:"),
             ]
@@ -1556,14 +1600,14 @@ class GeoExplorer:
             return [
                 dbc.ModalHeader(
                     dbc.ModalTitle(f"Query {self._get_unique_stem(path)}"),
-                    close_button=False,
+                    close_button=True,
                 ),
                 dbc.ModalBody(
                     html.Div(
                         [
                             dcc.Textarea(
                                 value=self._queries.get(path, None),
-                                placeholder="Query (with polars, pandas or sql)",
+                                placeholder="Write query here (with polars, pandas or sql)",
                                 id={
                                     "type": "query-copy",
                                     "index": path,
@@ -1619,6 +1663,7 @@ class GeoExplorer:
             Input("map", "center"),
             State("urls", "children"),
         )
+        @time_method_call(self._method_times)
         def update_urls(_, urls):
             return (
                 [urls[0]]
@@ -1672,6 +1717,7 @@ class GeoExplorer:
             Input("colors-are-updated", "data"),
             prevent_initial_call=True,
         )
+        @time_method_call(self._method_times)
         def update_column_dropdown_options(_):
             if self._concatted_data is None or not len(self._concatted_data):
                 return dash.no_update
@@ -1701,6 +1747,7 @@ class GeoExplorer:
             State({"type": "colorpicker", "column_value": dash.ALL}, "id"),
             prevent_initial_call=True,
         )
+        @time_method_call(self._method_times)
         def set_colorpicker_value(colors, ids):
             triggered = dash.callback_context.triggered_id
             if triggered is None:
@@ -1726,6 +1773,7 @@ class GeoExplorer:
             State("debounced_bounds", "value"),
             State("bins", "data"),
         )
+        @time_method_call(self._method_times)
         def get_column_value_color_dict(
             cmap: str,
             k: int,
@@ -1936,6 +1984,7 @@ class GeoExplorer:
             State("bins", "data"),
             State({"type": "colorpicker", "column_value": dash.ALL}, "id"),
         )
+        @time_method_call(self._method_times)
         def add_data(
             currently_in_bounds,
             colorpicker_values_list,
@@ -2029,6 +2078,7 @@ class GeoExplorer:
             Output("clicked-features-title", "children"),
             Input("clicked-features", "data"),
         )
+        @time_method_call(self._method_times)
         def update_clicked_features_title(features):
             if not features:
                 return dash.no_update
@@ -2038,6 +2088,7 @@ class GeoExplorer:
             Output("all-features-title", "children"),
             Input("all-features", "data"),
         )
+        @time_method_call(self._method_times)
         def update_all_features_title(features):
             if not features:
                 return dash.no_update
@@ -2058,6 +2109,7 @@ class GeoExplorer:
             State("clicked-features", "data"),
             State("clicked-ids", "data"),
         )
+        @time_method_call(self._method_times)
         def display_clicked_feature_attributes(
             clear_table,
             update_table,
@@ -2197,6 +2249,7 @@ class GeoExplorer:
             Input({"type": "table-btn", "index": dash.ALL}, "n_clicks"),
             State({"type": "table-btn", "index": dash.ALL}, "id"),
         )
+        @time_method_call(self._method_times)
         def display_all_feature_attributes(
             clear_table, update_table, table_btn_n_clicks, table_btn_ids
         ):
@@ -2248,6 +2301,7 @@ class GeoExplorer:
             Input("all-features", "data"),
             State("feature-table-rows", "style_table"),
         )
+        @time_method_call(self._method_times)
         def update_table(data, style_table):
             return self._update_table(
                 data, column_dropdown=_UseColumns(), style_table=style_table
@@ -2262,6 +2316,7 @@ class GeoExplorer:
             State("column-dropdown", "options"),
             State("feature-table-rows-clicked", "style_table"),
         )
+        @time_method_call(self._method_times)
         def update_table_clicked(data, column_dropdown, style_table):
             return self._update_table(data, column_dropdown, style_table)
 
@@ -2274,6 +2329,7 @@ class GeoExplorer:
             State("viewport-container", "data"),
             prevent_initial_call=True,
         )
+        @time_method_call(self._method_times)
         def zoom_to_feature(active: dict, active_clicked: dict, viewport):
             triggered = dash.callback_context.triggered_id
             if triggered == "feature-table-rows":
@@ -2320,6 +2376,7 @@ class GeoExplorer:
             Input("wms-checklist", "value"),
             State("wms-panel", "children"),
         )
+        @time_method_call(self._method_times)
         def add_wms_panel(
             wms_checklist,
             items,
@@ -2553,6 +2610,7 @@ class GeoExplorer:
             Input("url", "href"),
         )
 
+    @time_method_call(_method_times)
     def _get_column_dropdown_options(self):
         if self._concatted_data is None:
             return []
@@ -2576,6 +2634,7 @@ class GeoExplorer:
         }.difference(cols_to_drop)
         return [{"label": col, "value": col} for col in sorted(columns)]
 
+    @time_method_call(_method_times)
     def _update_table(self, data, column_dropdown, style_table):
         if not data:
             return None, None, style_table | {"height": "1vh"}, None
@@ -2608,6 +2667,7 @@ class GeoExplorer:
             ["id"],
         )
 
+    @time_method_call(_method_times)
     def _delete_file(self, n_clicks_list, delete_ids):
         path_to_delete = get_index_if_clicks(n_clicks_list, delete_ids)
         if path_to_delete is None:
@@ -2630,6 +2690,7 @@ class GeoExplorer:
 
         return None, None
 
+    @time_method_call(_method_times)
     def _nested_bounds_to_bounds(
         self,
         bounds: list[list[float]],
@@ -2651,6 +2712,7 @@ class GeoExplorer:
         maxy, maxx = maxs
         return minx, miny, maxx, maxy
 
+    @time_method_call(_method_times)
     def _get_selected_feature(
         self, unique_id: float, loaded_data: dict[str, pl.LazyFrame]
     ) -> dict[str, str | Number]:
@@ -2670,6 +2732,7 @@ class GeoExplorer:
             for col, value in zip(columns, feature["properties"].values(), strict=True)
         }
 
+    @time_method_call(_method_times)
     def _check_for_circular_queries(self, query, path):
         if query is None:
             return
@@ -2701,6 +2764,7 @@ class GeoExplorer:
                 f"Recursion error: Circular joins on {path} and {path}",
             )
 
+    @time_method_call(_method_times)
     def _update_query(self, queries: list[str | None], ids):
         out_alerts = []
         for path in self.selected_files:
@@ -2721,14 +2785,18 @@ class GeoExplorer:
                 break
             except ValueError:
                 pass
-        return out_alerts or dash.no_update
+        if out_alerts:
+            return out_alerts
+        return None
 
+    @time_method_call(_method_times)
     def _get_unique_stem(self, path) -> str:
         name = _get_stem(path)
         if sum(_get_stem(x) == name for x in self.selected_files) > 1:
             name = _get_stem_from_parent(path)
         return name
 
+    @time_method_call(_method_times)
     def _concat_data(
         self,
         bounds,
@@ -2791,6 +2859,7 @@ class GeoExplorer:
 
         return df, alerts
 
+    @time_method_call(_method_times)
     def _filter_data(self, df: pl.DataFrame, query: str | None) -> pl.DataFrame:
         query = query.strip()
         try:
@@ -2859,6 +2928,8 @@ class GeoExplorer:
                     df = df.sql(formatted_query)
             else:
                 df = df.filter(query)
+        except NoRowsError as e:
+            return df, str(e)
         except Exception as e:
             try:
                 df = pl.DataFrame(df.to_pandas().loc[query])
@@ -2885,6 +2956,7 @@ class GeoExplorer:
         # debug_print("_filter_data", len(df), list(df.columns))
         return df, alert
 
+    @time_method_call(_method_times)
     def _polars_sql_join(self, df, query):
         if " df " not in query:
             raise ValueError("Table to be queried must be referenced to as 'df'.")
@@ -2928,11 +3000,23 @@ class GeoExplorer:
                 "If multiple tables have same stem, the parent directory must be included as well.",
             )
         join_df, _ = self._concat_data(bounds=None, paths=[path])
+        if join_df is None:
+            if self._queries.get(path) and len(
+                self._concat_data(bounds=None, paths=[path], _filter=False)[0]
+            ):
+                query_tip = f" after query: {self._queries[path]}"
+            else:
+                query_tip = ""
+            this_name = self._get_unique_stem(next(iter(df["__file_path"])))
+            raise NoRowsError(
+                f"SQL query error for {this_name}: No rows in join table {self._get_unique_stem(path)}{query_tip}"
+            )
         # using literal 'join_df' in case 'i' is negative index
         query = query.replace(join_df_name, "join_df")
         ctx = pl.SQLContext(**{"df": df, "join_df": join_df})
         return ctx.execute(query, eager=True)
 
+    @time_method_call(_method_times)
     def _map_constructor(
         self, data: dl.LayersControl, preferCanvas=True, zoomAnimation=False, **kwargs
     ) -> dl.Map:
@@ -2950,6 +3034,7 @@ class GeoExplorer:
             **kwargs,
         )
 
+    @time_method_call(_method_times)
     def _add_wms(self, wms_checklist, bounds):
         wms_layers = []
         all_tiles_lists = []
@@ -2980,6 +3065,7 @@ class GeoExplorer:
             )
         return wms_layers, all_tiles_lists
 
+    @time_method_call(_method_times)
     def _get_wms_list(
         self, tiles: list[str], wms_name: str, wms_layers_checked: list[str]
     ) -> html.Ul:
@@ -3045,6 +3131,7 @@ class GeoExplorer:
         values = from_year_values if what == "from" else to_year_values
         return True, values
 
+    @time_method_call(_method_times)
     def _construct_wms_obj(self, wms_name: str, **kwargs):
         constructor = self.wms[wms_name].__class__
         defaults = dict(
@@ -3805,6 +3892,10 @@ def _get_force_categorical_button(
 
 
 class _UseColumns:
+    pass
+
+
+class NoRowsError(ValueError):
     pass
 
 
