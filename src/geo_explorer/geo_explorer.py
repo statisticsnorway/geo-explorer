@@ -56,6 +56,7 @@ from sgis.io.dapla_functions import _read_pyarrow
 from sgis.maps.wms import WmsLoader
 from shapely.errors import GEOSException
 from shapely.geometry import Point
+import msgspec
 
 from .file_browser import FileBrowser
 from .fs import LocalFileSystem
@@ -1176,7 +1177,12 @@ class GeoExplorer:
             else:
                 update_table = dash.no_update
 
-            df, alerts = self._concat_data(bounds)
+            df, alerts = self._concat_data(
+                bounds,
+                paths=[
+                    path for path, checked in self.selected_files.items() if checked
+                ],
+            )
             self._concatted_data = df
 
             debug_print(
@@ -2184,7 +2190,6 @@ class GeoExplorer:
                     raise ValueError(locals())
                 return dash.no_update, dash.no_update, None
             unique_id = feature["properties"]["_unique_id"]
-            # path = feature["properties"]["__file_path"]
             i = int(unique_id)
             path = list(self._loaded_data)[i]
             bounds = self._nested_bounds_to_bounds(bounds)
@@ -2799,7 +2804,6 @@ class GeoExplorer:
         self,
         bounds,
         paths: list[str] | None = None,
-        eagar: bool = True,
         _filter: bool = True,
     ) -> tuple[pl.LazyFrame | None, list[dbc.Alert] | None]:
         dfs = []
@@ -3020,7 +3024,10 @@ class GeoExplorer:
     @staticmethod
     @time_method_call(_method_times)
     def _cheap_geo_interface(df: pl.DataFrame) -> dict:
-        geometries = shapely.from_wkb(df["geometry"])
+        geojson_dicts = [
+            msgspec.json.decode(x)
+            for x in shapely.to_geojson(shapely.from_wkb(df["geometry"]))
+        ]
         return {
             "type": "FeatureCollection",
             "features": [
@@ -3028,10 +3035,10 @@ class GeoExplorer:
                     "id": str(i),
                     "type": "Feature",
                     "properties": {"_unique_id": id_},
-                    "geometry": geom.__geo_interface__,
+                    "geometry": geom,
                 }
                 for i, (geom, id_) in enumerate(
-                    zip(geometries, df["_unique_id"], strict=True)
+                    zip(geojson_dicts, df["_unique_id"], strict=True)
                 )
             ],
         }
@@ -3367,7 +3374,7 @@ def _add_data_one_path(
                 dl.Overlay(
                     dl.GeoJSON(id={"type": "geojson", "filename": path}),
                     name=_get_stem(path),
-                    id={"type": "geojson-overlay", "filename": path},
+                    id={"type": "geoj   son-overlay", "filename": path},
                     checked=True,
                 )
             ],
@@ -3472,30 +3479,34 @@ def _add_data_one_path(
                         )
                         for color_ in df["_color"].unique().drop_nulls()  # .drop_nans()
                     ]
-                    + [
-                        dl.GeoJSON(
-                            data=GeoExplorer._cheap_geo_interface(
-                                df.filter(pl.col(column).is_null())
-                            ),
-                            style={
-                                "color": nan_color,
-                                "fillColor": nan_color,
-                                "weight": 2,
-                                "fillOpacity": alpha,
-                            },
-                            id={
-                                "type": "geojson",
-                                "filename": path + "_nan",
-                            },
-                            onEachFeature=ns("yellowIfHighlighted"),
-                            pointToLayer=ns("pointToLayerCircle"),
-                            hideout=dict(
-                                circleOptions=dict(
-                                    fillOpacity=1, stroke=False, radius=5
+                    + (
+                        []
+                        if not df[column].is_null().any()
+                        else [
+                            dl.GeoJSON(
+                                data=GeoExplorer._cheap_geo_interface(
+                                    df.filter(pl.col(column).is_null())
                                 ),
-                            ),
-                        )
-                    ]
+                                style={
+                                    "color": nan_color,
+                                    "fillColor": nan_color,
+                                    "weight": 2,
+                                    "fillOpacity": alpha,
+                                },
+                                id={
+                                    "type": "geojson",
+                                    "filename": path + "_nan",
+                                },
+                                onEachFeature=ns("yellowIfHighlighted"),
+                                pointToLayer=ns("pointToLayerCircle"),
+                                hideout=dict(
+                                    circleOptions=dict(
+                                        fillOpacity=1, stroke=False, radius=5
+                                    ),
+                                ),
+                            )
+                        ]
+                    )
                 ),
                 name=_get_stem(path),
                 checked=True,
