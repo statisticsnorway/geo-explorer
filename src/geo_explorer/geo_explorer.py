@@ -286,6 +286,7 @@ class GeoExplorer:
         self._bounds_series = GeoSeries()
         self.selected_files: dict[str, int] = {}
         self._loaded_data: dict[str, pl.LazyFrame] = {}
+        self._dtypes: dict[str, dict[str, pl.DataType]] = {}
         self._max_unique_id_int: int = 0
         self._loaded_data_sizes: dict[str, int] = {}
         self._concatted_data: pl.DataFrame | None = None
@@ -674,7 +675,7 @@ class GeoExplorer:
                     self.selected_files[key] = True
                     self._queries[key] = value
                     continue
-                value = _gdf_to_polars(value, key)
+                value, dtypes = _gdf_to_polars(value, key)
                 bounds_series_dict[key] = shapely.box(
                     float(value["minx"].min()),
                     float(value["miny"].min()),
@@ -682,6 +683,7 @@ class GeoExplorer:
                     float(value["maxy"].max()),
                 )
                 self._loaded_data[key] = value.lazy()
+                self._dtypes[key] = dtypes
                 self.selected_files[key] = True
 
         self.selected_files = dict(reversed(self.selected_files.items()))
@@ -2208,6 +2210,7 @@ class GeoExplorer:
                             geoms_relate, return_dtype=pl.Boolean
                         )
                     )
+                    .collect()
                 )
                 _used_file_paths |= set(intersecting["__file_path"].unique())
 
@@ -2625,22 +2628,15 @@ class GeoExplorer:
     def _get_column_dropdown_options(self):
         if self._concatted_data is None:
             return []
-        cols_to_drop = {
-            "__file_path",
-            "_unique_id",
-            "minx",
-            "miny",
-            "maxx",
-            "maxy",
-            "geometry",
-        }
-        if DEBUG:
-            cols_to_drop = cols_to_drop.difference({"_unique_id", "__file_path"})
+        cols_to_drop = (
+            ADDED_COLUMNS
+            if not DEBUG
+            else ADDED_COLUMNS.difference({"_unique_id", "__file_path"})
+        )
         columns = {
             col
-            for col, dtype in zip(
-                self._concatted_data.columns, self._concatted_data.dtypes, strict=True
-            )
+            for dtypes in self._dtypes.values()
+            for col, dtype in dtypes.items()
             if not dtype.is_nested()
         }.difference(cols_to_drop)
         return [{"label": col, "value": col} for col in sorted(columns)]
@@ -3554,7 +3550,9 @@ def _read_polars(path, file_system, primary_column, **kwargs):
         )
 
 
-def _read_and_to_4326(path: str, file_system, **kwargs) -> pl.LazyFrame:
+def _read_and_to_4326(
+    path: str, file_system, **kwargs
+) -> tuple[pl.LazyFrame, dict[str, pl.DataType]]:
     if FILE_SPLITTER_TXT not in path:
         try:
             # metadata = _get_geo_metadata(path, file_system)
@@ -3568,7 +3566,8 @@ def _read_and_to_4326(path: str, file_system, **kwargs) -> pl.LazyFrame:
         except Exception as e:
             debug_print(f"{type(e)}: {e} for {path}")
             df = sg.read_geopandas(path, file_system=file_system, **kwargs)
-            return _gdf_to_polars(df, path).lazy()
+            df, dtypes = _gdf_to_polars(df, path)
+            return df.lazy(), dtypes
     rows = path.split(FILE_SPLITTER_TXT)[-1]
     nrow, nth_batch = rows.split("-")
     nrow = int(nrow)
@@ -3581,16 +3580,19 @@ def _read_and_to_4326(path: str, file_system, **kwargs) -> pl.LazyFrame:
     return _pyarrow_to_polars(table, path, file_system)
 
 
-def _pyarrow_to_polars(table, path, file_system):
+def _pyarrow_to_polars(
+    table, path, file_system
+) -> tuple[pl.LazyFrame, dict[str, pl.DataType]]:
     metadata = _get_geo_metadata(path, file_system)
     primary_column = metadata["primary_column"]
     try:
-        df = pl.from_arrow(table, schema_overrides={primary_column: pl.Binary()}).lazy()
+        df = pl.from_arrow(table, schema_overrides={primary_column: pl.Binary()})
     except Exception as e:
         if DEBUG:
             raise e
-        df = pl.from_pandas(table.to_pandas()).lazy()
-    return _prepare_df(df, path, metadata)
+        df = pl.from_pandas(table.to_pandas())
+    dtypes = dict(zip(df.columns, df.dtypes))
+    return _prepare_df(df.lazy(), path, metadata), dtypes
 
 
 def _prepare_df(df: pl.LazyFrame, path, metadata) -> pl.LazyFrame:
@@ -3632,7 +3634,9 @@ def _get_area_and_bounds(geometries: GeometryArray | GeoSeries):
 def _gdf_to_polars(df: GeoDataFrame, path) -> GeoDataFrame:
     geometries, areas, bounds = _get_area_and_bounds(geometries=df.geometry.values)
     df = df.drop(columns=df.geometry.name)
-    df = pl.from_pandas(df).with_columns(
+    df = pl.from_pandas(df)
+    dtypes = dict(zip(df.columns, df.dtypes))
+    df = df.with_columns(
         pl.Series("area", areas),
         pl.Series("geometry", shapely.to_wkb(geometries)),
         pl.Series("minx", bounds[:, 0]),
@@ -3641,7 +3645,7 @@ def _gdf_to_polars(df: GeoDataFrame, path) -> GeoDataFrame:
         pl.Series("maxy", bounds[:, 3]),
         __file_path=pl.lit(path),
     )
-    return df
+    return df, dtypes
 
 
 def _get_divider_lf() -> pl.Expr:
@@ -3678,10 +3682,11 @@ def _read_files(explorer, paths: list[str], mask=None, **kwargs) -> None:
             )
             for path in paths
         )
-    for path, df in zip(paths, more_data, strict=True):
+    for path, (df, dtypes) in zip(paths, more_data, strict=True):
         explorer._loaded_data[path] = df.with_columns(
             _unique_id=_get_unique_id(df, explorer._max_unique_id_int)
         )
+        explorer._dtypes[path] = dtypes
         explorer._max_unique_id_int += 1
 
 
