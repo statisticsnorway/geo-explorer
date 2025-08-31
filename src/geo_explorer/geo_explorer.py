@@ -29,6 +29,7 @@ import matplotlib
 import matplotlib.colors as mcolors
 import numpy as np
 import pandas as pd
+from shapely import Geometry
 import polars as pl
 import pyarrow
 import pyarrow.parquet as pq
@@ -766,9 +767,10 @@ class GeoExplorer:
         self.app.layout = get_layout
 
         for unique_id in selected_features if selected_features is not None else []:
-            self.selected_features[unique_id] = self._get_selected_feature(
-                unique_id, self._loaded_data
-            )
+            i = int(unique_id)
+            path = list(self._loaded_data)[i]
+            properties, _ = self._get_selected_feature(unique_id, path, bounds=None)
+            self.selected_features[unique_id] = properties
 
         self._register_callbacks()
 
@@ -2121,6 +2123,7 @@ class GeoExplorer:
             State({"type": "geojson", "filename": dash.ALL}, "id"),
             State("clicked-features", "data"),
             State("clicked-ids", "data"),
+            State("debounced_bounds", "value"),
         )
         @time_method_call(self._method_times)
         def display_clicked_feature_attributes(
@@ -2131,6 +2134,7 @@ class GeoExplorer:
             feature_ids,
             clicked_features,
             clicked_ids,
+            bounds,
         ):
             triggered = dash.callback_context.triggered_id
             debug_print("display_clicked_feature_attributes", triggered)
@@ -2160,14 +2164,6 @@ class GeoExplorer:
             else:
                 clicked_path = triggered["filename"]
 
-            index = next(
-                iter(
-                    i
-                    for i, id_ in enumerate(feature_ids)
-                    if id_["filename"] == clicked_path
-                )
-            )
-
             _used_file_paths = set()
             for path in self._loaded_data:
                 selected_path = next(iter(x for x in self.selected_files if x in path))
@@ -2175,20 +2171,28 @@ class GeoExplorer:
                     _used_file_paths.add(path)
                     break
 
+            index = next(
+                iter(
+                    i
+                    for i, id_ in enumerate(feature_ids)
+                    if id_["filename"] == clicked_path
+                )
+            )
             feature = features[index]
             if not feature:
                 if DEBUG:
                     raise ValueError(locals())
                 return dash.no_update, dash.no_update, None
-            unique_id = next(
-                iter(
-                    value
-                    for key, value in feature["properties"].items()
-                    if key == "_unique_id"
-                )
+            unique_id = feature["properties"]["_unique_id"]
+            # path = feature["properties"]["__file_path"]
+            i = int(unique_id)
+            path = list(self._loaded_data)[i]
+            bounds = self._nested_bounds_to_bounds(bounds)
+            feature, geometry = self._get_selected_feature(
+                unique_id, path, bounds=bounds
             )
             if self.hard_click:
-                geom = shapely.geometry.shape(feature["geometry"])
+                geom = shapely.from_wkb(geometry)
 
                 def geoms_relate(wkb: bytes) -> bool:
                     this_geom = shapely.from_wkb(wkb)
@@ -2214,16 +2218,12 @@ class GeoExplorer:
                 )
                 _used_file_paths |= set(intersecting["__file_path"].unique())
 
-            columns = set()
+            columns = {"_unique_id"}
             for path in _used_file_paths:
-                columns |= set(self._loaded_data[path].columns).difference({"geometry"})
+                columns |= set(self._dtypes[path]).difference({"geometry"})
 
             props_list = [
-                {
-                    key: value
-                    for key, value in feature["properties"].items()
-                    if key in columns
-                }
+                {key: value for key, value in feature.items() if key in columns}
             ]
 
             if self.hard_click:
@@ -2721,14 +2721,14 @@ class GeoExplorer:
 
     @time_method_call(_method_times)
     def _get_selected_feature(
-        self, unique_id: float, loaded_data: dict[str, pl.LazyFrame]
-    ) -> dict[str, str | Number]:
-        i = int(unique_id)
-        path = list(loaded_data)[i]
-        df, _ = self._concat_data(bounds=None, paths=[path])
-        row = df.filter(pl.col("_unique_id") == unique_id).collect()
-        features = _geo_interface(row)["features"]
-        return next(iter(features))["properties"]
+        self, unique_id: float, path: str, bounds: tuple[float]
+    ) -> tuple[dict[str, str | Number], Geometry]:
+        df, _ = self._concat_data(bounds=bounds, paths=[path])
+        row = df.filter(pl.col("_unique_id") == unique_id)
+        geometry = next(iter(row.select("geometry").collect()["geometry"]))
+        row = row.drop(*ADDED_COLUMNS.difference({"_unique_id"})).collect()
+        assert len(row) == 1
+        return row.row(0, named=True), geometry
 
     @time_method_call(_method_times)
     def _check_for_circular_queries(self, query, path):
@@ -3016,6 +3016,25 @@ class GeoExplorer:
         query = query.replace(join_df_name, "join_df")
         ctx = pl.SQLContext(**{"df": df, "join_df": join_df})
         return ctx.execute(query, eager=False)
+
+    @staticmethod
+    @time_method_call(_method_times)
+    def _cheap_geo_interface(df: pl.DataFrame) -> dict:
+        geometries = shapely.from_wkb(df["geometry"])
+        return {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "id": str(i),
+                    "type": "Feature",
+                    "properties": {"_unique_id": id_},
+                    "geometry": geom.__geo_interface__,
+                }
+                for i, (geom, id_) in enumerate(
+                    zip(geometries, df["_unique_id"], strict=True)
+                )
+            ],
+        }
 
     @time_method_call(_method_times)
     def _map_constructor(
@@ -3405,7 +3424,7 @@ def _add_data_one_path(
         data.append(
             dl.Overlay(
                 dl.GeoJSON(
-                    data=_geo_interface(df),
+                    data=GeoExplorer._cheap_geo_interface(df),
                     style={
                         "color": nan_color,
                         "fillColor": nan_color,
@@ -3430,7 +3449,9 @@ def _add_data_one_path(
                 dl.LayerGroup(
                     [
                         dl.GeoJSON(
-                            data=_geo_interface(df.filter(pl.col("_color") == color_)),
+                            data=GeoExplorer._cheap_geo_interface(
+                                df.filter(pl.col("_color") == color_)
+                            ),
                             style={
                                 "color": color_,
                                 "fillColor": color_,
@@ -3453,7 +3474,9 @@ def _add_data_one_path(
                     ]
                     + [
                         dl.GeoJSON(
-                            data=_geo_interface(df.filter(pl.col(column).is_null())),
+                            data=GeoExplorer._cheap_geo_interface(
+                                df.filter(pl.col(column).is_null())
+                            ),
                             style={
                                 "color": nan_color,
                                 "fillColor": nan_color,
@@ -3488,7 +3511,7 @@ def _add_data_one_path(
         data.append(
             dl.Overlay(
                 dl.GeoJSON(
-                    data=_geo_interface(df),
+                    data=GeoExplorer._cheap_geo_interface(df),
                     style={
                         "color": color,
                         "fillColor": color,
@@ -3929,31 +3952,6 @@ def get_google_maps_url(center, zoom_m: int = 150) -> str:
     y, x = center
     url = f"https://www.google.com/maps/@{y},{x},{zoom_m}m/data=!3m1!1e3?entry=ttu&g_ep=EgoyMDI0MTEyNC4xIKXMDSoASAFQAw%3D%3D"
     return url
-
-
-def _geo_interface(df: pl.DataFrame) -> dict:
-    # df = df.to_pandas()
-    # df["geometry"] = shapely.from_wkb(df["geometry"])
-    # return GeoDataFrame(df, crs=4326).__geo_interface__
-    geometries = shapely.from_wkb(df["geometry"])
-    return {
-        "type": "FeatureCollection",
-        "features": [
-            {
-                "id": str(i),
-                "type": "Feature",
-                "properties": values,
-                "geometry": geom.__geo_interface__,
-            }
-            for i, (values, geom) in enumerate(
-                zip(
-                    df.drop(*(ADDED_COLUMNS.difference({"_unique_id"}))).to_dicts(),
-                    geometries,
-                    strict=True,
-                )
-            )
-        ],
-    }
 
 
 def _add_cols_to_sql_query(query: str) -> str:
