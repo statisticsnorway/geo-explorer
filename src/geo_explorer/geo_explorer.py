@@ -64,6 +64,7 @@ from .utils import _standardize_path
 from .utils import _unclicked_button_style
 from .utils import get_button_with_tooltip
 from .utils import time_method_call
+from .utils import time_function_call
 
 OFFWHITE: str = "#ebebeb"
 FILE_CHECKED_COLOR: str = "#3e82ff"
@@ -81,7 +82,9 @@ ADDED_COLUMNS = {
     "geometry",
 }
 
-DEBUG: bool = False
+DEBUG: bool = 1
+
+_method_times = {}
 
 if DEBUG:
 
@@ -229,8 +232,6 @@ class GeoExplorer:
             primaryLengthUnit="meters",
         ),
     ]
-
-    _method_times = {}
 
     def __init__(
         self,
@@ -818,7 +819,7 @@ class GeoExplorer:
             if DEBUG:
                 print("\nprofile")
                 for k, v in reversed(
-                    sorted(self._method_times.items(), key=lambda x: x[1][1])
+                    sorted(_method_times.items(), key=lambda x: x[1][1])
                 ):
                     print(k, v)
             triggered = dash.callback_context.triggered_id
@@ -870,7 +871,7 @@ class GeoExplorer:
             Input({"type": "load-parquet", "index": dash.ALL}, "id"),
             State({"type": "file-path", "index": dash.ALL}, "id"),
         )
-        @time_method_call(self._method_times)
+        @time_method_call(_method_times)
         def append_path(load_parquet, load_parquet_ids, ids):
             triggered = dash.callback_context.triggered_id
             debug_print("append_path", triggered)
@@ -920,7 +921,7 @@ class GeoExplorer:
             Input({"type": "checked-btn", "index": dash.ALL}, "n_clicks"),
             State({"type": "checked-btn", "index": dash.ALL}, "id"),
         )
-        @time_method_call(self._method_times)
+        @time_method_call(_method_times)
         def get_files_in_bounds(
             bounds,
             file_added,
@@ -1137,7 +1138,7 @@ class GeoExplorer:
             State("debounced_bounds", "value"),
             prevent_initial_call=True,
         )
-        @time_method_call(self._method_times)
+        @time_method_call(_method_times)
         def concat_data(
             new_data_read,
             file_deleted,
@@ -1207,7 +1208,7 @@ class GeoExplorer:
             State("file-control-panel", "children"),
             prevent_initial_call=True,
         )
-        @time_method_call(self._method_times)
+        @time_method_call(_method_times)
         def render_items(
             _,
             file_deleted,
@@ -1443,7 +1444,7 @@ class GeoExplorer:
             State({"type": "delete-btn", "index": dash.ALL}, "id"),
             prevent_initial_call=True,
         )
-        @time_method_call(self._method_times)
+        @time_method_call(_method_times)
         def delete_file(n_clicks_list, delete_ids):
             return (*self._delete_file(n_clicks_list, delete_ids), True)
 
@@ -1456,7 +1457,7 @@ class GeoExplorer:
             State({"type": "delete-cat-btn", "index": dash.ALL}, "id"),
             prevent_initial_call=True,
         )
-        @time_method_call(self._method_times)
+        @time_method_call(_method_times)
         def delete_category(n_clicks_list, delete_ids):
             path_to_delete = get_index_if_clicks(n_clicks_list, delete_ids)
             if path_to_delete is None:
@@ -1479,7 +1480,7 @@ class GeoExplorer:
             State({"type": "query-expand-button", "index": dash.ALL}, "id"),
             prevent_initial_call=True,
         )
-        @time_method_call(self._method_times)
+        @time_method_call(_method_times)
         def expand_query_panel(n_clicks, ids):
             path = get_index_if_clicks(n_clicks, ids)
             if not path:
@@ -1676,7 +1677,7 @@ class GeoExplorer:
             Input("map", "center"),
             State("urls", "children"),
         )
-        @time_method_call(self._method_times)
+        @time_method_call(_method_times)
         def update_urls(_, urls):
             return (
                 [urls[0]]
@@ -1730,7 +1731,7 @@ class GeoExplorer:
             Input("colors-are-updated", "data"),
             prevent_initial_call=True,
         )
-        @time_method_call(self._method_times)
+        @time_method_call(_method_times)
         def update_column_dropdown_options(_):
             if self._concatted_data is None:  # or not len(self._concatted_data):
                 return dash.no_update
@@ -1760,7 +1761,7 @@ class GeoExplorer:
             State({"type": "colorpicker", "column_value": dash.ALL}, "id"),
             prevent_initial_call=True,
         )
-        @time_method_call(self._method_times)
+        @time_method_call(_method_times)
         def set_colorpicker_value(colors, ids):
             triggered = dash.callback_context.triggered_id
             if triggered is None:
@@ -1786,7 +1787,7 @@ class GeoExplorer:
             State("debounced_bounds", "value"),
             State("bins", "data"),
         )
-        @time_method_call(self._method_times)
+        @time_method_call(_method_times)
         def get_column_value_color_dict(
             cmap: str,
             k: int,
@@ -1974,7 +1975,7 @@ class GeoExplorer:
             prevent_initial_call=True,
         )
         def update_loading(_):
-            if self._concatted_data is None:  # or not len(self._concatted_data):
+            if self._concatted_data is None:
                 return None
             return "Finished loading"
 
@@ -2001,7 +2002,7 @@ class GeoExplorer:
             State("bins", "data"),
             State({"type": "colorpicker", "column_value": dash.ALL}, "id"),
         )
-        @time_method_call(self._method_times)
+        @time_method_call(_method_times)
         def add_data(
             currently_in_bounds,
             colorpicker_values_list,
@@ -2041,27 +2042,37 @@ class GeoExplorer:
             if is_numeric:
                 color_dict = {i: color for i, color in enumerate(color_dict.values())}
 
-            add_data_func = partial(
-                _add_data_one_path,
-                max_rows=self.max_rows,
-                concatted_data=self._concatted_data,
-                nan_color=self.nan_color,
-                column=column,
-                is_numeric=is_numeric,
-                color_dict=color_dict,
-                bins=bins,
-                alpha=alpha,
-            )
-
-            results = [
-                add_data_func(path)
-                for path, checked in self.selected_files.items()
-                if checked
-            ]
-
-            data = list(itertools.chain.from_iterable([x[0] for x in results if x[0]]))
-            out_alert = [x[1] for x in results if x[1]]
-            rows_are_not_hidden = not any(x[2] for x in results)
+            if self._concatted_data is None:
+                data = [
+                    dl.Overlay(
+                        dl.GeoJSON(id={"type": "geojson", "filename": "none"}),
+                        name="none",
+                        id={"type": "geojson-overlay", "filename": "none"},
+                        checked=True,
+                    )
+                ]
+                rows_are_not_hidden = True
+            else:
+                add_data_func = partial(
+                    _add_data_one_path,
+                    max_rows=self.max_rows,
+                    concatted_data=self._concatted_data,
+                    nan_color=self.nan_color,
+                    column=column,
+                    is_numeric=is_numeric,
+                    color_dict=color_dict,
+                    bins=bins,
+                    alpha=alpha,
+                )
+                results = [
+                    add_data_func(path)
+                    for path, checked in self.selected_files.items()
+                    if checked
+                ]
+                data = list(
+                    itertools.chain.from_iterable([x[0] for x in results if x[0]])
+                )
+                rows_are_not_hidden = not any(x[1] for x in results)
 
             debug_print(
                 "add_data ferdig etter",
@@ -2082,7 +2093,7 @@ class GeoExplorer:
 
             return (
                 dl.LayersControl(self._base_layers + wms_layers + data),
-                (out_alert if out_alert else None),
+                None,
                 max_rows_component,
                 all_tiles_lists,
             )
@@ -2098,7 +2109,7 @@ class GeoExplorer:
             Output("clicked-features-title", "children"),
             Input("clicked-features", "data"),
         )
-        @time_method_call(self._method_times)
+        @time_method_call(_method_times)
         def update_clicked_features_title(features):
             if not features:
                 return dash.no_update
@@ -2108,7 +2119,7 @@ class GeoExplorer:
             Output("all-features-title", "children"),
             Input("all-features", "data"),
         )
-        @time_method_call(self._method_times)
+        @time_method_call(_method_times)
         def update_all_features_title(features):
             if not features:
                 return dash.no_update
@@ -2130,7 +2141,7 @@ class GeoExplorer:
             State("clicked-ids", "data"),
             State("debounced_bounds", "value"),
         )
-        @time_method_call(self._method_times)
+        @time_method_call(_method_times)
         def display_clicked_feature_attributes(
             clear_table,
             update_table,
@@ -2218,9 +2229,10 @@ class GeoExplorer:
                             geoms_relate, return_dtype=pl.Boolean
                         )
                     )
-                    .collect()
                 )
-                _used_file_paths |= set(intersecting["__file_path"].unique())
+                _used_file_paths |= set(
+                    intersecting.select("__file_path").unique().collect()["__file_path"]
+                )
 
             columns = {"_unique_id"}
             for path in _used_file_paths:
@@ -2231,7 +2243,7 @@ class GeoExplorer:
             ]
 
             if self.hard_click:
-                props_list += intersecting.select(*columns).to_dicts()
+                props_list += intersecting.select(*columns).collect().to_dicts()
 
             for props in props_list:
                 if props["_unique_id"] not in clicked_ids:
@@ -2267,7 +2279,7 @@ class GeoExplorer:
             Input({"type": "table-btn", "index": dash.ALL}, "n_clicks"),
             State({"type": "table-btn", "index": dash.ALL}, "id"),
         )
-        @time_method_call(self._method_times)
+        @time_method_call(_method_times)
         def display_all_feature_attributes(
             clear_table, update_table, table_btn_n_clicks, table_btn_ids
         ):
@@ -2319,7 +2331,7 @@ class GeoExplorer:
             Input("all-features", "data"),
             State("feature-table-rows", "style_table"),
         )
-        @time_method_call(self._method_times)
+        @time_method_call(_method_times)
         def update_table(data, style_table):
             return self._update_table(
                 data, column_dropdown=_UseColumns(), style_table=style_table
@@ -2334,7 +2346,7 @@ class GeoExplorer:
             State("column-dropdown", "options"),
             State("feature-table-rows-clicked", "style_table"),
         )
-        @time_method_call(self._method_times)
+        @time_method_call(_method_times)
         def update_table_clicked(data, column_dropdown, style_table):
             return self._update_table(data, column_dropdown, style_table)
 
@@ -2347,7 +2359,7 @@ class GeoExplorer:
             State("viewport-container", "data"),
             prevent_initial_call=True,
         )
-        @time_method_call(self._method_times)
+        @time_method_call(_method_times)
         def zoom_to_feature(active: dict, active_clicked: dict, viewport):
             triggered = dash.callback_context.triggered_id
             if triggered == "feature-table-rows":
@@ -2394,7 +2406,7 @@ class GeoExplorer:
             Input("wms-checklist", "value"),
             State("wms-panel", "children"),
         )
-        @time_method_call(self._method_times)
+        @time_method_call(_method_times)
         def add_wms_panel(
             wms_checklist,
             items,
@@ -2830,18 +2842,12 @@ class GeoExplorer:
                     self.nan_label in self._deleted_categories and self.column not in df
                 ):
                     continue
-                # df = df.collect()
-                # if not len(df):
-                # continue
                 if not _filter:
                     dfs.append(df)
                     continue
-                # filtering by function after collect because LazyFrame doesn't implement to_pandas.
                 if self._queries.get(path, None) is not None:
                     df, alert = self._filter_data(df, self._queries[path])
                     alerts.add(alert)
-                # if not len(df):
-                #     continue
                 dfs.append(df)
 
         if dfs:
@@ -2924,7 +2930,7 @@ class GeoExplorer:
                 if " join " in formatted_query.lower():
                     df = self._polars_sql_join(df, formatted_query)
                 elif " df " in formatted_query:
-                    df = pl.sql(formatted_query)  # .collect()
+                    df = pl.sql(formatted_query)
                 else:
                     df = df.sql(formatted_query)
             else:
@@ -3023,10 +3029,6 @@ class GeoExplorer:
     @staticmethod
     @time_method_call(_method_times)
     def _cheap_geo_interface(df: pl.DataFrame) -> dict:
-        geojson_dicts = [
-            msgspec.json.decode(x)
-            for x in shapely.to_geojson(shapely.from_wkb(df["geometry"]))
-        ]
         return {
             "type": "FeatureCollection",
             "features": [
@@ -3034,10 +3036,14 @@ class GeoExplorer:
                     "id": str(i),
                     "type": "Feature",
                     "properties": {"_unique_id": id_},
-                    "geometry": geom,
+                    "geometry": msgspec.json.decode(geom),
                 }
                 for i, (geom, id_) in enumerate(
-                    zip(geojson_dicts, df["_unique_id"], strict=True)
+                    zip(
+                        shapely.to_geojson(shapely.from_wkb(df["geometry"])),
+                        df["_unique_id"],
+                        strict=True,
+                    )
                 )
             ],
         }
@@ -3352,21 +3358,11 @@ def _add_data_one_path(
     alpha,
 ):
     ns = Namespace("onEachFeatureToggleHighlight", "default")
-    data = []
-    if concatted_data is None:
-        return (
-            [
-                dl.Overlay(
-                    dl.GeoJSON(id={"type": "geojson", "filename": path}),
-                    name=_get_stem(path),
-                    id={"type": "geojson-overlay", "filename": path},
-                    checked=True,
-                )
-            ],
-            None,
-            False,
-        )
-    df = concatted_data.filter(pl.col("__file_path").str.contains(path)).collect()
+    df = (
+        concatted_data.filter(pl.col("__file_path").str.contains(path))
+        .select("geometry", "_unique_id", *((column,) if column else ()))
+        .collect()
+    )
     if not len(df):
         return (
             [
@@ -3385,47 +3381,9 @@ def _add_data_one_path(
     if rows_are_hidden:
         df = df.sample(max_rows)
 
-    out_alert = None
+    df = _fix_colors(df, column, bins, is_numeric, color_dict, nan_color)
 
-    if column and column in df and not is_numeric:
-        df = df.with_columns(_color=pl.col(column).replace(color_dict))
-    elif column and bins is None:
-        df = df.with_columns(_color=pl.lit(nan_color))
-    elif column and column in df:
-        notnas = df.filter(
-            (pl.col(column).is_not_null()) & (pl.col(column).is_not_nan())
-        )
-        if bins is not None and len(bins) == 1:
-            notnas = notnas.with_columns(
-                _color=pl.lit(
-                    next(
-                        iter(
-                            color for color in color_dict.values() if color != nan_color
-                        )
-                    )
-                )
-            )
-        else:
-            conditions = [
-                (pl.col(column) < bins[1]) & (pl.col(column).is_not_null()),
-                *[
-                    (pl.col(column) >= bins[i])
-                    & (pl.col(column) < bins[i + 1])
-                    & (pl.col(column).is_not_null())
-                    for i in range(1, len(bins) - 1)
-                ],
-                (pl.col(column) >= bins[-1]) & (pl.col(column).is_not_null()),
-            ]
-            bin_index_expr = pl.when(conditions[0]).then(pl.lit(color_dict[0]))
-            for i, cond in enumerate(conditions[1:], start=1):
-                bin_index_expr = bin_index_expr.when(cond).then(pl.lit(color_dict[i]))
-            notnas = notnas.with_columns(bin_index_expr.alias("_color"))
-
-        df = pl.concat(
-            [notnas, df.filter((pl.col(column).is_null()) | (pl.col(column).is_nan()))],
-            how="diagonal_relaxed",
-        )
-
+    data = []
     if column and column not in df.columns:
         data.append(
             dl.Overlay(
@@ -3540,7 +3498,43 @@ def _add_data_one_path(
                 id={"type": "geojson-overlay", "filename": path},
             )
         )
-    return data, out_alert, rows_are_hidden
+    return data, rows_are_hidden
+
+
+@time_function_call(_method_times)
+def _fix_colors(df, column, bins, is_numeric, color_dict, nan_color):
+    if column and column in df and not is_numeric:
+        return df.with_columns(_color=pl.col(column).replace(color_dict))
+    elif column and bins is None:
+        return df.with_columns(_color=pl.lit(nan_color))
+
+    notnas = df.filter((pl.col(column).is_not_null()) & (pl.col(column).is_not_nan()))
+    if bins is not None and len(bins) == 1:
+        notnas = notnas.with_columns(
+            _color=pl.lit(
+                next(iter(color for color in color_dict.values() if color != nan_color))
+            )
+        )
+    else:
+        conditions = [
+            (pl.col(column) < bins[1]) & (pl.col(column).is_not_null()),
+            *[
+                (pl.col(column) >= bins[i])
+                & (pl.col(column) < bins[i + 1])
+                & (pl.col(column).is_not_null())
+                for i in range(1, len(bins) - 1)
+            ],
+            (pl.col(column) >= bins[-1]) & (pl.col(column).is_not_null()),
+        ]
+        bin_index_expr = pl.when(conditions[0]).then(pl.lit(color_dict[0]))
+        for i, cond in enumerate(conditions[1:], start=1):
+            bin_index_expr = bin_index_expr.when(cond).then(pl.lit(color_dict[i]))
+        notnas = notnas.with_columns(bin_index_expr.alias("_color"))
+
+    return pl.concat(
+        [notnas, df.filter((pl.col(column).is_null()) | (pl.col(column).is_nan()))],
+        how="diagonal_relaxed",
+    )
 
 
 def polars_isna(df):
