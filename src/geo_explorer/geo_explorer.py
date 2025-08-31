@@ -590,22 +590,6 @@ class GeoExplorer:
                         n_clicks=int(self.hard_click),
                         tooltip_text="'Hard' click means that clicking on a geometry triggers all overlapping geometries to be marked",
                     ),
-                    dbc.Row(
-                        dbc.Col(
-                            [
-                                dbc.Row(
-                                    html.Button(
-                                        "❌ Clear query tips",
-                                        id="clear-query-tips",
-                                        style={"width": "20vh"},
-                                    )
-                                ),
-                                dbc.Row(html.Div(children=None, id="query-text")),
-                            ],
-                            id="query-row",
-                            style={"display": "none"},
-                        )
-                    ),
                     get_data_table(
                         title_id="clicked-features-title",
                         table_id="feature-table-rows-clicked",
@@ -1044,15 +1028,67 @@ class GeoExplorer:
             return self.splitted, self.column
 
         @callback(
+            Output(
+                {"type": "query", "index": dash.MATCH}, "value", allow_duplicate=True
+            ),
+            Output(
+                {"type": "query-copy", "index": dash.MATCH},
+                "value",
+                allow_duplicate=True,
+            ),
+            Input(
+                {"type": "select-query-btn", "index": dash.ALL, "query": dash.ALL},
+                "n_clicks",
+            ),
+            State(
+                {"type": "select-query-btn", "index": dash.ALL, "query": dash.ALL},
+                "id",
+            ),
+            prevent_initial_call=True,
+        )
+        def apply_query(n_clicks, ids):
+            path = get_index_if_clicks(n_clicks, ids)
+            if not path:
+                return dash.no_update, dash.no_update
+            print("apply_query", path)
+            triggered = dash.callback_context.triggered_id
+            query = triggered["query"]
+            return query, query
+
+        @callback(
+            Output("file-deleted", "children", allow_duplicate=True),
+            Input({"type": "query-copy", "index": dash.ALL}, "value"),
+            Input({"type": "query-copy", "index": dash.ALL}, "id"),
+            prevent_initial_call=True,
+        )
+        def update_query_from_copy(queries: list[str], ids: list[str]):
+            print("update_query_from_copy", queries, ids)
+            alerts = self._update_query(queries, ids)
+            return alerts
+
+        @callback(
+            Output("file-deleted", "children", allow_duplicate=True),
+            Input({"type": "query", "index": dash.ALL}, "value"),
+            Input({"type": "query", "index": dash.ALL}, "id"),
+            prevent_initial_call=True,
+        )
+        def update_query(queries: list[str], ids: list[str]):
+            print("update_query", queries)
+            alerts = self._update_query(queries, ids)
+            return alerts
+
+        @callback(
             Output("data-was-concatted", "children"),
-            Output("data-was-changed", "children"),
+            Output(
+                "data-was-changed",
+                "children",
+            ),
             Output("alert3", "children", allow_duplicate=True),
             Output("update-table", "data", allow_duplicate=True),
             Input("new-data-read", "children"),
             Input("file-deleted", "children"),
             Input("is_splitted", "data"),
-            Input({"type": "query", "index": dash.ALL}, "value"),
-            Input({"type": "query", "index": dash.ALL}, "id"),
+            Output({"type": "query", "index": dash.ALL}, "value"),
             State("debounced_bounds", "value"),
             prevent_initial_call=True,
         )
@@ -1060,8 +1096,7 @@ class GeoExplorer:
             new_data_read,
             file_deleted,
             is_splitted,
-            filter_functions: list[str],
-            filter_ids: list[str],
+            queries,
             bounds,
         ):
             triggered = dash.callback_context.triggered_id
@@ -1072,24 +1107,6 @@ class GeoExplorer:
                 return dash.no_update, 1, dash.no_update, dash.no_update
 
             bounds = self._nested_bounds_to_bounds(bounds)
-
-            out_alerts = []
-            for path in self.selected_files:
-                try:
-                    query = get_index(filter_functions, filter_ids, path)
-                    self._check_for_circular_queries(query, path)
-                    self._queries[path] = query
-                except RecursionError as e:
-                    out_alerts.append(
-                        dbc.Alert(
-                            str(e),
-                            color="warning",
-                            dismissable=True,
-                        )
-                    )
-                    break
-                except ValueError:
-                    pass
 
             if triggered in ["file-deleted"]:
                 self._max_unique_id_int = 0
@@ -1114,8 +1131,8 @@ class GeoExplorer:
                 update_table = dash.no_update
 
             df, alerts = self._concat_data(bounds)
-            if alerts:
-                out_alerts += alerts
+            # if alerts:
+            #     out_alerts += alerts
             self._concatted_data = df
 
             debug_print(
@@ -1124,7 +1141,7 @@ class GeoExplorer:
                 len(self._concatted_data) if self._concatted_data is not None else None,
             )
 
-            return 1, 1, out_alerts, update_table
+            return 1, 1, alerts, update_table
 
         @callback(
             Output("file-control-panel", "children"),
@@ -1256,7 +1273,6 @@ class GeoExplorer:
                                                 "index": path,
                                             },
                                             debounce=3,
-                                            className="expandable-input-left-aligned",
                                         ),
                                         dbc.Tooltip(
                                             "E.g. komm_nr == '0301' or pl.col('komm_nr') == '0301'",
@@ -1270,15 +1286,25 @@ class GeoExplorer:
                                     width=11,
                                 ),
                                 dbc.Col(
-                                    get_button_with_tooltip(
-                                        "Tips",
-                                        id={
-                                            "type": "query-tips",
-                                            "index": path,
-                                        },
-                                        tooltip_text="Get query examples for this table",
-                                        style={"width": "5vh"},
-                                    ),
+                                    [
+                                        *get_button_with_tooltip(
+                                            "Expand",
+                                            id={
+                                                "type": "query-expand-button",
+                                                "index": path,
+                                            },
+                                            tooltip_text="Get query examples for this table",
+                                            style={"width": "10vh"},
+                                        ),
+                                        dbc.Modal(
+                                            id={
+                                                "type": "query-view",
+                                                "index": path,
+                                            },
+                                            is_open=False,
+                                            style={"width": "250vh"},
+                                        ),
+                                    ],
                                     width=1,
                                 ),
                             ],
@@ -1390,75 +1416,87 @@ class GeoExplorer:
                 self._deleted_categories.add(path_to_delete)
                 return None, None, True, dash.no_update
 
-        @callback(
-            Output("query-row", "style", allow_duplicate=True),
-            Input("clear-query-tips", "n_clicks"),
-            prevent_initial_call=True,
-        )
-        def clear_query_tips(n_clicks):
-            return {"display": "none"} if n_clicks else dash.no_update
+        # @callback(
+        #     Output("query-row", "style", allow_duplicate=True),
+        #     Input("clear-query-expand-button", "n_clicks"),
+        #     prevent_initial_call=True,
+        # )
+        # def clear_query_tips(n_clicks):
+        #     return {"display": "none"} if n_clicks else dash.no_update
 
         @callback(
-            Output("query-text", "children", allow_duplicate=True),
-            Output("query-row", "style", allow_duplicate=True),
-            Input({"type": "query-tips", "index": dash.ALL}, "n_clicks"),
-            State({"type": "checked-btn", "index": dash.ALL}, "id"),
+            # Output({"type": "query-popup", "index": dash.MATCH}, "children"),
+            Output({"type": "query-view", "index": dash.MATCH}, "children"),
+            Output({"type": "query-view", "index": dash.MATCH}, "is_open"),
+            # Output("query-row", "style", allow_duplicate=True),
+            Input({"type": "query-expand-button", "index": dash.ALL}, "n_clicks"),
+            State({"type": "query-expand-button", "index": dash.ALL}, "id"),
             prevent_initial_call=True,
         )
-        def get_query_tips(n_clicks, ids):
+        def expand_query_panel(n_clicks, ids):
             path = get_index_if_clicks(n_clicks, ids)
             if not path:
-                return dash.no_update, dash.no_update
+                return dash.no_update, False  # dash.no_update
 
-            style = {
-                "border": "1px solid #ccc",
-                "border-radius": "5px",
-                "padding": "20px",
-                "background-color": OFFWHITE,
-            }
+            # style = {
+            #     "border": "1px solid #ccc",
+            #     "border-radius": "5px",
+            #     "padding": "20px",
+            #     "background-color": OFFWHITE,
+            # }
 
             df_name = _get_stem(path)
             if sum(_get_stem(x) == df_name for x in self.selected_files) > 1:
                 df_name = _get_stem_from_parent(path)
 
             queries = [
-                html.B(f"Query tips for table: {df_name}", style={"font-size": 22}),
                 html.Br(),
                 html.Br(),
-                html.B("Single table queries:"),
+                html.B(f"Query tips for table: {df_name}", style={"font-size": 16}),
+                html.Br(),
+                html.B("Join queries:"),
             ]
 
             df, _ = self._concat_data(bounds=None, paths=[path], _filter=False)
 
-            for col in set(df.columns).difference(set(ADDED_COLUMNS)):
-                if df[col].dtype.is_numeric():
-                    value = df[col].mean()
-                    query = f"pl.col('{col}') > {value}"
-                else:
-                    if len(df[col].unique()) <= 1:
-                        continue
-                    value = df[col].mode().first()
-                    query = f"pl.col('{col}') == '{value}'"
-                try:
-                    df.filter(eval(query))
-                    queries.append(html.Br())
-                    queries.append(query)
-                    queries.append(html.Br())
-                except Exception as e:
-                    debug_print("get_query_tips", col, "-", value, "-", e)
-
-            if len(self.selected_files) <= 1:
-                return queries, style
-
-            queries.append(html.Br())
-            queries.append(html.B("Join queries:"))
-
             for join_path in self.selected_files:
                 if join_path == path:
                     continue
+                join_df_name = _get_stem(join_path)
+                if sum(_get_stem(x) == join_df_name for x in self.selected_files) > 1:
+                    join_df_name = _get_stem_from_parent(join_path)
+
                 join_df, _ = self._concat_data(
                     bounds=None, paths=[join_path], _filter=False
                 )
+
+                cols_to_keep = [col for col in join_df.columns if col not in df.columns]
+                if not cols_to_keep:
+                    continue
+
+                cols_to_keep = ", ".join(
+                    f"{join_df_name}.{col}" for col in cols_to_keep
+                )
+                # queries.append(html.Br())
+                # spatial_query = (
+                #     f"select {cols_to_keep}, df.* from df sjoin {join_df_name}"
+                # )
+
+                # queries.extend(
+                #     get_button_with_tooltip(
+                #         f"sjoin: {join_df_name}",
+                #         id={
+                #             "type": "select-query-btn",
+                #             "query": spatial_query,
+                #             "index": path,
+                #         },
+                #         n_clicks=0,
+                #         style=_unclicked_button_style(),
+                #         tooltip_text="Apply query",
+                #     )
+                # )
+                # queries.append(html.Br())
+
                 for col in set(join_df.columns).difference(
                     set(ADDED_COLUMNS) | {"area"}
                 ):
@@ -1471,26 +1509,83 @@ class GeoExplorer:
                     if not len(joined):
                         continue
 
-                    join_df_name = _get_stem(join_path)
-                    if (
-                        sum(_get_stem(x) == join_df_name for x in self.selected_files)
-                        > 1
-                    ):
-                        join_df_name = _get_stem_from_parent(join_path)
-                    cols_to_keep = [
-                        col for col in join_df.columns if col not in df.columns
-                    ]
-                    if not cols_to_keep:
-                        continue
-                    cols_to_keep = ", ".join(
-                        f"{join_df_name}.{col}" for col in cols_to_keep
-                    )
                     query = f"select {cols_to_keep}, df.* from df inner join {join_df_name} using ({col})"
                     queries.append(html.Br())
-                    queries.append(query)
-                    queries.append(html.Br())
+                    queries.extend(
+                        get_button_with_tooltip(
+                            f"inner join: {join_df_name} on {col}",
+                            id={
+                                "type": "select-query-btn",
+                                "query": query,
+                                "index": path,
+                            },
+                            n_clicks=0,
+                            style=_unclicked_button_style(),
+                            tooltip_text="Apply query",
+                        )
+                    )
+                    # queries.append(html.Br())
 
-            return queries, style
+            queries.append(html.Br())
+            queries.append(html.B("Single table queries:"))
+            for col in set(df.columns).difference(set(ADDED_COLUMNS)):
+                if len(df[col].unique()) <= 1:
+                    continue
+                if df[col].dtype.is_numeric():
+                    value = df[col].mean()
+                    query = f"pl.col('{col}') > {value}"
+                else:
+                    value = df[col].mode().first()
+                    query = f"pl.col('{col}') == '{value}'"
+                try:
+                    filtered = df.filter(eval(query))
+                    if len(filtered) == len(df):
+                        continue
+                    queries.append(html.Br())
+                    queries.extend(
+                        get_button_with_tooltip(
+                            query,
+                            id={
+                                "type": "select-query-btn",
+                                "query": query,
+                                "index": path,
+                            },
+                            n_clicks=0,
+                            style=_unclicked_button_style(),
+                            tooltip_text="Apply query",
+                        )
+                    )
+                    # queries.append(html.Br())
+                except Exception as e:
+                    debug_print("expand_query_panel", col, "-", value, "-", e)
+
+            return [
+                dbc.ModalHeader(
+                    dbc.ModalTitle(f"Query {self._get_unique_stem(path)}"),
+                    close_button=False,
+                ),
+                dbc.ModalBody(
+                    html.Div(
+                        [
+                            dcc.Input(
+                                self._queries.get(path, None),
+                                placeholder="Query (with polars, pandas or sql). E.g. komm_nr == '0301'",
+                                id={
+                                    "type": "query-copy",
+                                    "index": path,
+                                },
+                                debounce=3,
+                                style={"width": "100%"},
+                            ),
+                            *queries,
+                        ]
+                    ),
+                    # id={
+                    #     "type": "query-popup",
+                    #     "index": path,
+                    # },
+                ),
+            ], True
 
         @callback(
             Output("file-deleted", "children", allow_duplicate=True),
@@ -2619,6 +2714,38 @@ class GeoExplorer:
                 f"Recursion error: Circular joins on {path} and {path}",
             )
 
+    def _update_query(self, queries: list[str | None], ids):
+        out_alerts = []
+        for path in self.selected_files:
+            try:
+                query = get_index(queries, ids, path)
+                if query == self._queries.get(path):
+                    continue
+                self._check_for_circular_queries(query, path)
+                print("_update_query")
+                print(path)
+                print(query)
+                print(query.__class__)
+                self._queries[path] = query
+            except RecursionError as e:
+                out_alerts.append(
+                    dbc.Alert(
+                        str(e),
+                        color="warning",
+                        dismissable=True,
+                    )
+                )
+                break
+            except ValueError:
+                pass
+        return out_alerts or dash.no_update
+
+    def _get_unique_stem(self, path) -> str:
+        name = _get_stem(path)
+        if sum(_get_stem(x) == name for x in self.selected_files) > 1:
+            name = _get_stem_from_parent(path)
+        return name
+
     def _concat_data(
         self,
         bounds,
@@ -2681,47 +2808,80 @@ class GeoExplorer:
 
         return df, alerts
 
-    def _filter_data(
-        self, df: pl.DataFrame, filter_function: str | None
-    ) -> pl.DataFrame:
-        filter_function = filter_function.strip()
+    def _filter_data(self, df: pl.DataFrame, query: str | None) -> pl.DataFrame:
+        query = query.strip()
         try:
-            filter_function = eval(filter_function)
+            query = eval(query)
         except Exception:
             pass
 
-        if filter_function is None or (
-            isinstance(filter_function, str) and filter_function == ""
-        ):
+        if query is None or (isinstance(query, str) and query == ""):
             return df, None
 
         alert = None
+
+        # if isinstance(query, str) and "sjoin" in query:
+        #     cols_to_keep, join_df_name = query.split(" from df sjoin ")
+        #     join_df_path = next(
+        #         iter(
+        #             x
+        #             for x in self.selected_files
+        #             if join_df_name in [_get_stem(x), _get_stem_from_parent(x)]
+        #         )
+        #     )
+        #     cols_to_keep = [
+        #         col.replace(f"{join_df_name}.", "")
+        #         for col in cols_to_keep.replace("SELECT ", "")
+        #         .replace("select ", "")
+        #         .split(", ")
+        #         if f"{join_df_name}." in col
+        #     ]
+        #     join_df, _ = self._concat_data(bounds=None, paths=[join_df_path])
+        #     cols_to_drop = [col for col in join_df.columns if col not in cols_to_keep]
+        #     assert "geometry" in cols_to_drop, cols_to_drop
+        #     joined = (
+        #         GeoDataFrame(
+        #             df.drop("geometry").to_pandas(),
+        #             geometry=shapely.from_wkb(df["geometry"]),
+        #         )
+        #         .sjoin(
+        #             GeoDataFrame(
+        #                 join_df.drop(*cols_to_drop).to_pandas(),
+        #                 geometry=shapely.from_wkb(join_df["geometry"]),
+        #             )
+        #         )
+        #         .drop(columns="index_right")
+        #     )
+        #     joined = pl.DataFrame(joined.drop(columns="geometry")).with_columns(
+        #         geometry=shapely.to_wkb(joined["geometry"].values)
+        #     )
+        #     return joined, None
 
         # try to filter with polars, then pandas.loc, then pandas.query
         # no need for pretty code and specific exception handling here, as this a convenience feature
         try:
             # polars needs functions called, pandas does not
-            if callable(filter_function):
-                filter_function = filter_function(df)
-            if isinstance(filter_function, str) and filter_function.replace(
+            if callable(query):
+                query = query(df)
+            if isinstance(query, str) and query.replace(
                 "\n", ""
             ).strip().lower().startswith("select"):
-                query = _add_cols_to_sql_query(filter_function.replace('"', "'"))
+                formatted_query = _add_cols_to_sql_query(query.replace('"', "'"))
 
-                if " join " in query.lower():
-                    df = self._polars_sql_join(df, query)
-                elif " df " in query:
-                    df = pl.sql(query).collect()
+                if " join " in formatted_query.lower():
+                    df = self._polars_sql_join(df, formatted_query)
+                elif " df " in formatted_query:
+                    df = pl.sql(formatted_query).collect()
                 else:
-                    df = df.sql(query)
+                    df = df.sql(formatted_query)
             else:
-                df = df.filter(filter_function)
+                df = df.filter(query)
         except Exception as e:
             try:
-                df = pl.DataFrame(df.to_pandas().loc[filter_function])
+                df = pl.DataFrame(df.to_pandas().loc[query])
             except Exception as e2:
                 try:
-                    df = pl.DataFrame(df.to_pandas().query(filter_function))
+                    df = pl.DataFrame(df.to_pandas().query(query))
                 except Exception as e3:
                     e_name = type(e).__name__
                     e2_name = type(e2).__name__
