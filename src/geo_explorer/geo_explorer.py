@@ -814,7 +814,7 @@ class GeoExplorer:
             if DEBUG:
                 print("\nprofile")
                 for k, v in reversed(
-                    sorted(self._method_times.items(), key=lambda x: x[1])
+                    sorted(self._method_times.items(), key=lambda x: x[1][1])
                 ):
                     print(k, v)
             triggered = dash.callback_context.triggered_id
@@ -1178,7 +1178,11 @@ class GeoExplorer:
             debug_print(
                 "concat_data finished after",
                 perf_counter() - t,
-                len(self._concatted_data) if self._concatted_data is not None else None,
+                (
+                    len(self._concatted_data)
+                    if isinstance(self._concatted_data, pl.DataFrame)
+                    else None
+                ),
             )
 
             return 1, 1, alerts, update_table
@@ -1489,6 +1493,7 @@ class GeoExplorer:
             n_queries = len(queries)
 
             df, _ = self._concat_data(bounds=None, paths=[path], _filter=False)
+            df = df.collect()
 
             for join_path in self.selected_files:
                 if join_path == path:
@@ -1500,6 +1505,7 @@ class GeoExplorer:
                 join_df, _ = self._concat_data(
                     bounds=None, paths=[join_path], _filter=False
                 )
+                join_df = join_df.collect()
 
                 cols_to_keep = [col for col in join_df.columns if col not in df.columns]
                 if not cols_to_keep:
@@ -1719,7 +1725,7 @@ class GeoExplorer:
         )
         @time_method_call(self._method_times)
         def update_column_dropdown_options(_):
-            if self._concatted_data is None or not len(self._concatted_data):
+            if self._concatted_data is None:  # or not len(self._concatted_data):
                 return dash.no_update
             return self._get_column_dropdown_options()
 
@@ -1863,10 +1869,14 @@ class GeoExplorer:
 
             bounds = self._nested_bounds_to_bounds(bounds)
 
-            values = filter_by_bounds(
-                self._concatted_data[[column, "minx", "miny", "maxx", "maxy"]],
-                bounds,
-            )[column]
+            values = (
+                filter_by_bounds(
+                    self._concatted_data.select(column, "minx", "miny", "maxx", "maxy"),
+                    bounds,
+                )
+                .select(column)
+                .collect()[column]
+            )
             values_no_nans = values.drop_nans().drop_nulls()
             values_no_nans_unique = set(values_no_nans.unique())
 
@@ -1957,7 +1967,7 @@ class GeoExplorer:
             prevent_initial_call=True,
         )
         def update_loading(_):
-            if self._concatted_data is None or not len(self._concatted_data):
+            if self._concatted_data is None:  # or not len(self._concatted_data):
                 return None
             return "Finished loading"
 
@@ -2029,7 +2039,6 @@ class GeoExplorer:
                 max_rows=self.max_rows,
                 concatted_data=self._concatted_data,
                 nan_color=self.nan_color,
-                bounds=bounds,
                 column=column,
                 is_numeric=is_numeric,
                 color_dict=color_dict,
@@ -2053,7 +2062,11 @@ class GeoExplorer:
                 "loaded_data:",
                 len(self._loaded_data),
                 "concatted_data:",
-                len(self._concatted_data if self._concatted_data is not None else []),
+                (
+                    len(self._concatted_data)
+                    if isinstance(self._concatted_data, pl.DataFrame)
+                    else None
+                ),
             )
             if rows_are_not_hidden:
                 max_rows_component = None
@@ -2719,13 +2732,14 @@ class GeoExplorer:
         i = int(unique_id)
         path = list(loaded_data)[i]
         df, _ = self._concat_data(bounds=None, paths=[path])
-        row = df.filter(pl.col("_unique_id") == unique_id)  # .collect()
+        row = df.filter(pl.col("_unique_id") == unique_id).collect()
         columns = [col for col in row.columns if col != "geometry"]
-        features = GeoDataFrame(
-            row.drop("geometry"),
-            geometry=shapely.from_wkb(row["geometry"]),
-            crs=4326,
-        ).__geo_interface__["features"]
+        features = _geo_interface(row)
+        # features = GeoDataFrame(
+        #     row.drop("geometry"),
+        #     geometry=shapely.from_wkb(row["geometry"]),
+        #     crs=4326,
+        # ).__geo_interface__["features"]
         feature = next(iter(features))
         return {
             col: value
@@ -2803,7 +2817,7 @@ class GeoExplorer:
         paths: list[str] | None = None,
         eagar: bool = True,
         _filter: bool = True,
-    ) -> tuple[pl.DataFrame | None, list[dbc.Alert] | None]:
+    ) -> tuple[pl.LazyFrame | None, list[dbc.Alert] | None]:
         dfs = []
         alerts = set()
         for path in self.selected_files:
@@ -2829,18 +2843,18 @@ class GeoExplorer:
                     self.nan_label in self._deleted_categories and self.column not in df
                 ):
                     continue
-                df = df.collect()
-                if not len(df):
-                    continue
+                # df = df.collect()
+                # if not len(df):
+                # continue
                 if not _filter:
                     dfs.append(df)
                     continue
-                # filtering by function after collect because LazyFrame doesnt implement to_pandas.
+                # filtering by function after collect because LazyFrame doesn't implement to_pandas.
                 if self._queries.get(path, None) is not None:
                     df, alert = self._filter_data(df, self._queries[path])
                     alerts.add(alert)
-                if not len(df):
-                    continue
+                # if not len(df):
+                #     continue
                 dfs.append(df)
 
         if dfs:
@@ -2862,13 +2876,17 @@ class GeoExplorer:
     @time_method_call(_method_times)
     def _filter_data(self, df: pl.DataFrame, query: str | None) -> pl.DataFrame:
         query = query.strip()
+
+        if query is None or (isinstance(query, str) and query == ""):
+            return df, None
+
+        if not _is_polars_query(query):
+            df = df.collect()
+
         try:
             query = eval(query)
         except Exception:
             pass
-
-        if query is None or (isinstance(query, str) and query == ""):
-            return df, None
 
         alert = None
 
@@ -2912,18 +2930,14 @@ class GeoExplorer:
         # try to filter with polars, then pandas.loc, then pandas.query
         # no need for pretty code and specific exception handling here, as this a convenience feature
         try:
-            # polars needs functions called, pandas does not
-            if callable(query):
-                query = query(df)
-            if isinstance(query, str) and query.replace(
-                "\n", ""
-            ).strip().lower().startswith("select"):
+
+            if _is_sql(query):
                 formatted_query = _add_cols_to_sql_query(query.replace('"', "'"))
 
                 if " join " in formatted_query.lower():
                     df = self._polars_sql_join(df, formatted_query)
                 elif " df " in formatted_query:
-                    df = pl.sql(formatted_query).collect()
+                    df = pl.sql(formatted_query)  # .collect()
                 else:
                     df = df.sql(formatted_query)
             else:
@@ -2932,10 +2946,10 @@ class GeoExplorer:
             return df, str(e)
         except Exception as e:
             try:
-                df = pl.DataFrame(df.to_pandas().loc[query])
+                df = pl.DataFrame(df.to_pandas().loc[query]).lazy()
             except Exception as e2:
                 try:
-                    df = pl.DataFrame(df.to_pandas().query(query))
+                    df = pl.DataFrame(df.to_pandas().query(query)).lazy()
                 except Exception as e3:
                     e_name = type(e).__name__
                     e2_name = type(e2).__name__
@@ -2952,6 +2966,9 @@ class GeoExplorer:
                         f"-- and pandas loc: ({e2_name}: {e2}) "
                         f"-- and pandas query: ({e3_name}: {e3}) "
                     )
+
+        # if not _is_polars_query(query):
+        #     df = df.lazy()
 
         # debug_print("_filter_data", len(df), list(df.columns))
         return df, alert
@@ -3014,7 +3031,7 @@ class GeoExplorer:
         # using literal 'join_df' in case 'i' is negative index
         query = query.replace(join_df_name, "join_df")
         ctx = pl.SQLContext(**{"df": df, "join_df": join_df})
-        return ctx.execute(query, eager=True)
+        return ctx.execute(query, eager=False)
 
     @time_method_call(_method_times)
     def _map_constructor(
@@ -3316,7 +3333,6 @@ def _get_colorpicker_container(color_dict: dict[str, str]) -> html.Div:
 
 def _add_data_one_path(
     path,
-    bounds,
     column,
     is_numeric,
     color_dict,
@@ -3341,7 +3357,7 @@ def _add_data_one_path(
             None,
             False,
         )
-    df = concatted_data.filter(pl.col("__file_path").str.contains(path))
+    df = concatted_data.filter(pl.col("__file_path").str.contains(path)).collect()
     if not len(df):
         return (
             [
@@ -3360,20 +3376,14 @@ def _add_data_one_path(
     if rows_are_hidden:
         df = df.sample(max_rows)
 
-    # print(_geo_interface(df))
-
-    df = df.to_pandas()
-    df["geometry"] = shapely.from_wkb(df["geometry"])
-    df = GeoDataFrame(df, crs=4326)
-
     out_alert = None
 
     if column and column in df and not is_numeric:
-        df["_color"] = df[column].map(color_dict)
+        df = df.with_columns(_color=pl.col(column).replace(color_dict))
     elif column and bins is None:
-        df["_color"] = nan_color
+        df = df.with_columns(_color=pl.lit(nan_color))
     elif column and column in df:
-        notnas = df[df[column].notna()]
+        notnas = df.filter(pl.col(column).is_nan())
         if bins is not None and len(bins) == 1:
             notnas["_color"] = next(
                 iter(color for color in color_dict.values() if color != nan_color)
@@ -3397,11 +3407,16 @@ def _add_data_one_path(
             except KeyError as e:
                 raise KeyError(e, color_dict, conditions, choices, bins) from e
         df = pd.concat([notnas, df[df[column].isna()]])
-    if column and column not in df:
+
+    # df = df.to_pandas()
+    # df["geometry"] = shapely.from_wkb(df["geometry"])
+    # df = GeoDataFrame(df, crs=4326)
+
+    if column and column not in df.columns:
         data.append(
             dl.Overlay(
                 dl.GeoJSON(
-                    data=df.__geo_interface__,
+                    data=_geo_interface(df),
                     style={
                         "color": nan_color,
                         "fillColor": nan_color,
@@ -3426,7 +3441,7 @@ def _add_data_one_path(
                 dl.LayerGroup(
                     [
                         dl.GeoJSON(
-                            data=(df[df["_color"] == color_]).__geo_interface__,
+                            data=_geo_interface(df.filter(pl.col("_color") == color_)),
                             style={
                                 "color": color_,
                                 "fillColor": color_,
@@ -3445,12 +3460,11 @@ def _add_data_one_path(
                                 ),
                             ),
                         )
-                        for color_ in df["_color"].unique()
-                        if pd.notna(color_)
+                        for color_ in df["_color"].unique().drop_nulls()  # .drop_nans()
                     ]
                     + [
                         dl.GeoJSON(
-                            data=df[df[column].isna()].__geo_interface__,
+                            data=_geo_interface(df.filter(pl.col(column).is_null())),
                             style={
                                 "color": nan_color,
                                 "fillColor": nan_color,
@@ -3485,7 +3499,7 @@ def _add_data_one_path(
         data.append(
             dl.Overlay(
                 dl.GeoJSON(
-                    data=df.__geo_interface__,
+                    data=_geo_interface(df),
                     style={
                         "color": color,
                         "fillColor": color,
@@ -3597,7 +3611,6 @@ def _prepare_df(df: pl.LazyFrame, path, metadata) -> pl.LazyFrame:
         )
     )
     df = df.drop(primary_column)
-    # collecting, then back to lazy to only do these calculations once
     return (
         df.with_columns(
             pl.Series("area", areas),
@@ -3608,8 +3621,8 @@ def _prepare_df(df: pl.LazyFrame, path, metadata) -> pl.LazyFrame:
             pl.Series("maxy", bounds[:, 3]),
             __file_path=pl.lit(path),
         )
-        .collect()
-        .lazy()
+        # collecting, then back to lazy to only do these calculations once
+        .collect().lazy()
     )
 
 
@@ -3921,6 +3934,9 @@ def get_google_maps_url(center, zoom_m: int = 150) -> str:
 
 
 def _geo_interface(df: pl.DataFrame) -> dict:
+    # df = df.to_pandas()
+    # df["geometry"] = shapely.from_wkb(df["geometry"])
+    # return GeoDataFrame(df, crs=4326).__geo_interface__
     geometries = shapely.from_wkb(df["geometry"])
     return {
         "type": "FeatureCollection",
@@ -3928,11 +3944,11 @@ def _geo_interface(df: pl.DataFrame) -> dict:
             {
                 "id": str(i),
                 "type": "Feature",
-                "properties": {k: v for k, v in values.items() if k != "geometry"},
+                "properties": values,
                 "geometry": geom.__geo_interface__,
             }
             for i, (values, geom) in enumerate(
-                zip(df.to_dicts(), geometries, strict=True)
+                zip(df.drop("geometry").to_dicts(), geometries, strict=True)
             )
         ],
     }
@@ -3948,3 +3964,15 @@ def _add_cols_to_sql_query(query: str) -> str:
     top = match.group(1).strip()
     end = query[len(match.group(0)) :].strip()
     return f"{top} {cols} {end}"
+
+
+def _is_polars_query(txt: Any):
+    return (isinstance(txt, str) and ("pl.col" in txt or _is_sql(txt))) or (
+        isinstance(txt, pl.Expr)
+    )
+
+
+def _is_sql(txt: Any) -> bool:
+    return isinstance(txt, str) and txt.replace("\n", "").strip().lower().startswith(
+        "select"
+    )

@@ -51,17 +51,10 @@ def time_method_call(method_dict) -> Callable:
             start_time = time.time()
             result = method(self, *args, **kwargs)
             end_time = time.time()
-            elapsed_time = end_time - start_time
-
-            # Get the method name
+            elapsed = end_time - start_time
             method_name = method.__name__
-
-            # Update the cumulative time in the dictionary
-            if method_name in method_dict:
-                method_dict[method_name] += elapsed_time
-            else:
-                method_dict[method_name] = elapsed_time
-
+            n_calls, prev_time = method_dict.get(method_name, (0, 0))
+            method_dict[method_name] = (n_calls + 1, prev_time + elapsed)
             return result
 
         return wrapper
