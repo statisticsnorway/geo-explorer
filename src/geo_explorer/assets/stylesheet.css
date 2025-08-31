@@ -112,24 +112,3 @@
 .expandable-dropdown-left-aligned:focus-within {
     width: 60vh;
 }
-
-.super-expandable-input-left-aligned {
-    border: 1px solid #ccc;
-    width: 100%;
-    text-overflow: ellipsis;
-    white-space: pre-wrap;
-    word-break: break-all;
-    overflow-wrap: break-word;
-}
-
-.super-expandable-input-left-aligned:focus {
-    top: 30vh;
-    left: 25vh;
-    width: 175vh;
-    height: 5vh;
-    position: absolute;
-    z-index: 10000;
-    white-space: pre-wrap;
-    word-break: break-all;
-    overflow-wrap: break-word;
-}
