@@ -70,7 +70,7 @@ DEFAULT_ZOOM: int = 12
 DEFAULT_CENTER: tuple[float, float] = (59.91740845, 10.71394444)
 CURRENT_YEAR: int = datetime.datetime.now().year
 FILE_SPLITTER_TXT: str = "-_-"
-ADDED_COLUMNS = [
+ADDED_COLUMNS = {
     "minx",
     "miny",
     "maxx",
@@ -78,7 +78,7 @@ ADDED_COLUMNS = [
     "_unique_id",
     "__file_path",
     "geometry",
-]
+}
 
 DEBUG: bool = 1
 
@@ -1534,9 +1534,7 @@ class GeoExplorer:
                 # )
                 # queries.append(html.Br())
 
-                for col in set(join_df.columns).difference(
-                    set(ADDED_COLUMNS) | {"area"}
-                ):
+                for col in set(join_df.columns).difference(ADDED_COLUMNS | {"area"}):
                     if col not in df or df[col].dtype.is_float():
                         continue
                     try:
@@ -1570,7 +1568,7 @@ class GeoExplorer:
 
             n_queries = len(queries)
 
-            for col in set(df.columns).difference(set(ADDED_COLUMNS)):
+            for col in set(df.columns).difference(ADDED_COLUMNS):
                 if len(df[col].unique()) <= 1:
                     continue
                 if df[col].dtype.is_numeric():
@@ -1896,7 +1894,7 @@ class GeoExplorer:
                 cmap_ = matplotlib.colormaps.get_cmap(cmap)
                 colors_ = [
                     matplotlib.colors.to_hex(cmap_(int(i)))
-                    for i in np.linspace(0, 255, num=k)
+                    for i in np.linspace(0, 255, num=k + 1)
                 ]
                 rounded_bins = [round(x, 1) for x in bins]
                 color_dict = {
@@ -1904,7 +1902,7 @@ class GeoExplorer:
                     **{
                         f"{start} - {stop}": colors_[i + 1]
                         for i, (start, stop) in enumerate(
-                            itertools.pairwise(rounded_bins[1:-1])
+                            itertools.pairwise(rounded_bins[1:])
                         )
                     },
                     f"{rounded_bins[-1]} - {round(max(values_no_nans), 1)}": colors_[
@@ -2733,18 +2731,8 @@ class GeoExplorer:
         path = list(loaded_data)[i]
         df, _ = self._concat_data(bounds=None, paths=[path])
         row = df.filter(pl.col("_unique_id") == unique_id).collect()
-        columns = [col for col in row.columns if col != "geometry"]
-        features = _geo_interface(row)
-        # features = GeoDataFrame(
-        #     row.drop("geometry"),
-        #     geometry=shapely.from_wkb(row["geometry"]),
-        #     crs=4326,
-        # ).__geo_interface__["features"]
-        feature = next(iter(features))
-        return {
-            col: value
-            for col, value in zip(columns, feature["properties"].values(), strict=True)
-        }
+        features = _geo_interface(row)["features"]
+        return next(iter(features))["properties"]
 
     @time_method_call(_method_times)
     def _check_for_circular_queries(self, query, path):
@@ -3383,34 +3371,39 @@ def _add_data_one_path(
     elif column and bins is None:
         df = df.with_columns(_color=pl.lit(nan_color))
     elif column and column in df:
-        notnas = df.filter(pl.col(column).is_nan())
+        notnas = df.filter(
+            (pl.col(column).is_not_null()) & (pl.col(column).is_not_nan())
+        )
         if bins is not None and len(bins) == 1:
-            notnas["_color"] = next(
-                iter(color for color in color_dict.values() if color != nan_color)
+            notnas = notnas.with_columns(
+                _color=pl.lit(
+                    next(
+                        iter(
+                            color for color in color_dict.values() if color != nan_color
+                        )
+                    )
+                )
             )
         else:
             conditions = [
-                (notnas[column] < bins[1]) & (notnas[column].notna()),
+                (pl.col(column) < bins[1]) & (pl.col(column).is_not_null()),
                 *[
-                    (notnas[column] >= bins[i])
-                    & (notnas[column] < bins[i + 1])
-                    & (notnas[column].notna())
-                    for i in np.arange(2, len(bins) - 1)
+                    (pl.col(column) >= bins[i])
+                    & (pl.col(column) < bins[i + 1])
+                    & (pl.col(column).is_not_null())
+                    for i in range(1, len(bins) - 1)
                 ],
-                (notnas[column] >= bins[-1]) & (notnas[column].notna()),
+                (pl.col(column) >= bins[-1]) & (pl.col(column).is_not_null()),
             ]
-            choices = np.arange(len(conditions)) if bins is not None else None
-            try:
-                notnas["_color"] = [
-                    color_dict[x] for x in np.select(conditions, choices)
-                ]
-            except KeyError as e:
-                raise KeyError(e, color_dict, conditions, choices, bins) from e
-        df = pd.concat([notnas, df[df[column].isna()]])
+            bin_index_expr = pl.when(conditions[0]).then(pl.lit(color_dict[0]))
+            for i, cond in enumerate(conditions[1:], start=1):
+                bin_index_expr = bin_index_expr.when(cond).then(pl.lit(color_dict[i]))
+            notnas = notnas.with_columns(bin_index_expr.alias("_color"))
 
-    # df = df.to_pandas()
-    # df["geometry"] = shapely.from_wkb(df["geometry"])
-    # df = GeoDataFrame(df, crs=4326)
+        df = pl.concat(
+            [notnas, df.filter((pl.col(column).is_null()) | (pl.col(column).is_nan()))],
+            how="diagonal_relaxed",
+        )
 
     if column and column not in df.columns:
         data.append(
@@ -3948,7 +3941,11 @@ def _geo_interface(df: pl.DataFrame) -> dict:
                 "geometry": geom.__geo_interface__,
             }
             for i, (values, geom) in enumerate(
-                zip(df.drop("geometry").to_dicts(), geometries, strict=True)
+                zip(
+                    df.drop(*(ADDED_COLUMNS.difference({"_unique_id"}))).to_dicts(),
+                    geometries,
+                    strict=True,
+                )
             )
         ],
     }
@@ -3960,7 +3957,7 @@ def _add_cols_to_sql_query(query: str) -> str:
     cols = match.group(2).strip()
     if "*" in cols:
         return query
-    cols = ", ".join(dict.fromkeys(cols.split(", ") + ADDED_COLUMNS))
+    cols = ", ".join(dict.fromkeys(cols.split(", ") + list(ADDED_COLUMNS)))
     top = match.group(1).strip()
     end = query[len(match.group(0)) :].strip()
     return f"{top} {cols} {end}"
