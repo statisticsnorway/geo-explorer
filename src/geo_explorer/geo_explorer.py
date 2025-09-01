@@ -711,8 +711,6 @@ class GeoExplorer:
             self.file_system,
         )
         if child_paths:
-            for x in sorted(child_paths, key=lambda x: len(x)):
-                print(x)
             self._bounds_series = pd.concat(
                 [
                     self._bounds_series,
@@ -2088,7 +2086,7 @@ class GeoExplorer:
                     .value_counts()
                     .iter_rows()
                 )
-                print("value_counts time", perf_counter() - time_)
+                debug_print("value_counts time", perf_counter() - time_)
 
                 add_data_func = partial(
                     _add_data_one_path,
@@ -2271,10 +2269,10 @@ class GeoExplorer:
                         )
                     )
                 )
-                print(feature)
-                print("intersecting", unique_id, geom.bounds)
-                print(intersecting.collect()["_unique_id"])
-                print(path)
+                debug_print(feature)
+                debug_print("intersecting", unique_id, geom.bounds)
+                debug_print(intersecting.collect()["_unique_id"])
+                debug_print(path)
                 _used_file_paths |= set(
                     intersecting.select("__file_path").unique().collect()["__file_path"]
                 )
@@ -3425,9 +3423,9 @@ def _add_data_one_path(
     df = concatted_data.filter(pl.col("__file_path").str.contains(path)).select(
         "geometry", "_unique_id", *((column,) if column else ())
     )
-    print("add0", perf_counter() - time_)
+    debug_print("add0", perf_counter() - time_)
     n_rows = sum(count for key, count in n_rows_per_path.items() if path in key)
-    print("add1", perf_counter() - time_, n_rows)
+    debug_print("add1", perf_counter() - time_, n_rows)
     if not n_rows:
         return (
             False,
@@ -3440,14 +3438,14 @@ def _add_data_one_path(
     rows_are_hidden = n_rows > max_rows
     if rows_are_hidden:
         indices = np.random.choice(n_rows, size=max_rows, replace=False)
-        print("add2", perf_counter() - time_)
+        debug_print("add2", perf_counter() - time_)
         df = df.filter(pl.int_range(pl.len()).is_in(indices))
-        print("add3", perf_counter() - time_)
+        debug_print("add3", perf_counter() - time_)
 
     if column is not None and column in columns:
         df = _fix_colors(df, column, bins, is_numeric, color_dict, nan_color)
 
-    print("add4", perf_counter() - time_)
+    debug_print("add4", perf_counter() - time_)
 
     if column and column not in columns:
         return rows_are_hidden, [
@@ -3595,9 +3593,12 @@ def _read_and_to_4326(
             # )
             # return _prepare_df(df, path, metadata)
             table = _read_pyarrow(path, file_system=file_system, **kwargs)
+
             return _pyarrow_to_polars(table, path, file_system)
         except Exception as e:
             debug_print(f"{type(e)}: {e} for {path}")
+            if DEBUG:
+                raise e
             df = sg.read_geopandas(path, file_system=file_system, **kwargs)
             df, dtypes = _gdf_to_polars(df, path)
             return df.lazy(), dtypes
@@ -3619,6 +3620,20 @@ def _pyarrow_to_polars(
     metadata = _get_geo_metadata(path, file_system)
     primary_column = metadata["primary_column"]
     try:
+        table = table.cast(
+            pyarrow.schema(
+                [
+                    *[
+                        (
+                            (col, table.schema.field(col).type)
+                            if col != primary_column
+                            else (col, pyarrow.binary())
+                        )
+                        for col in table.schema.names
+                    ],
+                ]
+            )
+        )
         df = pl.from_arrow(table, schema_overrides={primary_column: pl.Binary()})
     except Exception as e:
         if DEBUG:
@@ -3994,7 +4009,7 @@ def _is_sql(txt: Any) -> bool:
 
 @time_function_call(_method_times)
 def _cheap_geo_interface(df: pl.DataFrame) -> dict:
-    print("_cheap_geo_interface", len(df))
+    debug_print("_cheap_geo_interface", len(df))
     return {
         "type": "FeatureCollection",
         "features": [

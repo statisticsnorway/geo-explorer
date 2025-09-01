@@ -1,4 +1,5 @@
 # %%
+
 import os
 import sys
 from pathlib import Path
@@ -17,7 +18,7 @@ from geo_explorer.geo_explorer import DEBUG
 
 
 def test_debugging_is_off():
-    assert not DEBUG, DEBUG
+    assert not DEBUG
 
 
 def _get_explorer():
