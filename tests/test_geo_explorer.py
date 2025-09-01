@@ -86,7 +86,6 @@ def _get_explorer():
 def not_test_geo_explorer_locally(run=False):
     explorer = _get_explorer()
     print(explorer)
-    explorer.run(debug=True)
     assert not explorer._deleted_categories
     assert len(explorer._loaded_data) == 7
     assert all(explorer.selected_files.values())

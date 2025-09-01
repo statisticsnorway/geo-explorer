@@ -689,7 +689,7 @@ class GeoExplorer:
                     float(value["maxy"].max()),
                 )
                 self._loaded_data[key] = value.lazy()
-                self._dtypes[key] = dtypes
+                self._dtypes[key] = dtypes | {"area": pl.Float64()}
                 self.selected_files[key] = True
 
         self.selected_files = dict(reversed(self.selected_files.items()))
@@ -1748,7 +1748,25 @@ class GeoExplorer:
         def update_column_dropdown_options(_):
             if self._concatted_data is None:
                 return dash.no_update
-            return self._get_column_dropdown_options()
+            if self._concatted_data is None:
+                return []
+            cols_to_drop = (
+                ADDED_COLUMNS
+                if not DEBUG
+                else ADDED_COLUMNS.difference({"_unique_id", "__file_path"})
+            )
+            columns = (
+                {
+                    col
+                    for dtypes in self._dtypes.values()
+                    for col, dtype in dtypes.items()
+                    if not dtype.is_nested()
+                    and not (col.startswith("__") and col.endswith("__"))
+                }
+                .difference(cols_to_drop)
+                .union(["area"])
+            )
+            return [{"label": col, "value": col} for col in sorted(columns)]
 
         @callback(
             Output("numeric-options", "style"),
@@ -2070,6 +2088,7 @@ class GeoExplorer:
                     max_rows=self.max_rows,
                     concatted_data=self._concatted_data,
                     nan_color=self.nan_color,
+                    nan_label=self.nan_label,
                     column=column,
                     is_numeric=is_numeric,
                     color_dict=color_dict,
@@ -2280,7 +2299,7 @@ class GeoExplorer:
         ):
             triggered = dash.callback_context.triggered_id
             debug_print("display_all_feature_attributes", triggered)
-            if triggered == "clear-table":
+            if triggered == "clear-table" or not self.selected_files:
                 self._current_table_view = None
                 return [], None
             if triggered is None:
@@ -2640,24 +2659,6 @@ class GeoExplorer:
             Output("viewport-container", "data"),
             Input("url", "href"),
         )
-
-    @time_method_call(_PROFILE_DICT)
-    def _get_column_dropdown_options(self):
-        if self._concatted_data is None:
-            return []
-        cols_to_drop = (
-            ADDED_COLUMNS
-            if not DEBUG
-            else ADDED_COLUMNS.difference({"_unique_id", "__file_path"})
-        )
-        columns = {
-            col
-            for dtypes in self._dtypes.values()
-            for col, dtype in dtypes.items()
-            if not dtype.is_nested()
-            and not (col.startswith("__") and col.endswith("__"))
-        }.difference(cols_to_drop)
-        return [{"label": col, "value": col} for col in sorted(columns)]
 
     @time_method_call(_PROFILE_DICT)
     def _update_table(self, data, style_table):
@@ -3356,12 +3357,11 @@ def _add_data_one_path(
     max_rows,
     concatted_data,
     nan_color,
+    nan_label,
     alpha,
     n_rows_per_path,
     columns: dict[str, set[str]],
 ):
-
-    time_ = perf_counter()
     df = concatted_data.filter(pl.col("__file_path").str.contains(path)).select(
         "geometry", "_unique_id", *((column,) if column else ())
     )
@@ -3381,7 +3381,7 @@ def _add_data_one_path(
         df = df.filter(pl.int_range(pl.len()).is_in(indices))
 
     if column is not None and column in columns:
-        df = _fix_colors(df, column, bins, is_numeric, color_dict, nan_color)
+        df = _fix_colors(df, column, bins, is_numeric, color_dict, nan_color, nan_label)
 
     if column and column not in columns:
         return rows_are_hidden, [
@@ -3442,9 +3442,21 @@ def _add_data_one_path(
 
 
 @time_function_call(_PROFILE_DICT)
-def _fix_colors(df, column, bins, is_numeric, color_dict, nan_color):
+def _fix_colors(df, column, bins, is_numeric, color_dict, nan_color, nan_label):
     if not is_numeric:
-        return df.with_columns(_color=pl.col(column).replace(color_dict))
+        print(color_dict)
+        print(df.collect()[column].value_counts())
+        return df.with_columns(
+            _color=pl.col(column).replace(
+                {
+                    value: color
+                    for value, color in color_dict.items()
+                    if value != nan_label
+                },
+                default=pl.lit(nan_color),
+                return_dtype=pl.String(),
+            )
+        )
     elif bins is None:
         return df.with_columns(_color=pl.lit(nan_color))
 
@@ -3666,7 +3678,7 @@ def _read_files(explorer, paths: list[str], mask=None, **kwargs) -> None:
         explorer._loaded_data[path] = df.with_columns(
             _unique_id=_get_unique_id(df, explorer._max_unique_id_int)
         )
-        explorer._dtypes[path] = dtypes
+        explorer._dtypes[path] = dtypes | {"area": pl.Float64()}
         explorer._max_unique_id_int += 1
 
 
