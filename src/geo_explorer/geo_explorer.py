@@ -3444,8 +3444,6 @@ def _add_data_one_path(
 @time_function_call(_PROFILE_DICT)
 def _fix_colors(df, column, bins, is_numeric, color_dict, nan_color, nan_label):
     if not is_numeric:
-        print(color_dict)
-        print(df.collect()[column].value_counts())
         return df.with_columns(
             _color=pl.col(column).replace(
                 {
