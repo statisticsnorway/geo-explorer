@@ -154,6 +154,8 @@ class GeoExplorer:
         alpha: Opacity/transparency of the geometries.
         nan_color: Color for missing values. Defaults to a shade of gray.
         nan_label: Defaults to "Missing".
+        max_read_size_per_callback: Defaults to 1e9 bytes (1 GB). Meaning max 1 GB is read at once, then the read
+            function is cycled until all data is read. This is because long callbacks time out.
         **kwargs: Additional keyword arguments passed to dash_leaflet.Map: https://www.dash-leaflet.com/components/map_container.
 
     A "clean" GeoExplorer can be initialized like this:
@@ -1744,7 +1746,7 @@ class GeoExplorer:
         )
         @time_method_call(_PROFILE_DICT)
         def update_column_dropdown_options(_):
-            if self._concatted_data is None:  # or not len(self._concatted_data):
+            if self._concatted_data is None:
                 return dash.no_update
             return self._get_column_dropdown_options()
 
@@ -3520,14 +3522,13 @@ def _read_and_to_4326(
 ) -> tuple[pl.LazyFrame, dict[str, pl.DataType]]:
     if FILE_SPLITTER_TXT not in path:
         try:
-            metadata = _get_geo_metadata(path, file_system)
-            primary_column = metadata["primary_column"]
-            df = _read_polars(
-                path, file_system=file_system, primary_column=primary_column, **kwargs
-            )
-            return _prepare_df(df, path, metadata)
+            # metadata = _get_geo_metadata(path, file_system)
+            # primary_column = metadata["primary_column"]
+            # df = _read_polars(
+            #     path, file_system=file_system, primary_column=primary_column, **kwargs
+            # )
+            # return _prepare_df(df, path, metadata)
             table = _read_pyarrow(path, file_system=file_system, **kwargs)
-
             return _pyarrow_to_polars(table, path, file_system)
         except Exception as e:
             if DEBUG:
@@ -3885,10 +3886,6 @@ def _get_force_categorical_button(
                 "color": "white",
             },
         )
-
-
-class _UseColumns:
-    pass
 
 
 class NoRowsError(ValueError):
