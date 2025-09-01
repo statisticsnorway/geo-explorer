@@ -83,9 +83,9 @@ ADDED_COLUMNS = {
 }
 ns = Namespace("onEachFeatureToggleHighlight", "default")
 
-DEBUG: bool = 1
+DEBUG: bool = False
 
-_method_times = {}
+_PROFILE_DICT = {}
 
 if DEBUG:
 
@@ -827,7 +827,7 @@ class GeoExplorer:
 
                 print("\nprofile")
                 for k, v in reversed(
-                    sorted(_method_times.items(), key=lambda x: x[1][1])
+                    sorted(_PROFILE_DICT.items(), key=lambda x: x[1][1])
                 ):
                     print(k, v)
 
@@ -880,10 +880,9 @@ class GeoExplorer:
             Input({"type": "load-parquet", "index": dash.ALL}, "id"),
             State({"type": "file-path", "index": dash.ALL}, "id"),
         )
-        @time_method_call(_method_times)
+        @time_method_call(_PROFILE_DICT)
         def append_path(load_parquet, load_parquet_ids, ids):
             triggered = dash.callback_context.triggered_id
-            debug_print("append_path", triggered)
             if not any(load_parquet) or not triggered:
                 return dash.no_update
             try:
@@ -930,7 +929,7 @@ class GeoExplorer:
             Input({"type": "checked-btn", "index": dash.ALL}, "n_clicks"),
             State({"type": "checked-btn", "index": dash.ALL}, "id"),
         )
-        @time_method_call(_method_times)
+        @time_method_call(_PROFILE_DICT)
         def get_files_in_bounds(
             bounds,
             file_added,
@@ -1099,7 +1098,6 @@ class GeoExplorer:
         def apply_query_copy(n_clicks, ids):
             path = get_index_if_clicks(n_clicks, ids)
             if not path:
-                debug_print("apply_query", path)
                 return dash.no_update
             triggered = dash.callback_context.triggered_id
             query = triggered["query"]
@@ -1110,7 +1108,6 @@ class GeoExplorer:
                 and query.startswith("pl.col")
             ):
                 query = f"{old_query}, {query}"
-            debug_print("apply_query_copy", query)
             self._queries[path] = query
             return query
 
@@ -1148,7 +1145,7 @@ class GeoExplorer:
             State("debounced_bounds", "value"),
             prevent_initial_call=True,
         )
-        @time_method_call(_method_times)
+        @time_method_call(_PROFILE_DICT)
         def concat_data(
             new_data_read,
             file_deleted,
@@ -1187,23 +1184,8 @@ class GeoExplorer:
             else:
                 update_table = dash.no_update
 
-            df, alerts = self._concat_data(
-                bounds,
-                paths=[
-                    path for path, checked in self.selected_files.items() if checked
-                ],
-            )
+            df, alerts = self._concat_data(bounds)
             self._concatted_data = df
-
-            debug_print(
-                "concat_data finished after",
-                perf_counter() - t,
-                (
-                    len(self._concatted_data)
-                    if isinstance(self._concatted_data, pl.DataFrame)
-                    else None
-                ),
-            )
 
             return 1, 1, alerts, update_table
 
@@ -1218,7 +1200,7 @@ class GeoExplorer:
             State("file-control-panel", "children"),
             prevent_initial_call=True,
         )
-        @time_method_call(_method_times)
+        @time_method_call(_PROFILE_DICT)
         def render_items(
             _,
             file_deleted,
@@ -1425,7 +1407,7 @@ class GeoExplorer:
             ),
             prevent_initial_call=True,
         )
-        def check_or_uncheck2(n_clicks_list, ids):
+        def check_or_uncheck_wms(n_clicks_list, ids):
             triggered = dash.callback_context.triggered_id
             if triggered is None:
                 return dash.no_update, dash.no_update
@@ -1454,7 +1436,7 @@ class GeoExplorer:
             State({"type": "delete-btn", "index": dash.ALL}, "id"),
             prevent_initial_call=True,
         )
-        @time_method_call(_method_times)
+        @time_method_call(_PROFILE_DICT)
         def delete_file(n_clicks_list, delete_ids):
             return (*self._delete_file(n_clicks_list, delete_ids), True)
 
@@ -1467,12 +1449,11 @@ class GeoExplorer:
             State({"type": "delete-cat-btn", "index": dash.ALL}, "id"),
             prevent_initial_call=True,
         )
-        @time_method_call(_method_times)
+        @time_method_call(_PROFILE_DICT)
         def delete_category(n_clicks_list, delete_ids):
             path_to_delete = get_index_if_clicks(n_clicks_list, delete_ids)
             if path_to_delete is None:
                 return dash.no_update, dash.no_update, dash.no_update, dash.no_update
-            debug_print(f"delete_category: {path_to_delete}")
             if not self.column:
                 return (
                     *self._delete_file(n_clicks_list, delete_ids),
@@ -1490,7 +1471,7 @@ class GeoExplorer:
             State({"type": "query-expand-button", "index": dash.ALL}, "id"),
             prevent_initial_call=True,
         )
-        @time_method_call(_method_times)
+        @time_method_call(_PROFILE_DICT)
         def expand_query_panel(n_clicks, ids):
             path = get_index_if_clicks(n_clicks, ids)
             if not path:
@@ -1635,7 +1616,7 @@ class GeoExplorer:
                         )
                     )
                 except Exception as e:
-                    debug_print("expand_query_panel", col, "-", value, "-", e)
+                    debug_print("failed query", col, "-", value, "-", e)
 
             if n_queries == len(queries):
                 queries.append(" No single table query suggestions found")
@@ -1656,6 +1637,7 @@ class GeoExplorer:
                                     "index": path,
                                 },
                                 style={"width": "100%", "height": "20vh"},
+                                autoFocus="autoFocus",
                             ),
                             *queries,
                         ]
@@ -1703,10 +1685,10 @@ class GeoExplorer:
 
         @callback(
             Output("urls", "children"),
-            Input("map", "center"),
+            Input("debounced_bounds", "value"),
             State("urls", "children"),
         )
-        @time_method_call(_method_times)
+        @time_method_call(_PROFILE_DICT)
         def update_urls(_, urls):
             return (
                 [urls[0]]
@@ -1760,7 +1742,7 @@ class GeoExplorer:
             Input("colors-are-updated", "data"),
             prevent_initial_call=True,
         )
-        @time_method_call(_method_times)
+        @time_method_call(_PROFILE_DICT)
         def update_column_dropdown_options(_):
             if self._concatted_data is None:  # or not len(self._concatted_data):
                 return dash.no_update
@@ -1790,7 +1772,7 @@ class GeoExplorer:
             State({"type": "colorpicker", "column_value": dash.ALL}, "id"),
             prevent_initial_call=True,
         )
-        @time_method_call(_method_times)
+        @time_method_call(_PROFILE_DICT)
         def set_colorpicker_value(colors, ids):
             triggered = dash.callback_context.triggered_id
             if triggered is None:
@@ -1816,7 +1798,7 @@ class GeoExplorer:
             State("debounced_bounds", "value"),
             State("bins", "data"),
         )
-        @time_method_call(_method_times)
+        @time_method_call(_PROFILE_DICT)
         def get_column_value_color_dict(
             cmap: str,
             k: int,
@@ -2021,7 +2003,7 @@ class GeoExplorer:
             Input("max_rows_value", "value"),
             Input("file-control-panel", "children"),
             Input("alpha", "value"),
-            Input({"type": "checked-btn", "index": dash.ALL}, "n_clicks"),
+            Input({"type": "checked-btn", "index": dash.ALL}, "style"),
             Input(
                 {"type": "checked-btn-wms", "wms_name": dash.ALL, "tile": dash.ALL},
                 "style",
@@ -2031,7 +2013,7 @@ class GeoExplorer:
             State("bins", "data"),
             State({"type": "colorpicker", "column_value": dash.ALL}, "id"),
         )
-        @time_method_call(_method_times)
+        @time_method_call(_PROFILE_DICT)
         def add_data(
             currently_in_bounds,
             colorpicker_values_list,
@@ -2075,19 +2057,12 @@ class GeoExplorer:
                 data = [_get_leaflet_overlay(data=None, path="none")]
                 rows_are_not_hidden = True
             else:
-                # print(self._concatted_data.explain())
-                # time_ = perf_counter()
-                # self._concatted_data = self._concatted_data.collect().lazy()
-                # print("collect time", perf_counter() - time_)
-                time_ = perf_counter()
                 n_rows_per_path = dict(
                     self._concatted_data.select("__file_path")
                     .collect()["__file_path"]
                     .value_counts()
                     .iter_rows()
                 )
-                debug_print("value_counts time", perf_counter() - time_)
-
                 add_data_func = partial(
                     _add_data_one_path,
                     max_rows=self.max_rows,
@@ -2099,9 +2074,7 @@ class GeoExplorer:
                     bins=bins,
                     alpha=alpha,
                     n_rows_per_path=n_rows_per_path,
-                    columns={
-                        path: set(dtypes) for path, dtypes in self._dtypes.items()
-                    },
+                    columns=self._columns,
                 )
                 results = [
                     add_data_func(path)
@@ -2113,18 +2086,6 @@ class GeoExplorer:
                     itertools.chain.from_iterable([x[1] for x in results if x[1]])
                 )
 
-            debug_print(
-                "add_data ferdig etter",
-                perf_counter() - t,
-                "loaded_data:",
-                len(self._loaded_data),
-                "concatted_data:",
-                (
-                    len(self._concatted_data)
-                    if isinstance(self._concatted_data, pl.DataFrame)
-                    else None
-                ),
-            )
             if rows_are_not_hidden:
                 max_rows_component = None
             else:
@@ -2148,7 +2109,7 @@ class GeoExplorer:
             Output("clicked-features-title", "children"),
             Input("clicked-features", "data"),
         )
-        @time_method_call(_method_times)
+        @time_method_call(_PROFILE_DICT)
         def update_clicked_features_title(features):
             if not features:
                 return dash.no_update
@@ -2158,7 +2119,7 @@ class GeoExplorer:
             Output("all-features-title", "children"),
             Input("all-features", "data"),
         )
-        @time_method_call(_method_times)
+        @time_method_call(_PROFILE_DICT)
         def update_all_features_title(features):
             if not features:
                 return dash.no_update
@@ -2180,7 +2141,7 @@ class GeoExplorer:
             State("clicked-ids", "data"),
             State("debounced_bounds", "value"),
         )
-        @time_method_call(_method_times)
+        @time_method_call(_PROFILE_DICT)
         def display_clicked_feature_attributes(
             clear_table,
             update_table,
@@ -2219,13 +2180,6 @@ class GeoExplorer:
             else:
                 clicked_path = triggered["filename"]
 
-            _used_file_paths = set()
-            for path in self._loaded_data:
-                selected_path = next(iter(x for x in self.selected_files if x in path))
-                if selected_path in clicked_path:
-                    _used_file_paths.add(path)
-                    break
-
             index = next(
                 iter(
                     i
@@ -2262,33 +2216,28 @@ class GeoExplorer:
 
                 intersecting = (
                     filter_by_bounds(self._concatted_data, geom.bounds)
-                    .filter(pl.col("_unique_id") != unique_id)
                     .filter(
                         pl.col("geometry").map_elements(
                             geoms_relate, return_dtype=pl.Boolean
                         )
                     )
+                    .drop(
+                        *ADDED_COLUMNS.difference({"_unique_id"}).union(
+                            {"split_index"}
+                        ),
+                        strict=False,
+                    )
+                    .collect()
                 )
-                debug_print(feature)
-                debug_print("intersecting", unique_id, geom.bounds)
-                debug_print(intersecting.collect()["_unique_id"])
-                debug_print(path)
-                _used_file_paths |= set(
-                    intersecting.select("__file_path").unique().collect()["__file_path"]
-                )
-
-            columns = {"_unique_id"}
-            for path in _used_file_paths:
-                columns |= set(self._dtypes[path]).difference({"geometry"})
-
-            props_list = [
-                {key: value for key, value in feature.items() if key in columns}
-            ]
-
-            if self.hard_click:
-                props_list += intersecting.select(*columns).collect().to_dicts()
-
-            for props in props_list:
+                all_null_cols = [
+                    col
+                    for col in intersecting.columns
+                    if intersecting[col].is_null().all()
+                ]
+                properties = intersecting.drop(*all_null_cols).to_dicts()
+            else:
+                properties = [{key: value for key, value in feature.items()}]
+            for props in properties:
                 if props["_unique_id"] not in clicked_ids:
                     clicked_features.append(props)
             clicked_ids = [x["_unique_id"] for x in clicked_features]
@@ -2323,7 +2272,7 @@ class GeoExplorer:
             Input({"type": "table-btn", "index": dash.ALL}, "n_clicks"),
             State({"type": "table-btn", "index": dash.ALL}, "id"),
         )
-        @time_method_call(_method_times)
+        @time_method_call(_PROFILE_DICT)
         def display_all_feature_attributes(
             clear_table, update_table, table_btn_n_clicks, table_btn_ids
         ):
@@ -2384,11 +2333,9 @@ class GeoExplorer:
             Input("all-features", "data"),
             State("feature-table-rows", "style_table"),
         )
-        @time_method_call(_method_times)
+        @time_method_call(_PROFILE_DICT)
         def update_table(data, style_table):
-            return self._update_table(
-                data, column_dropdown=_UseColumns(), style_table=style_table
-            )
+            return self._update_table(data, style_table=style_table)
 
         @callback(
             Output("feature-table-rows-clicked", "columns"),
@@ -2396,12 +2343,11 @@ class GeoExplorer:
             Output("feature-table-rows-clicked", "style_table"),
             Output("feature-table-rows-clicked", "hidden_columns"),
             Input("clicked-features", "data"),
-            State("column-dropdown", "options"),
             State("feature-table-rows-clicked", "style_table"),
         )
-        @time_method_call(_method_times)
-        def update_table_clicked(data, column_dropdown, style_table):
-            return self._update_table(data, column_dropdown, style_table)
+        @time_method_call(_PROFILE_DICT)
+        def update_table_clicked(data, style_table):
+            return self._update_table(data, style_table)
 
         @callback(
             Output("map-bounds", "data"),
@@ -2412,7 +2358,7 @@ class GeoExplorer:
             State("viewport-container", "data"),
             prevent_initial_call=True,
         )
-        @time_method_call(_method_times)
+        @time_method_call(_PROFILE_DICT)
         def zoom_to_feature(active: dict, active_clicked: dict, viewport):
             triggered = dash.callback_context.triggered_id
             if triggered == "feature-table-rows":
@@ -2459,7 +2405,7 @@ class GeoExplorer:
             Input("wms-checklist", "value"),
             State("wms-panel", "children"),
         )
-        @time_method_call(_method_times)
+        @time_method_call(_PROFILE_DICT)
         def add_wms_panel(
             wms_checklist,
             items,
@@ -2693,7 +2639,7 @@ class GeoExplorer:
             Input("url", "href"),
         )
 
-    @time_method_call(_method_times)
+    @time_method_call(_PROFILE_DICT)
     def _get_column_dropdown_options(self):
         if self._concatted_data is None:
             return []
@@ -2711,21 +2657,10 @@ class GeoExplorer:
         }.difference(cols_to_drop)
         return [{"label": col, "value": col} for col in sorted(columns)]
 
-    @time_method_call(_method_times)
-    def _update_table(self, data, column_dropdown, style_table):
+    @time_method_call(_PROFILE_DICT)
+    def _update_table(self, data, style_table):
         if not data:
             return None, None, style_table | {"height": "1vh"}, None
-        if isinstance(column_dropdown, _UseColumns):
-            column_dropdown = [
-                {"label": col}
-                for col in next(iter(data))
-                if col not in ["minx", "miny", "maxx", "maxy", "__file_path"]
-            ]
-        elif column_dropdown is None:
-            column_dropdown = self._get_column_dropdown_options()
-        all_columns = {x["label"] for x in column_dropdown}
-        if not self.splitted:
-            all_columns = all_columns.difference({"split_index"})
         height = min(40, len(data) * 5 + 5)
         if DEBUG:
             for x in data:
@@ -2736,7 +2671,7 @@ class GeoExplorer:
         columns_union = set()
         for x in data:
             columns_union |= set(x)
-        columns = [{"name": k, "id": k} for k in columns_union if k in all_columns]
+        columns = [{"name": k, "id": k} for k in columns_union]
         return (
             columns,
             data,
@@ -2744,7 +2679,7 @@ class GeoExplorer:
             ["id"],
         )
 
-    @time_method_call(_method_times)
+    @time_method_call(_PROFILE_DICT)
     def _delete_file(self, n_clicks_list, delete_ids):
         path_to_delete = get_index_if_clicks(n_clicks_list, delete_ids)
         if path_to_delete is None:
@@ -2767,7 +2702,7 @@ class GeoExplorer:
 
         return None, None
 
-    @time_method_call(_method_times)
+    @time_method_call(_PROFILE_DICT)
     def _nested_bounds_to_bounds(
         self,
         bounds: list[list[float]],
@@ -2789,18 +2724,21 @@ class GeoExplorer:
         maxy, maxx = maxs
         return minx, miny, maxx, maxy
 
-    @time_method_call(_method_times)
+    @time_method_call(_PROFILE_DICT)
     def _get_selected_feature(
         self, unique_id: float, path: str, bounds: tuple[float]
     ) -> tuple[dict[str, str | Number], Geometry]:
         df, _ = self._concat_data(bounds=bounds, paths=[path])
         row = df.filter(pl.col("_unique_id") == unique_id)
         geometry = next(iter(row.select("geometry").collect()["geometry"]))
-        row = row.drop(*ADDED_COLUMNS.difference({"_unique_id"})).collect()
+        row = row.drop(
+            *ADDED_COLUMNS.difference({"_unique_id"}).union({"split_index"}),
+            strict=False,
+        ).collect()
         assert len(row) == 1
         return row.row(0, named=True), geometry
 
-    @time_method_call(_method_times)
+    @time_method_call(_PROFILE_DICT)
     def _check_for_circular_queries(self, query, path):
         if query is None:
             return
@@ -2832,7 +2770,7 @@ class GeoExplorer:
                 f"Recursion error: Circular joins on {path} and {path}",
             )
 
-    @time_method_call(_method_times)
+    @time_method_call(_PROFILE_DICT)
     def _update_query(self, queries: list[str | None], ids):
         out_alerts = []
         for path in self.selected_files:
@@ -2857,12 +2795,16 @@ class GeoExplorer:
             return out_alerts
         return None
 
-    @time_method_call(_method_times)
+    @time_method_call(_PROFILE_DICT)
     def _get_unique_stem(self, path) -> str:
         name = _get_stem(path)
         if sum(_get_stem(x) == name for x in self.selected_files) > 1:
             name = _get_stem_from_parent(path)
         return name
+
+    @property
+    def _columns(self) -> dict[str, set[str]]:
+        return {path: set(dtypes) for path, dtypes in self._dtypes.items()}
 
     def _has_column(self, path: str, column: str) -> bool:
         return bool(
@@ -2887,7 +2829,7 @@ class GeoExplorer:
             raise ValueError(f"Multiple dtypes for '{column}': {relevant_dtypes}")
         return next(iter(relevant_dtypes))
 
-    @time_method_call(_method_times)
+    @time_method_call(_PROFILE_DICT)
     def _concat_data(
         self,
         bounds,
@@ -2903,8 +2845,6 @@ class GeoExplorer:
                 if path not in key:
                     continue
                 df = self._loaded_data[key]
-                if self.splitted:
-                    df = get_split_index(df)
                 if bounds is not None:
                     df = filter_by_bounds(df, bounds)
                 if self._deleted_categories and self.column in df:
@@ -2918,13 +2858,16 @@ class GeoExplorer:
                 elif (
                     self.nan_label in self._deleted_categories and self.column not in df
                 ):
+                    if self.splitted:
+                        df = get_split_index(df)
                     continue
-                if not _filter:
-                    dfs.append(df)
-                    continue
-                if self._queries.get(path, None) is not None:
+                if _filter and self._queries.get(path, None) is not None:
                     df, alert = self._filter_data(df, self._queries[path])
                     alerts.add(alert)
+
+                if self.splitted:
+                    df = get_split_index(df)
+
                 dfs.append(df)
 
         if dfs:
@@ -2943,7 +2886,7 @@ class GeoExplorer:
 
         return df, alerts
 
-    @time_method_call(_method_times)
+    @time_method_call(_PROFILE_DICT)
     def _filter_data(self, df: pl.DataFrame, query: str | None) -> pl.DataFrame:
         query = query.strip()
 
@@ -3003,7 +2946,6 @@ class GeoExplorer:
 
             if _is_sql(query):
                 formatted_query = _add_cols_to_sql_query(query.replace('"', "'"))
-
                 if " join " in formatted_query.lower():
                     df = self._polars_sql_join(df, formatted_query)
                 elif " df " in formatted_query:
@@ -3037,16 +2979,14 @@ class GeoExplorer:
                         f"-- and pandas query: ({e3_name}: {e3}) "
                     )
 
-        # if not _is_polars_query(query):
-        #     df = df.lazy()
-
-        # debug_print("_filter_data", len(df), list(df.columns))
         return df, alert
 
-    @time_method_call(_method_times)
+    @time_method_call(_PROFILE_DICT)
     def _polars_sql_join(self, df, query):
-        if " df " not in query:
-            raise ValueError("Table to be queried must be referenced to as 'df'.")
+        if " df " not in query and "df\n" not in query and "\ndf" not in query:
+            raise ValueError(
+                f"Table to be queried must be referenced to as 'df'. {query}"
+            )
         join_df_name: str = (
             query.replace(" JOIN ", " join ").split(" join ")[-1].split()[0]
         )
@@ -3103,7 +3043,7 @@ class GeoExplorer:
         ctx = pl.SQLContext(**{"df": df, "join_df": join_df})
         return ctx.execute(query, eager=False)
 
-    @time_method_call(_method_times)
+    @time_method_call(_PROFILE_DICT)
     def _map_constructor(
         self, data: dl.LayersControl, preferCanvas=True, zoomAnimation=False, **kwargs
     ) -> dl.Map:
@@ -3121,7 +3061,7 @@ class GeoExplorer:
             **kwargs,
         )
 
-    @time_method_call(_method_times)
+    @time_method_call(_PROFILE_DICT)
     def _add_wms(self, wms_checklist, bounds):
         wms_layers = []
         all_tiles_lists = []
@@ -3152,7 +3092,7 @@ class GeoExplorer:
             )
         return wms_layers, all_tiles_lists
 
-    @time_method_call(_method_times)
+    @time_method_call(_PROFILE_DICT)
     def _get_wms_list(
         self, tiles: list[str], wms_name: str, wms_layers_checked: list[str]
     ) -> html.Ul:
@@ -3218,7 +3158,7 @@ class GeoExplorer:
         values = from_year_values if what == "from" else to_year_values
         return True, values
 
-    @time_method_call(_method_times)
+    @time_method_call(_PROFILE_DICT)
     def _construct_wms_obj(self, wms_name: str, **kwargs):
         constructor = self.wms[wms_name].__class__
         defaults = dict(
@@ -3259,7 +3199,7 @@ class GeoExplorer:
         if self.selected_files:
             data = {
                 "data": {
-                    key: self._queries.get(key)
+                    key: _unformat_query(self._queries.get(key, "")) or None
                     for key in reversed(data.pop("selected_files", []))
                 },
                 **data,
@@ -3291,7 +3231,7 @@ class GeoExplorer:
         return self._get_self_as_string(data)
 
 
-@time_function_call(_method_times)
+@time_function_call(_PROFILE_DICT)
 def _get_max_rows_displayed_component(max_rows: int):
     return [
         dbc.Row(html.Div("Max rows displayed")),
@@ -3312,7 +3252,7 @@ def _get_max_rows_displayed_component(max_rows: int):
     ]
 
 
-@time_function_call(_method_times)
+@time_function_call(_PROFILE_DICT)
 def _change_order(explorer, n_clicks_list, ids, buttons, what: str):
     if what not in ["up", "down"]:
         raise ValueError(what)
@@ -3339,7 +3279,7 @@ def _named_color_to_hex(color: str) -> str:
     return mcolors.to_hex(color)
 
 
-@time_function_call(_method_times)
+@time_function_call(_PROFILE_DICT)
 def _get_colorpicker_container(color_dict: dict[str, str]) -> html.Div:
     def to_python_type(x):
         if isinstance(x, Number):
@@ -3404,7 +3344,7 @@ def _get_colorpicker_container(color_dict: dict[str, str]) -> html.Div:
     )
 
 
-@time_function_call(_method_times)
+@time_function_call(_PROFILE_DICT)
 def _add_data_one_path(
     path,
     column,
@@ -3423,9 +3363,7 @@ def _add_data_one_path(
     df = concatted_data.filter(pl.col("__file_path").str.contains(path)).select(
         "geometry", "_unique_id", *((column,) if column else ())
     )
-    debug_print("add0", perf_counter() - time_)
     n_rows = sum(count for key, count in n_rows_per_path.items() if path in key)
-    debug_print("add1", perf_counter() - time_, n_rows)
     if not n_rows:
         return (
             False,
@@ -3438,14 +3376,10 @@ def _add_data_one_path(
     rows_are_hidden = n_rows > max_rows
     if rows_are_hidden:
         indices = np.random.choice(n_rows, size=max_rows, replace=False)
-        debug_print("add2", perf_counter() - time_)
         df = df.filter(pl.int_range(pl.len()).is_in(indices))
-        debug_print("add3", perf_counter() - time_)
 
     if column is not None and column in columns:
         df = _fix_colors(df, column, bins, is_numeric, color_dict, nan_color)
-
-    debug_print("add4", perf_counter() - time_)
 
     if column and column not in columns:
         return rows_are_hidden, [
@@ -3505,7 +3439,7 @@ def _add_data_one_path(
         ]
 
 
-@time_function_call(_method_times)
+@time_function_call(_PROFILE_DICT)
 def _fix_colors(df, column, bins, is_numeric, color_dict, nan_color):
     if not is_numeric:
         return df.with_columns(_color=pl.col(column).replace(color_dict))
@@ -3586,17 +3520,16 @@ def _read_and_to_4326(
 ) -> tuple[pl.LazyFrame, dict[str, pl.DataType]]:
     if FILE_SPLITTER_TXT not in path:
         try:
-            # metadata = _get_geo_metadata(path, file_system)
-            # primary_column = metadata["primary_column"]
-            # df = _read_polars(
-            #     path, file_system=file_system, primary_column=primary_column, **kwargs
-            # )
-            # return _prepare_df(df, path, metadata)
+            metadata = _get_geo_metadata(path, file_system)
+            primary_column = metadata["primary_column"]
+            df = _read_polars(
+                path, file_system=file_system, primary_column=primary_column, **kwargs
+            )
+            return _prepare_df(df, path, metadata)
             table = _read_pyarrow(path, file_system=file_system, **kwargs)
 
             return _pyarrow_to_polars(table, path, file_system)
         except Exception as e:
-            debug_print(f"{type(e)}: {e} for {path}")
             if DEBUG:
                 raise e
             df = sg.read_geopandas(path, file_system=file_system, **kwargs)
@@ -3984,15 +3917,15 @@ def get_google_maps_url(center, zoom_m: int = 150) -> str:
 
 
 def _add_cols_to_sql_query(query: str) -> str:
-    pattern = r"^(SELECT\s+(?:DISTINCT\s+)?)(.+?)(?=\s+FROM|\s+WHERE|\s+GROUP BY|\s+ORDER BY|\s+JOIN|\s+LIMIT|$)"
-    match = re.search(pattern, query, re.IGNORECASE)
-    cols = match.group(2).strip()
-    if "*" in cols:
+    query = _unformat_query(query)
+    if "*" in query:
         return query
-    cols = ", ".join(dict.fromkeys(cols.split(", ") + list(ADDED_COLUMNS)))
-    top = match.group(1).strip()
-    end = query[len(match.group(0)) :].strip()
-    return f"{top} {cols} {end}"
+    pat = r"\b(SELECT DISTINCT|SELECT)\b"
+    select_statement = re.search(pat, query, re.IGNORECASE).group(1)
+    _, rest = query.split(select_statement)
+    rest = rest.replace("\n", " ")
+    cols = ", ".join(col for col in ADDED_COLUMNS if col not in rest)
+    return f"{select_statement} {cols}, {rest}"
 
 
 def _is_polars_query(txt: Any):
@@ -4007,7 +3940,15 @@ def _is_sql(txt: Any) -> bool:
     )
 
 
-@time_function_call(_method_times)
+def _unformat_query(query: str) -> str:
+    """Remove newlines and multiple whitespaces from SQL query."""
+    query = query.replace("\n", " ").strip()
+    while "  " in query:
+        query = query.replace("  ", " ")
+    return query
+
+
+@time_function_call(_PROFILE_DICT)
 def _cheap_geo_interface(df: pl.DataFrame) -> dict:
     debug_print("_cheap_geo_interface", len(df))
     return {
@@ -4030,7 +3971,7 @@ def _cheap_geo_interface(df: pl.DataFrame) -> dict:
     }
 
 
-@time_function_call(_method_times)
+@time_function_call(_PROFILE_DICT)
 def _get_leaflet_overlay(data, path, **kwargs):
     return dl.Overlay(
         dl.GeoJSON(data=data, id={"type": "geojson", "filename": path}, **kwargs),
@@ -4040,7 +3981,7 @@ def _get_leaflet_overlay(data, path, **kwargs):
     )
 
 
-@time_function_call(_method_times)
+@time_function_call(_PROFILE_DICT)
 def _get_multiple_leaflet_overlay(df, path, column, nan_color, alpha, **kwargs):
     values = df.select("_color").unique().collect()["_color"]
     return dl.Overlay(

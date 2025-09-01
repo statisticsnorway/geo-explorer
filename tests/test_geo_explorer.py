@@ -21,6 +21,25 @@ def test_debugging_is_off():
     assert not DEBUG
 
 
+query = """
+SELECT
+    N5000_fylke_flate_2024.FYLKESNAVN, 
+    FYLKE,
+    KOMMUNENR as komm_nr, 
+    area,
+    area / 1000000 as area_km2,
+    SUM(df.area) AS area_sum,
+FROM
+    df
+INNER JOIN
+    N5000_fylke_flate_2024 USING (FYLKE)
+WHERE
+    area < 2099301532
+ORDER BY
+    area  DESC
+"""
+
+
 def _get_explorer():
 
     return GeoExplorer(
@@ -42,7 +61,7 @@ def _get_explorer():
             .pipe(sg.to_lines)
             .assign(num_col=10000),
             "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/N5000_fylke_flate_2023.parquet": 'lambda x: x["FYLKE"].isin(["03", "30"])',
-            "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/ABAS_kommune_flate_p2023_v1.parquet": "select N5000_fylke_flate_2024.FYLKESNAVN, df.* from df inner join N5000_fylke_flate_2024 using (FYLKE)",
+            "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/ABAS_kommune_flate_p2023_v1.parquet": query,
             "df_out_of_bounds": sg.to_gdf((10.8, 61.0), 4326).assign(num_col=-1),
         },
         wms={
@@ -67,6 +86,7 @@ def _get_explorer():
 def not_test_geo_explorer_locally(run=False):
     explorer = _get_explorer()
     print(explorer)
+    explorer.run(debug=True)
     assert not explorer._deleted_categories
     assert len(explorer._loaded_data) == 7
     assert all(explorer.selected_files.values())
@@ -94,7 +114,7 @@ def not_test_geo_explorer_locally(run=False):
         {
             "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/N5000_fylke_flate_2024.parquet": '(pl.col("FYLKE").str.starts_with("5"), pl.col("FYLKE") != "56")',
             "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/N5000_fylke_flate_2023.parquet": 'lambda x: x["FYLKE"].isin(["03", "30"])',
-            "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/ABAS_kommune_flate_p2023_v1.parquet": "select N5000_fylke_flate_2024.FYLKESNAVN, df.* from df inner join N5000_fylke_flate_2024 using (FYLKE)",
+            "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/ABAS_kommune_flate_p2023_v1.parquet": query,
         }
     )
     # for k, v in explorer.__dict__.items():
