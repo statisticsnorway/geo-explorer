@@ -2721,7 +2721,7 @@ class GeoExplorer:
 
     @time_method_call(_PROFILE_DICT)
     def _get_selected_feature(
-        self, unique_id: float, path: str, bounds: tuple[float]
+        self, unique_id: float, path: str, bounds: tuple[float], recurse: bool = True
     ) -> tuple[dict[str, str | Number], Geometry]:
         df, _ = self._concat_data(bounds=bounds, paths=[path])
         row = df.filter(pl.col("_unique_id") == unique_id)
@@ -2730,6 +2730,10 @@ class GeoExplorer:
             *ADDED_COLUMNS.difference({"_unique_id"}).union({"split_index"}),
             strict=False,
         ).collect()
+        if not len(row) and recurse:
+            return self._get_selected_feature(
+                unique_id, path, bounds=None, recurse=False
+            )
         assert len(row) == 1, (unique_id, row, df.collect()["_unique_id"])
         return row.row(0, named=True), geometry
 
