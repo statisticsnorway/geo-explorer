@@ -116,10 +116,7 @@ def not_test_geo_explorer_locally(run=False):
             "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/ABAS_kommune_flate_p2023_v1.parquet": query,
         }
     )
-    # for k, v in explorer.__dict__.items():
-    #     print()
-    #     print(k)
-    #     print(v)
+
     if run:
         explorer.run(debug=True)
 
