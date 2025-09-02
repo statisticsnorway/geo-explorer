@@ -52,10 +52,13 @@ from geopandas.array import GeometryArray
 from jenkspy import jenks_breaks
 from sgis.io.dapla_functions import _get_geo_metadata
 from sgis.io.dapla_functions import _read_pyarrow
+from sgis.io.dapla_functions import _get_bounds_parquet
+from sgis.io.dapla_functions import _get_bounds_parquet_from_open_file
 from sgis.maps.wms import WmsLoader
 from shapely import Geometry
 from shapely.errors import GEOSException
 from shapely.geometry import Point
+from sgis import get_common_crs
 
 from .file_browser import FileBrowser
 from .fs import LocalFileSystem
@@ -97,11 +100,21 @@ else:
     def debug_print(*args):
         pass
 
-    def time_method_call(method_dict) -> Callable:
+    def time_method_call(_) -> Callable:
         def decorator(method):
             @wraps(method)
             def wrapper(self, *args, **kwargs):
                 return method(self, *args, **kwargs)
+
+            return wrapper
+
+        return decorator
+
+    def time_function_call(_):
+        def decorator(func):
+            @wraps(func)
+            def wrapper(*args, **kwargs):
+                return func(*args, **kwargs)
 
             return wrapper
 
@@ -234,6 +247,10 @@ class GeoExplorer:
             position="bottomright",
             primaryLengthUnit="meters",
         ),
+    ]
+
+    _file_formats_with_metadata: ClassVar[list[Component]] = [
+        "parquet",
     ]
 
     def __init__(
@@ -708,19 +725,9 @@ class GeoExplorer:
             self._register_callbacks()
             return
 
-        child_paths = _get_child_paths(
-            [x for x in self.selected_files if x not in self._loaded_data],
-            self.file_system,
+        self._append_to_bounds_series(
+            [x for x in self.selected_files if x not in self._loaded_data]
         )
-        if child_paths:
-            self._bounds_series = pd.concat(
-                [
-                    self._bounds_series,
-                    sg.get_bounds_series(
-                        child_paths, file_system=self.file_system
-                    ).to_crs(4326),
-                ]
-            )
 
         temp_center = center if center is not None else DEFAULT_CENTER
         _read_files(
@@ -887,37 +894,19 @@ class GeoExplorer:
             triggered = dash.callback_context.triggered_id
             if not any(load_parquet) or not triggered:
                 return dash.no_update
-            try:
-                selected_path = triggered["index"]
-            except Exception as e:
-                raise type(e)(f"{e}: {triggered}") from e
+            selected_path = triggered["index"]
             n_clicks = get_index(load_parquet, load_parquet_ids, selected_path)
             if selected_path in self.selected_files or not n_clicks:
                 return dash.no_update
             try:
-                more_bounds = _get_bounds_series(
-                    selected_path, file_system=self.file_system
-                )
+                self._append_to_bounds_series([selected_path])
             except Exception as e:
-                try:
-                    # reload file system to avoid cached reading of old files
-                    self.file_system = self.file_system.__class__()
-                    more_bounds = _get_bounds_series(
-                        selected_path, file_system=self.file_system
-                    )
-                except Exception:
-                    return dbc.Alert(
-                        f"Couldn't read {selected_path}. {type(e)}: {e}",
-                        color="warning",
-                        dismissable=True,
-                    )
+                return dbc.Alert(
+                    f"Couldn't read {selected_path}. {type(e)}: {e}",
+                    color="warning",
+                    dismissable=True,
+                )
             self.selected_files[selected_path] = True
-            self._bounds_series = pd.concat(
-                [
-                    self._bounds_series,
-                    more_bounds,
-                ]
-            )
             return None
 
         @callback(
@@ -956,7 +945,10 @@ class GeoExplorer:
 
             if triggered != "missing":
                 box = shapely.box(*self._nested_bounds_to_bounds(bounds))
-                files_in_bounds = sg.sfilter(self._bounds_series, box)
+                files_in_bounds = set(sg.sfilter(self._bounds_series, box).index)
+                files_in_bounds |= set(
+                    self._bounds_series[lambda x: (x.isna()) | (x.is_empty)].index
+                )
 
                 def is_checked(path) -> bool:
                     return next(
@@ -970,7 +962,7 @@ class GeoExplorer:
                 missing = list(
                     {
                         path
-                        for path in files_in_bounds.index
+                        for path in files_in_bounds
                         if path not in self._loaded_data and is_checked(path)
                     }
                 )
@@ -2738,7 +2730,7 @@ class GeoExplorer:
             *ADDED_COLUMNS.difference({"_unique_id"}).union({"split_index"}),
             strict=False,
         ).collect()
-        assert len(row) == 1
+        assert len(row) == 1, (unique_id, row, df.collect()["_unique_id"])
         return row.row(0, named=True), geometry
 
     @time_method_call(_PROFILE_DICT)
@@ -2896,9 +2888,6 @@ class GeoExplorer:
         if query is None or (isinstance(query, str) and query == ""):
             return df, None
 
-        if not _is_polars_query(query):
-            df = df.collect()
-
         try:
             query = eval(query)
         except Exception:
@@ -2945,44 +2934,47 @@ class GeoExplorer:
 
         # try to filter with polars, then pandas.loc, then pandas.query
         # no need for pretty code and specific exception handling here, as this a convenience feature
-        try:
-
-            if _is_sql(query):
-                formatted_query = _add_cols_to_sql_query(query.replace('"', "'"))
-                if " join " in formatted_query.lower():
-                    df = self._polars_sql_join(df, formatted_query)
-                elif " df " in formatted_query:
-                    df = pl.sql(formatted_query)
-                else:
-                    df = df.sql(formatted_query)
-            else:
-                df = df.filter(query)
-        except NoRowsError as e:
-            return df, str(e)
-        except Exception as e:
+        if _is_polars_query(query):
             try:
-                df = pl.DataFrame(df.to_pandas().loc[query]).lazy()
-            except Exception as e2:
-                try:
-                    df = pl.DataFrame(df.to_pandas().query(query)).lazy()
-                except Exception as e3:
-                    e_name = type(e).__name__
-                    e2_name = type(e2).__name__
-                    e3_name = type(e3).__name__
-                    e = str(e)
-                    e2 = str(e2)
-                    e3 = str(e3)
-                    if len(e) > 1000:
-                        e = e[:997] + "... "
-                    if len(e2) > 1000:
-                        e2 = e2[:997] + "... "
-                    alert = (
-                        f"Query function failed with polars ({e_name}: {e}) "
-                        f"-- and pandas loc: ({e2_name}: {e2}) "
-                        f"-- and pandas query: ({e3_name}: {e3}) "
-                    )
+                return self._run_polars_query(df, query)
+            except Exception as e:
+                return df, (
+                    f"Query function failed with polars ({type(e).__name__}: {e}) "
+                )
 
-        return df, alert
+        df = df.collect()
+
+        try:
+            return pl.DataFrame(df.to_pandas().loc[query]).lazy(), None
+        except Exception as e2:
+            try:
+                return pl.DataFrame(df.to_pandas().query(query)).lazy(), None
+            except Exception as e3:
+                e2_name = type(e2).__name__
+                e3_name = type(e3).__name__
+                e2 = str(e2)
+                e3 = str(e3)
+                if len(e2) > 1000:
+                    e2 = e2[:997] + "... "
+                if len(e3) > 1000:
+                    e3 = e3[:997] + "... "
+                alert = (
+                    f"Query function failed pandas loc: ({e2_name}: {e2}) . {type(query)}"
+                    f"-- and pandas query: ({e3_name}: {e3}) "
+                )
+                return df.lazy(), alert
+
+    def _run_polars_query(self, df: pl.LazyFrame, query):
+        if not _is_sql(query):
+            return df.filter(query)
+
+        formatted_query = _add_cols_to_sql_query(query.replace('"', "'"))
+        if " join " in formatted_query.lower():
+            return self._polars_sql_join(df, formatted_query)
+        elif " df " in formatted_query:
+            return pl.sql(formatted_query, eager=False)
+        else:
+            return df.sql(formatted_query)
 
     @time_method_call(_PROFILE_DICT)
     def _polars_sql_join(self, df, query):
@@ -3184,6 +3176,44 @@ class GeoExplorer:
         current_kwargs["show"] = True
 
         self.wms[wms_name] = constructor(**(current_kwargs | kwargs))
+
+    def _append_to_bounds_series(self, paths) -> None:
+        try:
+            child_paths = _get_child_paths(paths, self.file_system)
+            paths_with_meta, paths_without_meta = (
+                self._get_paths_with_and_without_metadata(child_paths)
+            )
+            more_bounds = _get_bounds_series_as_4326(
+                paths_with_meta,
+                file_system=self.file_system,
+            )
+        except Exception:
+            # reload file system to avoid cached reading of old files that don't exist any more
+            self.file_system = self.file_system.__class__()
+            child_paths = _get_child_paths(paths, self.file_system)
+            paths_with_meta, paths_without_meta = (
+                self._get_paths_with_and_without_metadata(child_paths)
+            )
+            more_bounds = _get_bounds_series_as_4326(
+                paths_with_meta, file_system=self.file_system
+            )
+        self._bounds_series = pd.concat(
+            [
+                self._bounds_series,
+                more_bounds,
+                pd.Series(
+                    [None for _ in range(len(paths_without_meta))],
+                    index=paths_without_meta,
+                ),
+            ]
+        )[lambda x: ~x.index.duplicated()]
+
+    def _get_paths_with_and_without_metadata(self, paths):
+        filt = [
+            any(path.endswith(f".{txt}") for txt in self._file_formats_with_metadata)
+            for path in paths
+        ]
+        return [path for path in paths if filt], [path for path in paths if not filt]
 
     def _get_self_as_dict(self) -> dict[str, Any]:
         data = {
@@ -3559,8 +3589,18 @@ def _read_and_to_4326(
 
 
 def _pyarrow_to_polars(
-    table, path, file_system
+    table: pyarrow.Table,
+    path: str,
+    file_system: AbstractFileSystem,
+    pandas_fallback: bool = True,
 ) -> tuple[pl.LazyFrame, dict[str, pl.DataType]]:
+    """Convert pyarrow.Table with geo-metadata to polars.LazyFrame.
+
+    The geometry column must have no metadata for it to be accepted by polars.
+
+    Turning the frame lazy might have no performance benefit. Ideally should
+    use polars.scan_parquet, but
+    """
     metadata = _get_geo_metadata(path, file_system)
     primary_column = metadata["primary_column"]
     try:
@@ -3580,7 +3620,7 @@ def _pyarrow_to_polars(
         )
         df = pl.from_arrow(table, schema_overrides={primary_column: pl.Binary()})
     except Exception as e:
-        if DEBUG:
+        if DEBUG or not pandas_fallback:
             raise e
         df = pl.from_pandas(table.to_pandas())
     dtypes = dict(zip(df.columns, df.dtypes, strict=False))
@@ -3706,16 +3746,17 @@ def _get_stem_from_parent(path):
 def _get_child_paths(paths, file_system):
     child_paths = set()
     for path in paths:
+        path = _standardize_path(path)
         suffix = Path(path).suffix
         if suffix:
             these_child_paths = {
-                x
+                _standardize_path(x)
                 for x in file_system.glob(str(Path(path) / f"**/*{suffix}"))
                 if Path(path).parts != Path(x).parts
             }
         else:
             these_child_paths = {
-                x
+                _standardize_path(x)
                 for x in file_system.glob(str(Path(path) / f"**/*.*"))
                 if Path(path).parts != Path(x).parts
             }
@@ -3726,20 +3767,42 @@ def _get_child_paths(paths, file_system):
     return child_paths
 
 
-def _get_bounds_series(path, file_system):
-    paths = [
-        _standardize_path(path)
-        for path in (
-            set(file_system.glob(str(Path(path) / "*.parquet")))
-            | set(file_system.glob(str(Path(path) / "**/*.parquet")))
-        )
-    ]
-    if not paths:
-        paths = [path]
+def _try_to_get_bounds_else_none(
+    path, file_system
+) -> tuple[tuple[float] | None, str | None]:
+    try:
+        return _get_bounds_parquet(path, file_system, pandas_fallback=True)
+    except Exception:
+        try:
+            return _get_bounds_parquet_from_open_file(path, file_system)
+        except Exception:
+            return None, None
+
+
+def _get_bounds_series_as_4326(paths, file_system):
     bounds_series = sg.get_bounds_series(paths, file_system=file_system)
-    if len(bounds_series):
-        bounds_series = bounds_series.to_crs(4326)
-    return bounds_series
+    return bounds_series.to_crs(4326)
+
+    func = partial(_try_to_get_bounds_else_none, file_system=file_system)
+    with ThreadPoolExecutor() as executor:
+        bounds_and_crs = list(executor.map(func, paths))
+
+    crss = {json.dumps(x[1]) for x in bounds_and_crs}
+    crs = get_common_crs(
+        [
+            crs
+            for crs in crss
+            if not any(str(crs).lower() == txt for txt in ["none", "null"])
+        ]
+    )
+    return GeoSeries(
+        [
+            shapely.box(*bbox[0]) if bbox[0] is not None else None
+            for bbox in bounds_and_crs
+        ],
+        index=paths,
+        crs=crs,
+    ).to_crs(4326)
 
 
 def get_index(values: list[Any], ids: list[Any], index: Any):
