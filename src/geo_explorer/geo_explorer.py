@@ -364,7 +364,6 @@ class GeoExplorer:
                     dbc.Row(html.Div(id="new-file-added")),
                     html.Div(id="file-deleted"),
                     html.Div(id="query-updated"),
-                    html.Div(id="buffer-tip"),
                     dbc.Row(
                         [
                             dbc.Col(
@@ -630,6 +629,7 @@ class GeoExplorer:
                             ),
                         ],
                     ),
+                    html.Div(id="buffer-tip"),
                     *get_button_with_tooltip(
                         "Hard click",
                         id="hard-click",
@@ -868,12 +868,15 @@ class GeoExplorer:
             State("map", "zoom"),
         )
         def maybe_tip_about_buffer(_, zoom):
-            print("\n\n", "tip zomm", zoom)
-            print(self._concatted_data.select("area").collect())
             return (
-                "Tip: add query e.g. 'df.buffer(3000)' if geometries are difficult to see"
-                if zoom < 10
-                and self._concatted_data.select("area").max().collect().item() < 10000
+                html.B(
+                    "Tip: add query 'df.buffer(3000)' if geometries are difficult to see",
+                    style={"font-size": 20},
+                )
+                if zoom <= 11
+                and 0
+                < self._concatted_data.select("area").max().collect().item()
+                < 10000
                 else None
             )
 
