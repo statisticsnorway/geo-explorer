@@ -87,7 +87,7 @@ ADDED_COLUMNS = {
 }
 ns = Namespace("onEachFeatureToggleHighlight", "default")
 
-DEBUG: bool = 1
+DEBUG: bool = False
 
 _PROFILE_DICT = {}
 
@@ -788,7 +788,7 @@ class GeoExplorer:
         self.app.layout = get_layout
 
         for unique_id in selected_features if selected_features is not None else []:
-            i = int(unique_id)
+            i = int(float(unique_id))
             path = list(self._loaded_data)[i]
             properties, _ = self._get_selected_feature(unique_id, path, bounds=None)
             self.selected_features[unique_id] = properties
@@ -1194,11 +1194,11 @@ class GeoExplorer:
                     )
                     self._max_unique_id_int += 1
                     for idx in list(self.selected_features):
-                        if int(idx) != id_prev:
+                        if idx[0] != id_prev[0]:
                             continue
 
                         # rounding values to avoid floating point precicion problems
-                        new_idx = round(idx - id_prev + self._max_unique_id_int, 10)
+                        new_idx = f"{self._max_unique_id_int}{idx[2:]}"
                         feature = self.selected_features.pop(idx)
                         feature["_unique_id"] = new_idx
                         self.selected_features[new_idx] = feature
@@ -2226,7 +2226,7 @@ class GeoExplorer:
                     raise ValueError(locals())
                 return dash.no_update, dash.no_update, None
             unique_id = feature["properties"]["_unique_id"]
-            i = int(unique_id)
+            i = int(float(unique_id))
             path = list(self._loaded_data)[i]
             bounds = self._nested_bounds_to_bounds(bounds)
             feature, geometry = self._get_selected_feature(
@@ -2403,7 +2403,7 @@ class GeoExplorer:
                     return dash.no_update, dash.no_update, dash.no_update
                 unique_id = active_clicked["row_id"]
 
-            i = int(unique_id)
+            i = int(float(unique_id))
 
             df = list(self._loaded_data.values())[i]
             matches = (
@@ -2708,7 +2708,7 @@ class GeoExplorer:
             if path_to_delete not in path:
                 continue
             for idx in list(self.selected_features):
-                if int(idx) == i:
+                if int(float(idx)) == i:
                     self.selected_features.pop(idx)
             del self._loaded_data[path]
 
@@ -2762,7 +2762,12 @@ class GeoExplorer:
             return self._get_selected_feature(
                 unique_id, path, bounds=None, recurse=False
             )
-        assert len(row) == 1, (unique_id, row, df.collect()["_unique_id"])
+        assert len(row) == 1, (
+            unique_id,
+            row,
+            row["_unique_id"],
+            df.collect()["_unique_id"],
+        )
         return row.row(0, named=True), geometry
 
     @time_method_call(_PROFILE_DICT)
@@ -3041,7 +3046,7 @@ class GeoExplorer:
             )
         except Exception as e:
             debug_print(f"pandas query failed: {e}")
-            query_error = f"Query function failed with pandas.DataFrame.query: ({type(e).__name__}: {e}) "
+            query_error = f"Query function failed with pandas.DataFrame.query: ({type(e).__name__}: '{e}' for query: '{query}'"
 
         is_likely_geopandas = _is_likely_geopandas_func(df, query)
         if is_likely_geopandas:
@@ -3115,14 +3120,6 @@ class GeoExplorer:
             return called
         if isinstance(called, pl.DataFrame):
             return called.lazy()
-        if isinstance(called, pd.DataFrame):
-            if (
-                all(col in called.columns for col in ADDED_COLUMNS)
-                and called["_unique_id"].is_unique
-            ):
-                return pl.LazyFrame(called)
-            called["geometry"] = shapely.from_wkb(called["geometry"].values)
-            called = GeoDataFrame(called)
         if isinstance(called, GeoDataFrame):
             called, _ = _gdf_to_polars(called, path)
             called = called.with_columns(
@@ -3141,6 +3138,8 @@ class GeoExplorer:
                 _unique_id=_get_unique_id(list(self._loaded_data).index(path))
             )
             return called
+        if isinstance(called, pd.DataFrame):
+            return df.filter(pl.col("_unique_id").is_in(called["_unique_id"].values))
         if pd.api.types.is_list_like(called):
             return df.filter(np.array(called))
         if isinstance(called, pl.Expr):
@@ -3154,9 +3153,9 @@ class GeoExplorer:
         formatted_query = _add_cols_to_sql_query(query.replace('"', "'"))
         if " join " in formatted_query.lower():
             return self._polars_sql_join(df, formatted_query)
-        elif " df " in formatted_query:
+        try:
             return pl.sql(formatted_query, eager=False)
-        else:
+        except Exception:
             return df.sql(formatted_query)
 
     @time_method_call(_PROFILE_DICT)
@@ -3876,17 +3875,9 @@ def _polars_to_gdf(df: pl.LazyFrame) -> GeoDataFrame:
     ).to_crs(3035)
 
 
-def _get_divider_lf() -> pl.Expr:
-    """Compute 10 ** len(str(n_rows)) lazily."""
-    return 10 ** (pl.len().cast(pl.Utf8).str.len_chars())
-
-
 def _get_unique_id(i: float) -> pl.Expr:
     """Lazy float column: 0.0, 0.01, ..., N / divider + i."""
-    divider = _get_divider_lf()
-    return (pl.int_range(pl.len(), eager=False).cast(pl.Float64) / divider + i).round(
-        10
-    )
+    return pl.lit(f"{i}.") + (pl.int_range(pl.len(), eager=False)).cast(pl.Utf8)
 
 
 @time_function_call(_PROFILE_DICT)
