@@ -10,6 +10,7 @@ import signal
 import sys
 import time
 from collections.abc import Callable
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from functools import wraps
@@ -86,14 +87,20 @@ ADDED_COLUMNS = {
 }
 ns = Namespace("onEachFeatureToggleHighlight", "default")
 
-DEBUG: bool = False
+DEBUG: bool = 1
 
 _PROFILE_DICT = {}
 
 if DEBUG:
 
     def debug_print(*args):
-        print(*args)
+        for arg in args:
+            if isinstance(arg, Exception):
+                print()
+                print()
+                print(f"{type(arg).__name__}: {arg}")
+                print()
+        print(*(arg for arg in args if not isinstance(arg, Exception)))
 
 else:
 
@@ -357,6 +364,7 @@ class GeoExplorer:
                     dbc.Row(html.Div(id="new-file-added")),
                     html.Div(id="file-deleted"),
                     html.Div(id="query-updated"),
+                    html.Div(id="buffer-tip"),
                     dbc.Row(
                         [
                             dbc.Col(
@@ -655,6 +663,7 @@ class GeoExplorer:
                     html.Div(id="missing", style={"display": "none"}),
                     dcc.Store(id="colors-are-updated"),
                     dcc.Store(id="dummy-output"),
+                    html.Button(id="query-examples-button", style={"display": "none"}),
                     dcc.Store(id="wms-added"),
                     html.Div(id="data-was-concatted", style={"display": "none"}),
                     html.Div(id="data-was-changed", style={"display": "none"}),
@@ -749,14 +758,14 @@ class GeoExplorer:
                         continue
                     df = self._loaded_data[key]
                     loaded_data_sorted[key] = df.with_columns(
-                        _unique_id=_get_unique_id(df, self._max_unique_id_int)
+                        _unique_id=_get_unique_id(self._max_unique_id_int)
                     )
                     self._max_unique_id_int += 1
             else:
                 x = _standardize_path(x)
                 df = self._loaded_data[x]
                 loaded_data_sorted[x] = df.with_columns(
-                    _unique_id=_get_unique_id(df, self._max_unique_id_int)
+                    _unique_id=_get_unique_id(self._max_unique_id_int)
                 )
                 self._max_unique_id_int += 1
 
@@ -827,6 +836,11 @@ class GeoExplorer:
             export_clicks,
             file_deleted,
         ):
+
+            triggered = dash.callback_context.triggered_id
+            if triggered in ["file-deleted", "close-export"] or not export_clicks:
+                return None, False
+
             if DEBUG:
                 print("\nself.__dict__")
                 for k, v in sorted(self.__dict__.items()):
@@ -840,9 +854,6 @@ class GeoExplorer:
                 ):
                     print(k, v)
 
-            triggered = dash.callback_context.triggered_id
-            if triggered in ["file-deleted", "close-export"] or not export_clicks:
-                return None, False
             data = self._get_self_as_dict()
             defaults = inspect.getfullargspec(self.__class__).kwonlydefaults
             data = {
@@ -850,6 +861,21 @@ class GeoExplorer:
             } | self._kwargs
             txt = self._get_self_as_string(data)
             return html.Div(f"{txt}.run()"), True
+
+        @callback(
+            Output("buffer-tip", "children"),
+            Input("alert", "children"),
+            State("map", "zoom"),
+        )
+        def maybe_tip_about_buffer(_, zoom):
+            print("\n\n", "tip zomm", zoom)
+            print(self._concatted_data.select("area").collect())
+            return (
+                "Tip: add query e.g. 'df.buffer(3000)' if geometries are difficult to see"
+                if zoom < 10
+                and self._concatted_data.select("area").max().collect().item() < 10000
+                else None
+            )
 
         @callback(
             Output("debounced_bounds", "value"),
@@ -1161,8 +1187,9 @@ class GeoExplorer:
                 for path, df in self._loaded_data.items():
                     id_prev = df.select(pl.col("_unique_id").first()).collect().item()
                     self._loaded_data[path] = df.with_columns(
-                        _unique_id=_get_unique_id(df, self._max_unique_id_int)
+                        _unique_id=_get_unique_id(self._max_unique_id_int)
                     )
+                    self._max_unique_id_int += 1
                     for idx in list(self.selected_features):
                         if int(idx) != id_prev:
                             continue
@@ -1173,7 +1200,6 @@ class GeoExplorer:
                         feature["_unique_id"] = new_idx
                         self.selected_features[new_idx] = feature
 
-                    self._max_unique_id_int += 1
                 update_table = True
             else:
                 update_table = dash.no_update
@@ -1461,15 +1487,34 @@ class GeoExplorer:
         @callback(
             Output({"type": "query-view", "index": dash.MATCH}, "children"),
             Output({"type": "query-view", "index": dash.MATCH}, "is_open"),
+            # Input("query-examples-button", "n_clicks"),
+            Input({"type": "query-examples-button", "index": dash.ALL}, "n_clicks"),
             Input({"type": "query-expand-button", "index": dash.ALL}, "n_clicks"),
+            State({"type": "query-examples-button", "index": dash.ALL}, "id"),
             State({"type": "query-expand-button", "index": dash.ALL}, "id"),
             prevent_initial_call=True,
         )
         @time_method_call(_PROFILE_DICT)
-        def expand_query_panel(n_clicks, ids):
-            path = get_index_if_clicks(n_clicks, ids)
+        def expand_query_panel(examples_clicks, n_clicks, examples_ids, ids):
+            triggered = dash.callback_context.triggered_id
+
+            should_add_examples = (
+                isinstance(triggered, dict)
+                and triggered["type"] == "query-examples-button"
+            )
+            if should_add_examples:
+                path = get_index_if_clicks(examples_clicks, examples_ids)
+            else:
+                path = get_index_if_clicks(n_clicks, ids)
+
             if not path:
                 return dash.no_update, False
+
+            if not should_add_examples:
+                return (
+                    self._query_panel_return_modal(path, queries=None),
+                    True,
+                )
 
             df_name = _get_stem(path)
             if sum(_get_stem(x) == df_name for x in self.selected_files) > 1:
@@ -1524,25 +1569,6 @@ class GeoExplorer:
                 cols_to_keep = ", ".join(
                     f"{join_df_name}.{col}" for col in cols_to_keep
                 )
-                # queries.append(html.Br())
-                # spatial_query = (
-                #     f"select {cols_to_keep}, df.* from df sjoin {join_df_name}"
-                # )
-
-                # queries.extend(
-                #     get_button_with_tooltip(
-                #         f"sjoin: {join_df_name}",
-                #         id={
-                #             "type": "query-select-btn",
-                #             "query": spatial_query,
-                #             "index": path,
-                #         },
-                #         n_clicks=0,
-                #         style=_unclicked_button_style(),
-                #         tooltip_text="Apply query",
-                #     )
-                # )
-                # queries.append(html.Br())
 
                 for col in set(join_df_cols).difference(ADDED_COLUMNS | {"area"}):
 
@@ -1581,7 +1607,12 @@ class GeoExplorer:
 
             n_queries = len(queries)
 
-            for col in set(df_cols).difference(ADDED_COLUMNS | {"area"}):
+            def maybe_to_string(value: Any):
+                if isinstance(value, str):
+                    return f"'{value}'"
+                return value
+
+            for col in set(df_cols).difference(ADDED_COLUMNS):  # | {"area"}):
                 if len(df.select(col).unique().collect()) <= 1:
                     continue
                 if (
@@ -1592,9 +1623,9 @@ class GeoExplorer:
                     query = f"pl.col('{col}') > {value}"
                 else:
                     value = df.select(pl.col(col).mode().first()).collect().item()
-                    query = f"pl.col('{col}') == '{value}'"
+                    query = f"pl.col('{col}') == {maybe_to_string(value)}"
                 try:
-                    df.filter(eval(query)).collect()
+                    assert len(df.filter(eval(query)).collect())
                     queries.append(html.Br())
                     queries.extend(
                         get_button_with_tooltip(
@@ -1610,34 +1641,15 @@ class GeoExplorer:
                         )
                     )
                 except Exception as e:
-                    debug_print("failed query", col, "-", value, "-", e)
+                    debug_print("failed query", e, "query", query)
 
             if n_queries == len(queries):
                 queries.append(" No single table query suggestions found")
 
-            return [
-                dbc.ModalHeader(
-                    dbc.ModalTitle(f"Query {self._get_unique_stem(path)}"),
-                    close_button=True,
-                ),
-                dbc.ModalBody(
-                    html.Div(
-                        [
-                            dcc.Textarea(
-                                value=self._queries.get(path, None),
-                                placeholder="Write query here (with polars, pandas or sql)",
-                                id={
-                                    "type": "query-copy",
-                                    "index": path,
-                                },
-                                style={"width": "100%", "height": "20vh"},
-                                autoFocus="autoFocus",
-                            ),
-                            *queries,
-                        ]
-                    ),
-                ),
-            ], True
+            return (
+                self._query_panel_return_modal(path, queries),
+                True,
+            )
 
         @callback(
             Output("file-deleted", "children", allow_duplicate=True),
@@ -1740,8 +1752,6 @@ class GeoExplorer:
         def update_column_dropdown_options(_):
             if self._concatted_data is None:
                 return dash.no_update
-            if self._concatted_data is None:
-                return []
             cols_to_drop = (
                 ADDED_COLUMNS
                 if not DEBUG
@@ -2008,7 +2018,7 @@ class GeoExplorer:
             Output("max_rows", "children"),
             Output({"type": "wms-list", "index": dash.ALL}, "children"),
             Input("colors-are-updated", "data"),
-            Input({"type": "colorpicker", "column_value": dash.ALL}, "value"),
+            Input("dummy-output", "data"),
             Input("is-numeric", "data"),
             Input("wms-checklist", "value"),
             Input("wms-added", "data"),
@@ -2023,12 +2033,13 @@ class GeoExplorer:
             State("debounced_bounds", "value"),
             State("column-dropdown", "value"),
             State("bins", "data"),
-            State({"type": "colorpicker", "column_value": dash.ALL}, "id"),
+            # State({"type": "colorpicker", "column_value": dash.ALL}, "value"),
+            # State({"type": "colorpicker", "column_value": dash.ALL}, "id"),
         )
         @time_method_call(_PROFILE_DICT)
         def add_data(
             currently_in_bounds,
-            colorpicker_values_list,
+            colorpicker_was_changed,
             is_numeric,
             # wms_items,
             wms_checklist,
@@ -2042,8 +2053,10 @@ class GeoExplorer:
             bounds,
             column,
             bins,
-            colorpicker_ids,
+            # colorpicker_values_list,
+            # colorpicker_ids,
         ):
+            triggered = dash.callback_context.triggered_id
             debug_print(
                 "\nadd_data",
                 dash.callback_context.triggered_id,
@@ -2052,13 +2065,17 @@ class GeoExplorer:
             )
             t = perf_counter()
 
+            # if isinstance(triggered, dict) and triggered["type"] == "colorpicker" and
+
             if max_rows_value is not None:
                 self.max_rows = max_rows_value
 
             bounds = self._nested_bounds_to_bounds(bounds)
 
-            column_values = [x["column_value"] for x in colorpicker_ids]
-            color_dict = dict(zip(column_values, colorpicker_values_list, strict=True))
+            # column_values = [x["column_value"] for x in colorpicker_ids]
+            color_dict = (
+                self.color_dict
+            )  # dict(zip(column_values, colorpicker_values_list, strict=True))
 
             wms_layers, all_tiles_lists = self._add_wms(wms_checklist, bounds)
 
@@ -2677,10 +2694,11 @@ class GeoExplorer:
     @time_method_call(_PROFILE_DICT)
     def _delete_file(self, n_clicks_list, delete_ids):
         path_to_delete = get_index_if_clicks(n_clicks_list, delete_ids)
+        debug_print("_delete_file", locals())
         if path_to_delete is None:
             return dash.no_update, dash.no_update
         for path in dict(self.selected_files):
-            if path_to_delete in [path, Path(path).stem]:
+            if path_to_delete in [path, self._get_unique_stem(path)]:
                 self.selected_files.pop(path)
 
         for i, path in enumerate(list(self._loaded_data)):
@@ -2725,12 +2743,19 @@ class GeoExplorer:
     ) -> tuple[dict[str, str | Number], Geometry]:
         df, _ = self._concat_data(bounds=bounds, paths=[path])
         row = df.filter(pl.col("_unique_id") == unique_id)
-        geometry = next(iter(row.select("geometry").collect()["geometry"]))
+        geometries = row.select("geometry").collect()["geometry"]
+        if not len(geometries):
+            time.sleep(0.1)
+            return self._get_selected_feature(
+                unique_id, path, bounds=None, recurse=False
+            )
+        geometry = next(iter(geometries))
         row = row.drop(
             *ADDED_COLUMNS.difference({"_unique_id"}).union({"split_index"}),
             strict=False,
         ).collect()
         if not len(row) and recurse:
+            time.sleep(0.1)
             return self._get_selected_feature(
                 unique_id, path, bounds=None, recurse=False
             )
@@ -2828,6 +2853,60 @@ class GeoExplorer:
             raise ValueError(f"Multiple dtypes for '{column}': {relevant_dtypes}")
         return next(iter(relevant_dtypes))
 
+    def _query_panel_return_modal(self, path, queries):
+        queries = queries or []
+        example_button_text = "Get query examples"
+        if (
+            queries
+            and sum(
+                size for key, size in self._loaded_data_sizes.items() if path in key
+            )
+            > 100_000_000
+        ):
+            info_about_overhead = [
+                html.Div(
+                    [
+                        "Note that for large datasets like this, queries with polars/SQL might be significantly faster than pandas and especially geopandas.",
+                        html.Br(),
+                        f"Also note that clicking the '{example_button_text}' button might be slow and memory consuming.",
+                    ],
+                )
+            ]
+        else:
+            info_about_overhead = []
+        return [
+            dbc.ModalHeader(
+                dbc.ModalTitle(f"Query {self._get_unique_stem(path)}"),
+                close_button=True,
+            ),
+            dbc.ModalBody(
+                html.Div(
+                    [
+                        dcc.Textarea(
+                            value=self._queries.get(path, None),
+                            placeholder="Write query here...",
+                            id={
+                                "type": "query-copy",
+                                "index": path,
+                            },
+                            style={"width": "100%", "height": "20vh"},
+                            autoFocus="autoFocus",
+                        ),
+                        *info_about_overhead,
+                        *get_button_with_tooltip(
+                            example_button_text,
+                            id={
+                                "type": "query-examples-button",
+                                "index": path,
+                            },
+                            tooltip_text="Note that this might be slow and memory heavy for large datasets",
+                        ),
+                        *queries,
+                    ]
+                ),
+            ),
+        ]
+
     @time_method_call(_PROFILE_DICT)
     def _concat_data(
         self,
@@ -2861,7 +2940,7 @@ class GeoExplorer:
                         df = get_split_index(df)
                     continue
                 if _filter and self._queries.get(path, None) is not None:
-                    df, alert = self._filter_data(df, self._queries[path])
+                    df, alert = self._filter_data(df, self._queries[path], key)
                     alerts.add(alert)
 
                 if self.splitted:
@@ -2886,92 +2965,189 @@ class GeoExplorer:
         return df, alerts
 
     @time_method_call(_PROFILE_DICT)
-    def _filter_data(self, df: pl.DataFrame, query: str | None) -> pl.DataFrame:
+    def _filter_data(
+        self, df: pl.DataFrame, query: str | None, path: str
+    ) -> pl.DataFrame:
         query = query.strip()
 
         if query is None or (isinstance(query, str) and query == ""):
             return df, None
 
-        try:
-            query = eval(query)
-        except Exception:
-            pass
-
         alert = None
-
-        # if isinstance(query, str) and "sjoin" in query:
-        #     cols_to_keep, join_df_name = query.split(" from df sjoin ")
-        #     join_df_path = next(
-        #         iter(
-        #             x
-        #             for x in self.selected_files
-        #             if join_df_name in [_get_stem(x), _get_stem_from_parent(x)]
-        #         )
-        #     )
-        #     cols_to_keep = [
-        #         col.replace(f"{join_df_name}.", "")
-        #         for col in cols_to_keep.replace("SELECT ", "")
-        #         .replace("select ", "")
-        #         .split(", ")
-        #         if f"{join_df_name}." in col
-        #     ]
-        #     join_df, _ = self._concat_data(bounds=None, paths=[join_df_path])
-        #     cols_to_drop = [col for col in join_df.columns if col not in cols_to_keep]
-        #     assert "geometry" in cols_to_drop, cols_to_drop
-        #     joined = (
-        #         GeoDataFrame(
-        #             df.drop("geometry").to_pandas(),
-        #             geometry=shapely.from_wkb(df["geometry"]),
-        #         )
-        #         .sjoin(
-        #             GeoDataFrame(
-        #                 join_df.drop(*cols_to_drop).to_pandas(),
-        #                 geometry=shapely.from_wkb(join_df["geometry"]),
-        #             )
-        #         )
-        #         .drop(columns="index_right")
-        #     )
-        #     joined = pl.DataFrame(joined.drop(columns="geometry")).with_columns(
-        #         geometry=shapely.to_wkb(joined["geometry"].values)
-        #     )
-        #     return joined, None
 
         # try to filter with polars, then pandas.loc, then pandas.query
         # no need for pretty code and specific exception handling here, as this a convenience feature
-        if _is_polars_query(query):
+        if _is_sql(query):
             try:
-                return self._run_polars_query(df, query)
+                return self._run_polars_sql(df, query), None
             except Exception as e:
                 return df, (
-                    f"Query function failed with polars ({type(e).__name__}: {e}) "
+                    f"Query function failed with polars sql ({type(e).__name__}: {e}) "
+                )
+        elif _is_polars_expression(query):
+            try:
+                return (
+                    df.filter(eval(query) if isinstance(query, str) else query),
+                    None,
+                )
+            except Exception as e:
+                return df, (
+                    f"Query function failed with polars filter ({type(e).__name__}: {e}. query: {query}) "
                 )
 
-        df = df.collect()
+        # df_with_added_cols = df.select(ADDED_COLUMNS.difference({"geometry"}))
+        df2 = df.drop(ADDED_COLUMNS.difference({"geometry", "_unique_id"})).collect()
+        df2, alert = self._run_df_function(df2, df, query, path)
+        if df2 is None:
+            return df, alert
+        if "_unique_id" not in df2:
+            return df, (
+                "Cannot drop internal column '_unique_id' from df. This is added to keep track of data"
+            )
+        return df2, alert
+
+    @time_method_call(_PROFILE_DICT)
+    def _run_df_function(
+        self, df: pl.DataFrame, df_orig: pl.LazyFrame, query: str | Callable, path: str
+    ):
+        error_mess = ""
 
         try:
-            return pl.DataFrame(df.to_pandas().loc[query]).lazy(), None
-        except Exception as e2:
+            called = eval(query)
+        except Exception as e:
+            debug_print(f"eval(query) failed: {e}")
+            called = query
+        if callable(called):
             try:
-                return pl.DataFrame(df.to_pandas().query(query)).lazy(), None
-            except Exception as e3:
-                e2_name = type(e2).__name__
-                e3_name = type(e3).__name__
-                e2 = str(e2)
-                e3 = str(e3)
-                if len(e2) > 1000:
-                    e2 = e2[:997] + "... "
-                if len(e3) > 1000:
-                    e3 = e3[:997] + "... "
-                alert = (
-                    f"Query function failed pandas loc: ({e2_name}: {e2}) . {type(query)}"
-                    f"-- and pandas query: ({e3_name}: {e3}) "
+                called = called(df)
+            except Exception as e:
+                debug_print(f"query(df) failed: {e}")
+        try:
+            return self._callable_results_to_polars(df_orig, called, path), None
+        except Exception as e:
+            error_mess += (
+                f"Query function failed with polars ({type(e).__name__}: {e}) "
+            )
+
+        try:
+            return (
+                self._callable_results_to_polars(
+                    df_orig, df.to_pandas().query(query), path
+                ),
+                None,
+            )
+        except Exception as e:
+            debug_print(f"pandas query failed: {e}")
+            query_error = f"Query function failed with pandas.DataFrame.query: ({type(e).__name__}: {e}) "
+
+        is_likely_geopandas = _is_likely_geopandas_func(df, query)
+        if is_likely_geopandas:
+            df = _polars_to_gdf(df)
+        else:
+            df = df.to_pandas()
+        added_to_globals = set()
+        for path_ in self.selected_files:
+            name = self._get_unique_stem(path_)
+            if (
+                name in ["df", "self"]
+                or not isinstance(query, str)
+                or name not in query
+                or name in globals()
+            ):
+                continue
+            df2, _ = self._concat_data(
+                bounds=self._nested_bounds_to_bounds(self._bounds), paths=[path_]
+            )
+            df2 = (
+                _polars_to_gdf(
+                    df2.drop(*ADDED_COLUMNS.difference({"geometry"})).collect()
                 )
-                return df.lazy(), alert
+                if is_likely_geopandas
+                else df2.drop(*ADDED_COLUMNS).collect().to_pandas()
+            )
+            locals()[name] = df2
+            globals()[name] = df2
+            added_to_globals.add(name)
 
-    def _run_polars_query(self, df: pl.LazyFrame, query):
-        if not _is_sql(query):
-            return df.filter(query)
+        if isinstance(query, str):
+            try:
+                query = eval(query)
+            except NameError:
+                error_mess += query_error
+            except Exception as e:
+                error_mess += (
+                    f"Query function failed with pandas ({type(e).__name__}: {e}) "
+                )
+                for name in added_to_globals:
+                    globals().pop(name)
+                return None, error_mess
 
+        for name in added_to_globals:
+            globals().pop(name)
+
+            # if is_likely_geopandas:
+            #     return None, error_mess
+            # try:
+            #     called = query(df.to_pandas())
+            #     return self._callable_results_to_polars(df_orig, called, path), None
+            # except Exception as e:
+
+        try:
+            if callable(query):
+                query = query(df)
+            return self._callable_results_to_polars(df_orig, query, path), None
+        except Exception as e:
+            error_mess += (
+                f"Query function failed with pandas ({type(e).__name__}: {e}) "
+            )
+
+        return None, error_mess
+
+    @time_method_call(_PROFILE_DICT)
+    def _callable_results_to_polars(
+        self, df: pl.LazyFrame, called: Any, path: str
+    ) -> pl.LazyFrame:
+        debug_print("_callable_results_to_polars", type(called), path)
+        if isinstance(called, pl.LazyFrame):
+            return called
+        if isinstance(called, pl.DataFrame):
+            return called.lazy()
+        if isinstance(called, pd.DataFrame):
+            if (
+                all(col in called.columns for col in ADDED_COLUMNS)
+                and called["_unique_id"].is_unique
+            ):
+                return pl.LazyFrame(called)
+            called["geometry"] = shapely.from_wkb(called["geometry"].values)
+            called = GeoDataFrame(called)
+        if isinstance(called, GeoDataFrame):
+            called, _ = _gdf_to_polars(called, path)
+            called = called.with_columns(
+                _unique_id=_get_unique_id(list(self._loaded_data).index(path))
+            ).lazy()
+            return called
+        if isinstance(called, GeoSeries):
+            geometries, areas, bounds = _get_area_and_bounds(geometries=called.values)
+            called = _add_columns(
+                df.drop(ADDED_COLUMNS),
+                geometries,
+                areas,
+                bounds,
+                path,
+            ).with_columns(
+                _unique_id=_get_unique_id(list(self._loaded_data).index(path))
+            )
+            return called
+        if pd.api.types.is_list_like(called):
+            return df.filter(np.array(called))
+        if isinstance(called, pl.Expr):
+            return df.filter(called)
+        if callable(called):
+            raise ValueError(f"Could't call function: {called}")
+        raise ValueError(f"Didn't understand return value {type(called)}: {called}")
+
+    @time_method_call(_PROFILE_DICT)
+    def _run_polars_sql(self, df: pl.LazyFrame, query):
         formatted_query = _add_cols_to_sql_query(query.replace('"', "'"))
         if " join " in formatted_query.lower():
             return self._polars_sql_join(df, formatted_query)
@@ -3139,6 +3315,7 @@ class GeoExplorer:
             },
         )
 
+    @time_method_call(_PROFILE_DICT)
     def _update_wms_year(
         self, triggered, what: str, from_year_values, to_year_values, ids
     ):
@@ -3396,8 +3573,12 @@ def _add_data_one_path(
     n_rows_per_path,
     columns: dict[str, set[str]],
 ):
+    columns: set[str] = {
+        col for key, cols in columns.items() for col in cols if path in key
+    } | {"split_index"}
+
     df = concatted_data.filter(pl.col("__file_path").str.contains(path)).select(
-        "geometry", "_unique_id", *((column,) if column else ())
+        "geometry", "_unique_id", *((column,) if column and column in columns else ())
     )
     n_rows = sum(count for key, count in n_rows_per_path.items() if path in key)
     if not n_rows:
@@ -3406,9 +3587,6 @@ def _add_data_one_path(
             [_get_leaflet_overlay(data=None, path=path)],
         )
 
-    columns: set[str] = {
-        col for key, cols in columns.items() for col in cols if path in key
-    } | {"split_index"}
     rows_are_hidden = n_rows > max_rows
     if rows_are_hidden:
         indices = np.random.choice(n_rows, size=max_rows, replace=False)
@@ -3528,6 +3706,7 @@ def polars_isna(df):
         return df.is_null()
 
 
+@time_function_call(_PROFILE_DICT)
 def filter_by_bounds(df: pl.LazyFrame, bounds: tuple[float]) -> pl.LazyFrame:
     minx, miny, maxx, maxy = bounds
 
@@ -3540,6 +3719,7 @@ def filter_by_bounds(df: pl.LazyFrame, bounds: tuple[float]) -> pl.LazyFrame:
     return df
 
 
+@time_function_call(_PROFILE_DICT)
 def read_nrows(file, nrow: int, nth_batch: int, file_system) -> pyarrow.Table:
     """Read first n rows of a parquet file."""
     for _, batch in zip(
@@ -3551,6 +3731,7 @@ def read_nrows(file, nrow: int, nth_batch: int, file_system) -> pyarrow.Table:
     return pyarrow.Table.from_batches([batch])
 
 
+@time_function_call(_PROFILE_DICT)
 def _read_polars(path, file_system, primary_column, **kwargs):
     with file_system.open(path, "rb") as file:
         return pl.scan_parquet(
@@ -3561,6 +3742,7 @@ def _read_polars(path, file_system, primary_column, **kwargs):
         )
 
 
+@time_function_call(_PROFILE_DICT)
 def _read_and_to_4326(
     path: str, file_system, **kwargs
 ) -> tuple[pl.LazyFrame, dict[str, pl.DataType]]:
@@ -3592,6 +3774,7 @@ def _read_and_to_4326(
     return _pyarrow_to_polars(table, path, file_system)
 
 
+@time_function_call(_PROFILE_DICT)
 def _pyarrow_to_polars(
     table: pyarrow.Table,
     path: str,
@@ -3631,6 +3814,7 @@ def _pyarrow_to_polars(
     return _prepare_df(df.lazy(), path, metadata), dtypes
 
 
+@time_function_call(_PROFILE_DICT)
 def _prepare_df(df: pl.LazyFrame, path, metadata) -> pl.LazyFrame:
     primary_column = metadata["primary_column"]
     geo_metadata = metadata["columns"][primary_column]
@@ -3642,21 +3826,12 @@ def _prepare_df(df: pl.LazyFrame, path, metadata) -> pl.LazyFrame:
         )
     )
     df = df.drop(primary_column)
-    return (
-        df.with_columns(
-            pl.Series("area", areas),
-            pl.Series("geometry", shapely.to_wkb(geometries)),
-            pl.Series("minx", bounds[:, 0]),
-            pl.Series("miny", bounds[:, 1]),
-            pl.Series("maxx", bounds[:, 2]),
-            pl.Series("maxy", bounds[:, 3]),
-            __file_path=pl.lit(path),
-        )
-        # collecting, then back to lazy to only do these calculations once
-        .collect().lazy()
-    )
+    df = _add_columns(df, geometries, areas, bounds, path)
+    # collecting, then back to lazy to only do these calculations once
+    return df.collect().lazy()
 
 
+@time_function_call(_PROFILE_DICT)
 def _get_area_and_bounds(geometries: GeometryArray | GeoSeries):
     areas = shapely.area(geometries)
     if np.median(areas) > 10:
@@ -3667,12 +3842,18 @@ def _get_area_and_bounds(geometries: GeometryArray | GeoSeries):
     return geometries, areas, shapely.bounds(geometries)
 
 
-def _gdf_to_polars(df: GeoDataFrame, path) -> GeoDataFrame:
+@time_function_call(_PROFILE_DICT)
+def _gdf_to_polars(df: GeoDataFrame, path) -> pl.DataFrame:
     geometries, areas, bounds = _get_area_and_bounds(geometries=df.geometry.values)
     df = df.drop(columns=df.geometry.name)
     df = pl.from_pandas(df)
     dtypes = dict(zip(df.columns, df.dtypes, strict=False))
-    df = df.with_columns(
+    df = _add_columns(df, geometries, areas, bounds, path)
+    return df, dtypes
+
+
+def _add_columns(df, geometries, areas, bounds, path):
+    return df.with_columns(
         pl.Series("area", areas),
         pl.Series("geometry", shapely.to_wkb(geometries)),
         pl.Series("minx", bounds[:, 0]),
@@ -3681,7 +3862,15 @@ def _gdf_to_polars(df: GeoDataFrame, path) -> GeoDataFrame:
         pl.Series("maxy", bounds[:, 3]),
         __file_path=pl.lit(path),
     )
-    return df, dtypes
+
+
+@time_function_call(_PROFILE_DICT)
+def _polars_to_gdf(df: pl.LazyFrame) -> GeoDataFrame:
+    return GeoDataFrame(
+        df.drop("geometry").to_pandas(),
+        geometry=shapely.from_wkb(df["geometry"].to_pandas()),
+        crs=4326,
+    ).to_crs(3035)
 
 
 def _get_divider_lf() -> pl.Expr:
@@ -3689,7 +3878,7 @@ def _get_divider_lf() -> pl.Expr:
     return 10 ** (pl.len().cast(pl.Utf8).str.len_chars())
 
 
-def _get_unique_id(df, i: float) -> pl.Expr:
+def _get_unique_id(i: float) -> pl.Expr:
     """Lazy float column: 0.0, 0.01, ..., N / divider + i."""
     divider = _get_divider_lf()
     return (pl.int_range(pl.len(), eager=False).cast(pl.Float64) / divider + i).round(
@@ -3697,6 +3886,7 @@ def _get_unique_id(df, i: float) -> pl.Expr:
     )
 
 
+@time_function_call(_PROFILE_DICT)
 def _read_files(explorer, paths: list[str], mask=None, **kwargs) -> None:
     if not paths:
         return
@@ -3718,7 +3908,7 @@ def _read_files(explorer, paths: list[str], mask=None, **kwargs) -> None:
         )
     for path, (df, dtypes) in zip(paths, more_data, strict=True):
         explorer._loaded_data[path] = df.with_columns(
-            _unique_id=_get_unique_id(df, explorer._max_unique_id_int)
+            _unique_id=_get_unique_id(explorer._max_unique_id_int)
         )
         explorer._dtypes[path] = dtypes | {"area": pl.Float64()}
         explorer._max_unique_id_int += 1
@@ -4002,16 +4192,37 @@ def _add_cols_to_sql_query(query: str) -> str:
     return f"{select_statement} {cols}, {rest}"
 
 
-def _is_polars_query(txt: Any):
-    return (isinstance(txt, str) and ("pl.col" in txt or _is_sql(txt))) or (
-        isinstance(txt, pl.Expr)
-    )
+def _is_polars_expression(txt: Any):
+    return (isinstance(txt, str) and "pl.col" in txt) or (isinstance(txt, pl.Expr))
 
 
 def _is_sql(txt: Any) -> bool:
     return isinstance(txt, str) and txt.replace("\n", "").strip().lower().startswith(
         "select"
     )
+
+
+@time_function_call(_PROFILE_DICT)
+def _is_likely_geopandas_func(df, txt: Any):
+    if not isinstance(txt, str) or "pl." in txt:
+        return False
+    # geopandas_methods = {
+    #     # "buffer", "area", "length", "is_empty", "sjoin", "overlay", "clip", "sjoin_nearest", "bounds", "boundary", "geom_type", "set_precision", "make_valid", "is_valid", "centroid", ""
+    # }
+    geopandas_methods = {
+        x
+        for x in set(dir(GeoDataFrame))
+        .union(set(dir(GeoSeries)))
+        .difference(set(dir(pd.DataFrame)))
+        .difference(set(dir(pd.Series)))
+        .difference(set(dir(pd.Series.str)))
+        .difference(set(dir(pl.DataFrame)))
+        .difference(set(dir(pl.Series)))
+        .difference(set(dir(pl.Series.str)))
+        if not x.startswith("__")
+    }
+    cols = set(df.columns)
+    return any(x in txt and len(x) > 2 and x not in cols for x in geopandas_methods)
 
 
 def _unformat_query(query: str) -> str:
