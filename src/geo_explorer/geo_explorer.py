@@ -22,6 +22,7 @@ from time import perf_counter
 from typing import Any
 from typing import ClassVar
 
+import geopandas as gpd
 import dash
 import dash_bootstrap_components as dbc
 import dash_leaflet as dl
@@ -94,13 +95,12 @@ _PROFILE_DICT = {}
 if DEBUG:
 
     def debug_print(*args):
-        for arg in args:
-            if isinstance(arg, Exception):
-                print()
-                print()
-                print(f"{type(arg).__name__}: {arg}")
-                print()
-        print(*(arg for arg in args if not isinstance(arg, Exception)))
+        print(
+            *(
+                f"{type(arg).__name__}: {arg}" if isinstance(arg, Exception) else arg
+                for arg in args
+            )
+        )
 
 else:
 
@@ -126,6 +126,40 @@ else:
             return wrapper
 
         return decorator
+
+
+@time_function_call(_PROFILE_DICT)
+def read_file(self, path: str, **kwargs) -> tuple[pl.LazyFrame, dict[str, pl.DataType]]:
+    if not path.endswith(".parquet"):
+        try:
+            return gpd.read_file(path, filesystem=self.file_system, **kwargs)
+        except Exception:
+            pd_read_func = getattr(pd, f"read_{Path(path).suffix.strip('.')}")
+            return pd_read_func(path, filesystem=self.file_system, **kwargs)
+    if FILE_SPLITTER_TXT not in path:
+        try:
+            # metadata = _get_geo_metadata(path, file_system)
+            # primary_column = metadata["primary_column"]
+            # df = _read_polars(
+            #     path, file_system=file_system, primary_column=primary_column, **kwargs
+            # )
+            # return _prepare_df(df, path, metadata)
+            table = _read_pyarrow(path, file_system=self.file_system, **kwargs)
+            return _pyarrow_to_polars(table, path, self.file_system)
+        except Exception:
+            df = sg.read_geopandas(path, file_system=self.file_system, **kwargs)
+            df, dtypes = _gdf_to_polars(df, path)
+            return df.lazy(), dtypes
+    rows = path.split(FILE_SPLITTER_TXT)[-1]
+    nrow, nth_batch = rows.split("-")
+    nrow = int(nrow)
+    nth_batch = int(nth_batch)
+    path = path.split(FILE_SPLITTER_TXT)[0]
+    try:
+        table = read_nrows(path, nrow, nth_batch, file_system=self.file_system)
+    except Exception:
+        table = read_nrows(path, nrow, nth_batch, file_system=None)
+    return _pyarrow_to_polars(table, path, self.file_system)
 
 
 class GeoExplorer:
@@ -259,6 +293,8 @@ class GeoExplorer:
     _file_formats_with_metadata: ClassVar[list[Component]] = [
         "parquet",
     ]
+
+    read_func: ClassVar[Callable] = read_file
 
     def __init__(
         self,
@@ -930,6 +966,7 @@ class GeoExplorer:
             try:
                 self._append_to_bounds_series([selected_path])
             except Exception as e:
+                raise e
                 return dbc.Alert(
                     f"Couldn't read {selected_path}. {type(e)}: {e}",
                     color="warning",
@@ -1495,10 +1532,11 @@ class GeoExplorer:
             Input({"type": "query-expand-button", "index": dash.ALL}, "n_clicks"),
             State({"type": "query-examples-button", "index": dash.ALL}, "id"),
             State({"type": "query-expand-button", "index": dash.ALL}, "id"),
+            State("debounced_bounds", "value"),
             prevent_initial_call=True,
         )
         @time_method_call(_PROFILE_DICT)
-        def expand_query_panel(examples_clicks, n_clicks, examples_ids, ids):
+        def expand_query_panel(examples_clicks, n_clicks, examples_ids, ids, bounds):
             triggered = dash.callback_context.triggered_id
 
             should_add_examples = (
@@ -1535,7 +1573,8 @@ class GeoExplorer:
 
             n_queries = len(queries)
 
-            df, _ = self._concat_data(bounds=None, paths=[path], _filter=False)
+            bounds = self._nested_bounds_to_bounds(bounds)
+            df, _ = self._concat_data(bounds=bounds, paths=[path], _filter=False)
 
             if df is None:
                 return dash.no_update, dash.no_update
@@ -1555,7 +1594,7 @@ class GeoExplorer:
                     join_df_name = _get_stem_from_parent(join_path)
 
                 join_df, _ = self._concat_data(
-                    bounds=None, paths=[join_path], _filter=False
+                    bounds=bounds, paths=[join_path], _filter=False
                 )
 
                 join_df_cols = {
@@ -1577,12 +1616,15 @@ class GeoExplorer:
 
                     if col not in df_cols or self._get_dtype(join_path, col).is_float():
                         continue
+                    debug_print(f"\n\nquery join: {path=}, {join_path=}, {col=}")
                     try:
                         joined = (
                             df.join(join_df, on=col, how="inner").select(col).collect()
                         )
-                    except Exception:
-                        continue
+                    except Exception as e:
+                        debug_print(
+                            f"\n\nquery join failed: {path=}, {join_path=}, {col=}", e
+                        )
                     if not len(joined):
                         continue
 
@@ -2405,13 +2447,16 @@ class GeoExplorer:
 
             i = int(float(unique_id))
 
-            df = list(self._loaded_data.values())[i]
+            try:
+                df = list(self._loaded_data.values())[i]
+            except IndexError as e:
+                raise IndexError(f"{e} for {i=} and {self._loaded_data=}")
             matches = (
                 df.filter(pl.col("_unique_id") == unique_id)
                 .select("minx", "miny", "maxx", "maxy")
                 .collect()
             )
-            if not len(matches):
+            if not len(matches) or any(pd.isna(x) for x in matches.row(0)):
                 return dash.no_update, dash.no_update, dash.no_update
             minx, miny, maxx, maxy = matches.row(0)
             center = ((miny + maxy) / 2, (minx + maxx) / 2)
@@ -2954,6 +2999,8 @@ class GeoExplorer:
                 if self.splitted:
                     df = get_split_index(df)
 
+                debug_print("\n\n\nconcat", path, key)
+                debug_print(df.collect())
                 dfs.append(df)
 
         if dfs:
@@ -3713,10 +3760,13 @@ def filter_by_bounds(df: pl.LazyFrame, bounds: tuple[float]) -> pl.LazyFrame:
     minx, miny, maxx, maxy = bounds
 
     df = df.filter(
-        (pl.col("minx") <= float(maxx))
-        & (pl.col("maxx") >= float(minx))
-        & (pl.col("miny") <= float(maxy))
-        & (pl.col("maxy") >= float(miny))
+        (
+            (pl.col("minx") <= float(maxx))
+            & (pl.col("maxx") >= float(minx))
+            & (pl.col("miny") <= float(maxy))
+            & (pl.col("maxy") >= float(miny))
+        )
+        | (pl.col("minx").is_null())
     )
     return df
 
@@ -3742,38 +3792,6 @@ def _read_polars(path, file_system, primary_column, **kwargs):
             missing_columns="insert",
             **kwargs,
         )
-
-
-@time_function_call(_PROFILE_DICT)
-def _read_and_to_4326(
-    path: str, file_system, **kwargs
-) -> tuple[pl.LazyFrame, dict[str, pl.DataType]]:
-    if FILE_SPLITTER_TXT not in path:
-        try:
-            # metadata = _get_geo_metadata(path, file_system)
-            # primary_column = metadata["primary_column"]
-            # df = _read_polars(
-            #     path, file_system=file_system, primary_column=primary_column, **kwargs
-            # )
-            # return _prepare_df(df, path, metadata)
-            table = _read_pyarrow(path, file_system=file_system, **kwargs)
-            return _pyarrow_to_polars(table, path, file_system)
-        except Exception as e:
-            if DEBUG:
-                raise e
-            df = sg.read_geopandas(path, file_system=file_system, **kwargs)
-            df, dtypes = _gdf_to_polars(df, path)
-            return df.lazy(), dtypes
-    rows = path.split(FILE_SPLITTER_TXT)[-1]
-    nrow, nth_batch = rows.split("-")
-    nrow = int(nrow)
-    nth_batch = int(nth_batch)
-    path = path.split(FILE_SPLITTER_TXT)[0]
-    try:
-        table = read_nrows(path, nrow, nth_batch, file_system=file_system)
-    except Exception:
-        table = read_nrows(path, nrow, nth_batch, file_system=None)
-    return _pyarrow_to_polars(table, path, file_system)
 
 
 @time_function_call(_PROFILE_DICT)
@@ -3817,6 +3835,17 @@ def _pyarrow_to_polars(
 
 
 @time_function_call(_PROFILE_DICT)
+def _get_area_and_bounds(geometries: GeometryArray | GeoSeries):
+    areas = shapely.area(geometries)
+    if np.median(areas) > 10:
+        # as int because easier to read
+        areas = areas.astype(np.int64)
+    if geometries.crs is not None:
+        geometries = geometries.to_crs(4326)
+    return geometries, areas, shapely.bounds(geometries)
+
+
+@time_function_call(_PROFILE_DICT)
 def _prepare_df(df: pl.LazyFrame, path, metadata) -> pl.LazyFrame:
     primary_column = metadata["primary_column"]
     geo_metadata = metadata["columns"][primary_column]
@@ -3834,17 +3863,6 @@ def _prepare_df(df: pl.LazyFrame, path, metadata) -> pl.LazyFrame:
 
 
 @time_function_call(_PROFILE_DICT)
-def _get_area_and_bounds(geometries: GeometryArray | GeoSeries):
-    areas = shapely.area(geometries)
-    if np.median(areas) > 10:
-        # as int because easier to read
-        areas = areas.astype(np.int64)
-    if geometries.crs is not None:
-        geometries = geometries.to_crs(4326)
-    return geometries, areas, shapely.bounds(geometries)
-
-
-@time_function_call(_PROFILE_DICT)
 def _gdf_to_polars(df: GeoDataFrame, path) -> pl.DataFrame:
     geometries, areas, bounds = _get_area_and_bounds(geometries=df.geometry.values)
     df = df.drop(columns=df.geometry.name)
@@ -3857,7 +3875,7 @@ def _gdf_to_polars(df: GeoDataFrame, path) -> pl.DataFrame:
 def _add_columns(df, geometries, areas, bounds, path):
     return df.with_columns(
         pl.Series("area", areas),
-        pl.Series("geometry", shapely.to_wkb(geometries)),
+        pl.Series("geometry", shapely.to_wkb(geometries), dtype=pl.Binary()),
         pl.Series("minx", bounds[:, 0]),
         pl.Series("miny", bounds[:, 1]),
         pl.Series("maxx", bounds[:, 2]),
@@ -3895,10 +3913,7 @@ def _read_files(explorer, paths: list[str], mask=None, **kwargs) -> None:
     backend = "threading" if len(paths) <= 3 else "loky"
     with joblib.Parallel(len(paths), backend=backend) as parallel:
         more_data = parallel(
-            joblib.delayed(_read_and_to_4326)(
-                path, file_system=explorer.file_system, **kwargs
-            )
-            for path in paths
+            joblib.delayed(explorer.read_func)(path, **kwargs) for path in paths
         )
     for path, (df, dtypes) in zip(paths, more_data, strict=True):
         explorer._loaded_data[path] = df.with_columns(
@@ -3968,21 +3983,22 @@ def _try_to_get_bounds_else_none(
 
 
 def _get_bounds_series_as_4326(paths, file_system):
-    bounds_series = sg.get_bounds_series(paths, file_system=file_system)
-    return bounds_series.to_crs(4326)
+    # bounds_series = sg.get_bounds_series(paths, file_system=file_system)
+    # return bounds_series.to_crs(4326)
 
     func = partial(_try_to_get_bounds_else_none, file_system=file_system)
     with ThreadPoolExecutor() as executor:
         bounds_and_crs = list(executor.map(func, paths))
 
     crss = {json.dumps(x[1]) for x in bounds_and_crs}
-    crs = get_common_crs(
-        [
-            crs
-            for crs in crss
-            if not any(str(crs).lower() == txt for txt in ["none", "null"])
-        ]
-    )
+    crs = {
+        crs
+        for crs in crss
+        if not any(str(crs).lower() == txt for txt in ["none", "null"])
+    }
+    if not crs:
+        return GeoSeries([None for _ in range(len(paths))], index=paths)
+    crs = get_common_crs(crss)
     return GeoSeries(
         [
             shapely.box(*bbox[0]) if bbox[0] is not None else None
