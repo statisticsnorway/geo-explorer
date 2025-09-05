@@ -71,7 +71,7 @@ def _get_explorer():
             ),
         },
         wms_layers_checked={"norge_i_bilder": ["Oslo kommune 2020"]},
-        selected_features=[1.151, 5.13, 0],
+        selected_features=["1.151", "5.13", "0.0"],
         column="FYLKE",
         zoom=13,
         center=(59.91740845, 10.71394454),
@@ -94,10 +94,10 @@ def not_test_geo_explorer_locally(run=False):
     ]
     for i, (k, v) in enumerate(explorer._loaded_data.items()):
         assert (
-            v.select("_unique_id").cast(pl.Int16).collect()["_unique_id"] == i
+            v.select("_unique_id").collect()["_unique_id"].str.slice(0, 1) == str(i)
         ).all(), (
             i,
-            v.select("_unique_id").cast(pl.Int16).collect()["_unique_id"],
+            v.select("_unique_id").collect()["_unique_id"].str.slice(0, 1),
         )
     assert (
         features := {
@@ -108,7 +108,7 @@ def not_test_geo_explorer_locally(run=False):
                 strict=True,
             )
         }
-    ) == ({1.151: "Trøndelag", 5.13: "Troms", 0: -1}), features
+    ) == ({"1.151": "Trøndelag", "5.13": "Troms", "0.0": -1}), features
     assert explorer._queries == (
         {
             "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/N5000_fylke_flate_2024.parquet": '(pl.col("FYLKE").str.starts_with("5"), pl.col("FYLKE") != "56")',
