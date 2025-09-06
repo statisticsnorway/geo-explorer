@@ -22,6 +22,7 @@ from time import perf_counter
 from typing import Any
 from typing import ClassVar
 
+import pickle
 import geopandas as gpd
 import dash
 import dash_bootstrap_components as dbc
@@ -129,14 +130,17 @@ else:
 
 
 @time_function_call(_PROFILE_DICT)
-def read_file(self, path: str, **kwargs) -> tuple[pl.LazyFrame, dict[str, pl.DataType]]:
+def read_file(
+    path: str, file_system: AbstractFileSystem, **kwargs
+) -> tuple[pl.LazyFrame, dict[str, pl.DataType]]:
+
     if not path.endswith(".parquet"):
         try:
-            df = gpd.read_file(path, filesystem=self.file_system, **kwargs)
+            df = gpd.read_file(path, filesystem=file_system, **kwargs)
             df, dtypes = _geopandas_to_polars(df, path)
         except Exception:
             pd_read_func = getattr(pd, f"read_{Path(path).suffix.strip('.')}")
-            df = pd_read_func(path, filesystem=self.file_system, **kwargs)
+            df = pd_read_func(path, filesystem=file_system, **kwargs)
             df, dtypes = _pandas_to_polars(df, path)
         return df.lazy(), dtypes
     if FILE_SPLITTER_TXT not in path:
@@ -147,10 +151,10 @@ def read_file(self, path: str, **kwargs) -> tuple[pl.LazyFrame, dict[str, pl.Dat
             #     path, file_system=file_system, primary_column=primary_column, **kwargs
             # )
             # return _prepare_df(df, path, metadata)
-            table = _read_pyarrow(path, file_system=self.file_system, **kwargs)
-            return _pyarrow_to_polars(table, path, self.file_system)
+            table = _read_pyarrow(path, file_system=file_system, **kwargs)
+            return _pyarrow_to_polars(table, path, file_system)
         except Exception:
-            df = sg.read_geopandas(path, file_system=self.file_system, **kwargs)
+            df = sg.read_geopandas(path, file_system=file_system, **kwargs)
             df, dtypes = _geopandas_to_polars(df, path)
             return df.lazy(), dtypes
     rows = path.split(FILE_SPLITTER_TXT)[-1]
@@ -159,10 +163,10 @@ def read_file(self, path: str, **kwargs) -> tuple[pl.LazyFrame, dict[str, pl.Dat
     nth_batch = int(nth_batch)
     path = path.split(FILE_SPLITTER_TXT)[0]
     try:
-        table = read_nrows(path, nrow, nth_batch, file_system=self.file_system)
+        table = read_nrows(path, nrow, nth_batch, file_system=file_system)
     except Exception:
         table = read_nrows(path, nrow, nth_batch, file_system=None)
-    return _pyarrow_to_polars(table, path, self.file_system)
+    return _pyarrow_to_polars(table, path, file_system)
 
 
 class GeoExplorer:
@@ -3507,6 +3511,13 @@ class GeoExplorer:
         data = self._get_self_as_dict()
         return self._get_self_as_string(data)
 
+    def __getstate__(self):
+        for variable_name, value in vars(self).items():
+            try:
+                pickle.dumps(value)
+            except pickle.PicklingError:
+                print(f"{variable_name} with value {value} is not pickable")
+
 
 @time_function_call(_PROFILE_DICT)
 def _get_max_rows_displayed_component(max_rows: int):
@@ -3935,15 +3946,19 @@ def _read_files(explorer, paths: list[str], mask=None, **kwargs) -> None:
     paths = [
         path
         for path in paths
-        if mask is None or shapely.intersects(mask, explorer._bounds_series.get(path))
+        if mask is None or shapely.intersects(mask, explorer._bounds_series[path])
     ]
     if not paths:
         return
     # loky because to_crs is slow with threading
     backend = "threading" if len(paths) <= 3 else "loky"
+    file_system = explorer.file_system
     with joblib.Parallel(len(paths), backend=backend) as parallel:
         more_data = parallel(
-            joblib.delayed(explorer.read_func)(path, **kwargs) for path in paths
+            joblib.delayed(explorer.__class__.read_func)(
+                path=path, file_system=file_system, **kwargs
+            )
+            for path in paths
         )
     for path, (df, dtypes) in zip(paths, more_data, strict=True):
         explorer._loaded_data[path] = df.with_columns(
