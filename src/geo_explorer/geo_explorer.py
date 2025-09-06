@@ -911,15 +911,17 @@ class GeoExplorer:
             State("map", "zoom"),
         )
         def maybe_tip_about_buffer(_, zoom):
+            if self._concatted_data is None:
+                return None
+            area_max = self._concatted_data.select("area").max().collect().item()
+            if area_max is None:
+                return None
             return (
                 html.B(
                     "Tip: add query 'df.buffer(3000)' if geometries are difficult to see",
                     style={"font-size": 20},
                 )
-                if zoom <= 11
-                and 0
-                < self._concatted_data.select("area").max().collect().item()
-                < 10000
+                if zoom <= 11 and 0 < area_max < 10000
                 else None
             )
 
@@ -1024,12 +1026,10 @@ class GeoExplorer:
                 )
 
                 def is_checked(path) -> bool:
-                    return next(
-                        iter(
-                            is_checked
-                            for sel_path, is_checked in self.selected_files.items()
-                            if sel_path in path
-                        )
+                    return any(
+                        is_checked
+                        for sel_path, is_checked in self.selected_files.items()
+                        if sel_path in path
                     )
 
                 missing = list(
@@ -2768,7 +2768,8 @@ class GeoExplorer:
         assert len(deleted_files) == 1, deleted_files
         deleted_files2 = set()
         for i, path2 in enumerate(list(self._loaded_data)):
-            if path not in path2:
+            parts = Path(path2).parts
+            if not all(part in parts for part in Path(path).parts):
                 continue
             for idx in list(self.selected_features):
                 if int(float(idx)) == i:
