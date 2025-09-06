@@ -132,10 +132,13 @@ else:
 def read_file(self, path: str, **kwargs) -> tuple[pl.LazyFrame, dict[str, pl.DataType]]:
     if not path.endswith(".parquet"):
         try:
-            return gpd.read_file(path, filesystem=self.file_system, **kwargs)
+            df = gpd.read_file(path, filesystem=self.file_system, **kwargs)
+            df, dtypes = _geopandas_to_polars(df, path)
         except Exception:
             pd_read_func = getattr(pd, f"read_{Path(path).suffix.strip('.')}")
-            return pd_read_func(path, filesystem=self.file_system, **kwargs)
+            df = pd_read_func(path, filesystem=self.file_system, **kwargs)
+            df, dtypes = _pandas_to_polars(df, path)
+        return df.lazy(), dtypes
     if FILE_SPLITTER_TXT not in path:
         try:
             # metadata = _get_geo_metadata(path, file_system)
@@ -148,7 +151,7 @@ def read_file(self, path: str, **kwargs) -> tuple[pl.LazyFrame, dict[str, pl.Dat
             return _pyarrow_to_polars(table, path, self.file_system)
         except Exception:
             df = sg.read_geopandas(path, file_system=self.file_system, **kwargs)
-            df, dtypes = _gdf_to_polars(df, path)
+            df, dtypes = _geopandas_to_polars(df, path)
             return df.lazy(), dtypes
     rows = path.split(FILE_SPLITTER_TXT)[-1]
     nrow, nth_batch = rows.split("-")
@@ -743,7 +746,7 @@ class GeoExplorer:
                     self.selected_files[key] = True
                     self._queries[key] = value
                     continue
-                value, dtypes = _gdf_to_polars(value, key)
+                value, dtypes = _geopandas_to_polars(value, key)
                 bounds_series_dict[key] = shapely.box(
                     float(value["minx"].min()),
                     float(value["miny"].min()),
@@ -1498,7 +1501,10 @@ class GeoExplorer:
         )
         @time_method_call(_PROFILE_DICT)
         def delete_file(n_clicks_list, delete_ids):
-            return (*self._delete_file(n_clicks_list, delete_ids), True)
+            return (
+                *self._delete_file(n_clicks_list, delete_ids, delete_category=False),
+                True,
+            )
 
         @callback(
             Output("file-deleted", "children", allow_duplicate=True),
@@ -1516,7 +1522,7 @@ class GeoExplorer:
                 return dash.no_update, dash.no_update, dash.no_update, dash.no_update
             if not self.column:
                 return (
-                    *self._delete_file(n_clicks_list, delete_ids),
+                    *self._delete_file(n_clicks_list, delete_ids, delete_category=True),
                     True,
                     dash.no_update,
                 )
@@ -2028,8 +2034,9 @@ class GeoExplorer:
             elif self.nan_label not in color_dict and polars_isna(values).any():
                 color_dict[self.nan_label] = self.nan_color
 
+            self.color_dict = color_dict
+
             if not is_numeric:
-                self.color_dict = color_dict
                 any_isnull = values.is_null().any()
                 color_dict = {
                     key: color
@@ -2078,8 +2085,6 @@ class GeoExplorer:
             State("debounced_bounds", "value"),
             State("column-dropdown", "value"),
             State("bins", "data"),
-            # State({"type": "colorpicker", "column_value": dash.ALL}, "value"),
-            # State({"type": "colorpicker", "column_value": dash.ALL}, "id"),
         )
         @time_method_call(_PROFILE_DICT)
         def add_data(
@@ -2098,8 +2103,6 @@ class GeoExplorer:
             bounds,
             column,
             bins,
-            # colorpicker_values_list,
-            # colorpicker_ids,
         ):
             triggered = dash.callback_context.triggered_id
             debug_print(
@@ -2117,10 +2120,7 @@ class GeoExplorer:
 
             bounds = self._nested_bounds_to_bounds(bounds)
 
-            # column_values = [x["column_value"] for x in colorpicker_ids]
-            color_dict = (
-                self.color_dict
-            )  # dict(zip(column_values, colorpicker_values_list, strict=True))
+            color_dict = self.color_dict
 
             wms_layers, all_tiles_lists = self._add_wms(wms_checklist, bounds)
 
@@ -2269,7 +2269,10 @@ class GeoExplorer:
                 return dash.no_update, dash.no_update, None
             unique_id = feature["properties"]["_unique_id"]
             i = int(float(unique_id))
-            path = list(self._loaded_data)[i]
+            try:
+                path = list(self._loaded_data)[i]
+            except IndexError as e:
+                raise type(e)(f"{e}: {i=}, {self._loaded_data.keys()=}")
             bounds = self._nested_bounds_to_bounds(bounds)
             feature, geometry = self._get_selected_feature(
                 unique_id, path, bounds=bounds
@@ -2740,25 +2743,33 @@ class GeoExplorer:
         )
 
     @time_method_call(_PROFILE_DICT)
-    def _delete_file(self, n_clicks_list, delete_ids):
+    def _delete_file(self, n_clicks_list, delete_ids, delete_category: bool):
         path_to_delete = get_index_if_clicks(n_clicks_list, delete_ids)
         debug_print("_delete_file", locals())
         if path_to_delete is None:
             return dash.no_update, dash.no_update
+        deleted_files = set()
         for path in dict(self.selected_files):
-            if path_to_delete in [path, self._get_unique_stem(path)]:
+            name = self._get_unique_stem(path) if delete_category else path
+            if path_to_delete == name:
                 self.selected_files.pop(path)
+                deleted_files.add(path)
+                break
 
-        for i, path in enumerate(list(self._loaded_data)):
-            if path_to_delete not in path:
+        assert len(deleted_files) == 1, deleted_files
+        deleted_files2 = set()
+        for i, path2 in enumerate(list(self._loaded_data)):
+            if path not in path2:
                 continue
             for idx in list(self.selected_features):
                 if int(float(idx)) == i:
                     self.selected_features.pop(idx)
-            del self._loaded_data[path]
+            del self._loaded_data[path2]
+            deleted_files2.add(path2)
 
+        debug_print(f"{deleted_files2=}")
         self._bounds_series = self._bounds_series[
-            lambda x: ~x.index.str.contains(path_to_delete)
+            lambda x: ~x.index.isin(deleted_files2)
         ]
 
         return None, None
@@ -2809,6 +2820,7 @@ class GeoExplorer:
             )
         assert len(row) == 1, (
             unique_id,
+            f"{recurse=}",
             row,
             row["_unique_id"],
             df.collect()["_unique_id"],
@@ -2970,10 +2982,12 @@ class GeoExplorer:
         dfs = []
         alerts = set()
         for path in self.selected_files:
+            path_parts = Path(path).parts
             for key in self._loaded_data:
                 if paths and (path not in paths and key not in paths):
                     continue
-                if path not in key:
+                key_parts = Path(key).parts
+                if not all(part in key_parts for part in path_parts):
                     continue
                 df = self._loaded_data[key]
                 if bounds is not None:
@@ -3168,7 +3182,7 @@ class GeoExplorer:
         if isinstance(called, pl.DataFrame):
             return called.lazy()
         if isinstance(called, GeoDataFrame):
-            called, _ = _gdf_to_polars(called, path)
+            called, _ = _geopandas_to_polars(called, path)
             called = called.with_columns(
                 _unique_id=_get_unique_id(list(self._loaded_data).index(path))
             ).lazy()
@@ -3863,12 +3877,28 @@ def _prepare_df(df: pl.LazyFrame, path, metadata) -> pl.LazyFrame:
 
 
 @time_function_call(_PROFILE_DICT)
-def _gdf_to_polars(df: GeoDataFrame, path) -> pl.DataFrame:
+def _geopandas_to_polars(df: GeoDataFrame, path) -> pl.DataFrame:
     geometries, areas, bounds = _get_area_and_bounds(geometries=df.geometry.values)
     df = df.drop(columns=df.geometry.name)
     df = pl.from_pandas(df)
     dtypes = dict(zip(df.columns, df.dtypes, strict=False))
     df = _add_columns(df, geometries, areas, bounds, path)
+    return df, dtypes
+
+
+@time_function_call(_PROFILE_DICT)
+def _pandas_to_polars(df: pd.DataFrame, path) -> pl.DataFrame:
+    df = pl.from_pandas(df)
+    dtypes = dict(zip(df.columns, df.dtypes, strict=False))
+    df = df.with_columns(
+        area=pl.lit(None).cast(pl.Float64()),
+        geometry=pl.lit(None).cast(pl.Binary()),
+        minx=pl.lit(None).cast(pl.Float64()),
+        miny=pl.lit(None).cast(pl.Float64()),
+        maxx=pl.lit(None).cast(pl.Float64()),
+        maxy=pl.lit(None).cast(pl.Float64()),
+        __file_path=pl.lit(path),
+    )
     return df, dtypes
 
 

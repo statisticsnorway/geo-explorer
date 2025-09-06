@@ -49,10 +49,11 @@ def time_method_call(method_dict) -> Callable:
         @wraps(method)
         def wrapper(self, *args, **kwargs):
             start_time = time.perf_counter()
+            method_name = method.__name__
+            print(method_name)
             result = method(self, *args, **kwargs)
             end_time = time.perf_counter()
             elapsed = end_time - start_time
-            method_name = method.__name__
             print(method_name, elapsed)
             n_calls, prev_time = method_dict.get(method_name, (0, 0))
             method_dict[method_name] = (n_calls + 1, prev_time + elapsed)
@@ -68,10 +69,11 @@ def time_function_call(method_dict):
         @wraps(func)
         def wrapper(*args, **kwargs):
             start_time = time.perf_counter()
+            func_name = func.__name__
+            print(func_name)
             result = func(*args, **kwargs)
             end_time = time.perf_counter()
             elapsed = end_time - start_time
-            func_name = func.__name__
             print(func_name, elapsed)
             n_calls, prev_time = method_dict.get(func_name, (0, 0))
             method_dict[func_name] = (n_calls + 1, prev_time + elapsed)
