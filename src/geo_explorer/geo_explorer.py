@@ -134,7 +134,7 @@ def read_file(
     path: str, file_system: AbstractFileSystem, **kwargs
 ) -> tuple[pl.LazyFrame, dict[str, pl.DataType]]:
 
-    if not path.endswith(".parquet"):
+    if not path.endswith(".parquet") and FILE_SPLITTER_TXT not in path:
         try:
             df = gpd.read_file(path, filesystem=file_system, **kwargs)
             df, dtypes = _geopandas_to_polars(df, path)
@@ -2309,8 +2309,15 @@ class GeoExplorer:
                         ),
                         strict=False,
                     )
-                    .collect()
                 )
+                if DEBUG:
+                    intersecting = intersecting.with_columns(
+                        pl.col("_unique_id").alias("id")
+                    )
+                else:
+                    intersecting = intersecting.rename({"_unique_id": "id"})
+
+                intersecting = intersecting.collect()
                 all_null_cols = [
                     col
                     for col in intersecting.columns
@@ -2320,9 +2327,9 @@ class GeoExplorer:
             else:
                 properties = [{key: value for key, value in feature.items()}]
             for props in properties:
-                if props["_unique_id"] not in clicked_ids:
+                if props["id"] not in clicked_ids:
                     clicked_features.append(props)
-            clicked_ids = [x["_unique_id"] for x in clicked_features]
+            clicked_ids = [x["id"] for x in clicked_features]
             self.selected_features = dict(
                 zip(clicked_ids, clicked_features, strict=True)
             )
@@ -2404,6 +2411,10 @@ class GeoExplorer:
 
             if not len(df) or not len(df.columns):
                 return None, out_alert
+            if DEBUG:
+                df = df.with_columns(pl.col("_unique_id").alias("id"))
+            else:
+                df = df.rename({"_unique_id": "id"})
             clicked_features = df.to_dicts()
             return clicked_features, None
 
@@ -2729,12 +2740,6 @@ class GeoExplorer:
         if not data:
             return None, None, style_table | {"height": "1vh"}, None
         height = min(40, len(data) * 5 + 5)
-        if DEBUG:
-            for x in data:
-                x["id"] = x["_unique_id"]
-        else:
-            for x in data:
-                x["id"] = x.pop("_unique_id")
         columns_union = set()
         for x in data:
             columns_union |= set(x)
@@ -2813,10 +2818,17 @@ class GeoExplorer:
                 unique_id, path, bounds=None, recurse=False
             )
         geometry = next(iter(geometries))
+
+        if DEBUG:
+            row = row.with_columns(pl.col("_unique_id").alias("id"))
+        else:
+            row = row.rename({"_unique_id": "id"})
+
         row = row.drop(
             *ADDED_COLUMNS.difference({"_unique_id"}).union({"split_index"}),
             strict=False,
         ).collect()
+
         if not len(row) and recurse:
             time.sleep(0.1)
             return self._get_selected_feature(
@@ -2826,8 +2838,8 @@ class GeoExplorer:
             unique_id,
             f"{recurse=}",
             row,
-            row["_unique_id"],
-            df.collect()["_unique_id"],
+            row["id"],
+            df.collect()["id"],
         )
         return row.row(0, named=True), geometry
 
