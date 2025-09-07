@@ -21,6 +21,7 @@ from pathlib import PurePath
 from time import perf_counter
 from typing import Any
 from typing import ClassVar
+import random
 
 import pickle
 import geopandas as gpd
@@ -127,6 +128,63 @@ else:
             return wrapper
 
         return decorator
+
+
+def _get_default_sql_query(df: pl.LazyFrame | pl.DataFrame, columns: list[str]) -> str:
+    if isinstance(df, pl.LazyFrame):
+        mean_area = df.select("area").mean().collect().item()
+        min_area = df.select("area").min().collect().item()
+    else:
+        mean_area = df["area"].mean()
+        min_area = df["area"].min()
+
+    columns = [col for col in columns if col != "area"]
+    cols = ", ".join(columns[: (min(3, len(columns)))])
+
+    if mean_area is not None and mean_area > min_area:
+        where_and_order_by_clauses = f"WHERE area > {mean_area} ORDER BY area DESC"
+        cols = "area, " + cols
+    else:
+        where_and_order_by_clauses = ""
+    query = f"SELECT {cols} FROM df {where_and_order_by_clauses} LIMIT 10000"
+    return query.replace("  ", " ")
+
+
+def _get_sql_query_with_col(
+    df: pl.LazyFrame, col: str, columns: list[str], all_cols: bool
+) -> str:
+    if len(df.select(col).unique().collect()) <= 1:
+        return
+
+    def maybe_to_string(value: Any):
+        if isinstance(value, str):
+            return f"'{value}'"
+        return value
+
+    cols = [
+        col2
+        for col2 in columns
+        if col2 not in [col, "geometry"] and not col2.startswith("_")
+    ]
+    random.shuffle(cols)
+    if cols and not all_cols:
+        cols = f"{col}, " + ", ".join(cols[: (min(3, len(cols)))])
+    else:
+        cols = "*"
+
+    try:
+        value = df.select(col).mean().collect().item()
+        assert value is not None
+        query = f"SELECT {cols} FROM df WHERE {col} > {value} ORDER BY {col} DESC"
+    except Exception:
+        value = df.select(pl.col(col).mode().first()).collect().item()
+        query = f"SELECT {cols} FROM df WHERE {col}={maybe_to_string(value)}"
+    results = pl.sql(query, eager=False).collect()
+    if not len(results):
+        raise ValueError(f"No rows s query {query}")
+    if len(results) > 100_000:
+        query += " LIMIT 100000"
+    return query
 
 
 @time_function_call(_PROFILE_DICT)
@@ -879,7 +937,6 @@ class GeoExplorer:
             export_clicks,
             file_deleted,
         ):
-
             triggered = dash.callback_context.triggered_id
             if triggered in ["file-deleted", "close-export"] or not export_clicks:
                 return None, False
@@ -1128,6 +1185,7 @@ class GeoExplorer:
                 self.splitted = not self.splitted
                 self.column = None if not self.splitted else self.column
             if self.splitted:
+                self._deleted_categories = set()
                 return self.splitted, "split_index"
             return self.splitted, self.column
 
@@ -1415,7 +1473,7 @@ class GeoExplorer:
                                                 "index": path,
                                             },
                                             is_open=False,
-                                            style={"width": "250vh"},
+                                            size="xl",
                                             backdrop="static",
                                         ),
                                     ],
@@ -1635,6 +1693,7 @@ class GeoExplorer:
                         debug_print(
                             f"\n\nquery join failed: {path=}, {join_path=}, {col=}", e
                         )
+                        continue
                     if not len(joined):
                         continue
 
@@ -1660,27 +1719,34 @@ class GeoExplorer:
             queries.append(html.Br())
             queries.append(html.B("Example single table queries:"))
 
-            n_queries = len(queries)
-
             def maybe_to_string(value: Any):
                 if isinstance(value, str):
                     return f"'{value}'"
                 return value
 
-            for col in set(df_cols).difference(ADDED_COLUMNS):  # | {"area"}):
-                if len(df.select(col).unique().collect()) <= 1:
-                    continue
-                if (
-                    self._has_column(join_path, col)
-                    and self._get_dtype(join_path, col).is_numeric()
-                ):
-                    value = df.select(col).mean().collect().item()
-                    query = f"pl.col('{col}') > {value}"
-                else:
-                    value = df.select(pl.col(col).mode().first()).collect().item()
-                    query = f"pl.col('{col}') == {maybe_to_string(value)}"
+            default_query = _get_default_sql_query(
+                df, [col for col in df_cols if not col.startswith("_")]
+            )
+            queries.append(html.Br())
+            queries.extend(
+                get_button_with_tooltip(
+                    default_query,
+                    id={
+                        "type": "query-select-btn",
+                        "query": default_query,
+                        "index": path,
+                    },
+                    n_clicks=0,
+                    style=_unclicked_button_style(),
+                    tooltip_text="Apply query",
+                )
+            )
+
+            for i, col in enumerate(set(df_cols).difference(ADDED_COLUMNS)):
                 try:
-                    assert len(df.filter(eval(query)).collect())
+                    query = _get_sql_query_with_col(
+                        df, col, df_cols, all_cols=i % 2 == 0
+                    )
                     queries.append(html.Br())
                     queries.extend(
                         get_button_with_tooltip(
@@ -1696,10 +1762,7 @@ class GeoExplorer:
                         )
                     )
                 except Exception as e:
-                    debug_print("failed query", e, "query", query)
-
-            if n_queries == len(queries):
-                queries.append(" No single table query suggestions found")
+                    debug_print("failed query", e)
 
             return (
                 self._query_panel_return_modal(path, queries),
@@ -1727,6 +1790,7 @@ class GeoExplorer:
             if column is None:
                 self.column = None
                 self.splitted = None
+                self._deleted_categories = set()
             if self.splitted and column == "split_index":
                 return _clicked_button_style()
             else:
@@ -1890,9 +1954,11 @@ class GeoExplorer:
             if not self.selected_files:
                 self.column = None
                 self.color_dict = {}
+                self._deleted_categories = set()
                 return html.Div(), None, False, None, 1
-            elif column != self.column:
+            elif column != self.column or triggered in ["force-categorical"]:
                 self.color_dict = {}
+                self._deleted_categories = set()
             elif not column and triggered is None:
                 column = self.column
             elif self._concatted_data is None:
@@ -2141,6 +2207,7 @@ class GeoExplorer:
                     .value_counts()
                     .iter_rows()
                 )
+                current_columns = set(self._concatted_data.collect_schema().names())
                 add_data_func = partial(
                     _add_data_one_path,
                     max_rows=self.max_rows,
@@ -2154,6 +2221,7 @@ class GeoExplorer:
                     alpha=alpha,
                     n_rows_per_path=n_rows_per_path,
                     columns=self._columns,
+                    current_columns=current_columns,
                 )
                 results = [
                     add_data_func(path)
@@ -2267,9 +2335,8 @@ class GeoExplorer:
                 )
             )
             feature = features[index]
-            if not feature:
-                if DEBUG:
-                    raise ValueError(locals())
+            if feature is None:
+                # feature is None probably because of zoom/panning quickly after clicking feature
                 return dash.no_update, dash.no_update, None
             unique_id = feature["properties"]["_unique_id"]
             i = int(float(unique_id))
@@ -2384,14 +2451,14 @@ class GeoExplorer:
             self._current_table_view = clicked_path
 
             out_alert = dbc.Alert(
-                f"No rows in '{self._get_unique_stem(clicked_path)}' after filtering.",
+                f"No rows in '{self._get_unique_stem(clicked_path)}' after queries.",
                 color="info",
                 dismissable=True,
             )
 
             df, _ = self._concat_data(bounds=None, paths=[clicked_path])
             if df is not None:
-                df = df.drop("geometry").collect()
+                df = df.drop(ADDED_COLUMNS.difference({"_unique_id"})).collect()
             if df is None or not len(df):
                 # read data out of bounds to get table
                 _read_files(
@@ -2406,15 +2473,45 @@ class GeoExplorer:
                 )
                 df, _ = self._concat_data(bounds=None, paths=[clicked_path])
                 if df is None:
+                    self._current_table_view = None
                     return None, out_alert
-                df = df.drop("geometry").collect()
+                df = df.drop(ADDED_COLUMNS.difference({"_unique_id"})).collect()
 
             if not len(df) or not len(df.columns):
+                self._current_table_view = None
                 return None, out_alert
             if DEBUG:
                 df = df.with_columns(pl.col("_unique_id").alias("id"))
             else:
                 df = df.rename({"_unique_id": "id"})
+
+            if (
+                len(df) * len(df.columns) > 5_000_000
+                and " limit " not in self._queries.get(clicked_path, "").lower()
+            ):
+                cols = set(df.columns).difference(ADDED_COLUMNS).union({"area"})
+                query = _get_default_sql_query(df, cols)
+                for col in reversed(sorted(cols)):
+                    try:
+                        query = _get_sql_query_with_col(df, col, cols, all_cols=False)
+                        break
+                    except Exception as e:
+                        debug_print("failed query", e)
+
+                alert = dbc.Alert(
+                    html.Div(
+                        [
+                            f"Cannot display table of shape {len(df), len(df.columns)}. "
+                            f"Consider using an SQL query, e.g.",
+                            html.Br(),
+                            html.B(query),
+                        ]
+                    ),
+                    color="warning",
+                    dismissable=True,
+                )
+                return None, alert
+
             clicked_features = df.to_dicts()
             return clicked_features, None
 
@@ -2739,11 +2836,11 @@ class GeoExplorer:
     def _update_table(self, data, style_table):
         if not data:
             return None, None, style_table | {"height": "1vh"}, None
-        height = min(40, len(data) * 5 + 5)
         columns_union = set()
         for x in data:
             columns_union |= set(x)
         columns = [{"name": k, "id": k} for k in columns_union]
+        height = min(40, len(data) * 5 + 5)
         return (
             columns,
             data,
@@ -2840,7 +2937,7 @@ class GeoExplorer:
             f"{recurse=}",
             row,
             row["id"],
-            df.collect()["id"],
+            df.collect()["_unique_id"],
         )
         return row.row(0, named=True), geometry
 
@@ -2984,7 +3081,7 @@ class GeoExplorer:
                             tooltip_text="Note that this might be slow and memory heavy for large datasets",
                         ),
                         *queries,
-                    ]
+                    ],
                 ),
             ),
         ]
@@ -2996,12 +3093,12 @@ class GeoExplorer:
         paths: list[str] | None = None,
         _filter: bool = True,
     ) -> tuple[pl.LazyFrame | None, list[dbc.Alert] | None]:
-        dfs = []
+        dfs = {}
         alerts = set()
         for path in self.selected_files:
             path_parts = Path(path).parts
             for key in self._loaded_data:
-                if paths and (path not in paths and key not in paths):
+                if paths and (path not in paths and key not in paths) or key in dfs:
                     continue
                 key_parts = Path(key).parts
                 if not all(part in key_parts for part in path_parts):
@@ -3010,10 +3107,15 @@ class GeoExplorer:
                 if bounds is not None:
                     df = filter_by_bounds(df, bounds)
                 if self._deleted_categories and self.column in df:
-                    expression = (
-                        pl.col(self.column).is_in(list(self._deleted_categories))
-                        == False
-                    )
+                    try:
+                        expression = (
+                            pl.col(self.column).is_in(list(self._deleted_categories))
+                            == False
+                        )
+                    except Exception as e:
+                        raise type(e)(
+                            f"{e}. {self.column=}, {self._deleted_categories=}"
+                        )
                     if self.nan_label in self._deleted_categories:
                         expression &= pl.col(self.column).is_not_null()
                     df = df.filter(expression)
@@ -3030,12 +3132,10 @@ class GeoExplorer:
                 if self.splitted:
                     df = get_split_index(df)
 
-                debug_print("\n\n\nconcat", path, key)
-                debug_print(df.collect())
-                dfs.append(df)
+                dfs[key] = df
 
         if dfs:
-            df = pl.concat(dfs, how="diagonal_relaxed")
+            df = pl.concat(list(dfs.values()), how="diagonal_relaxed")
         else:
             df = None
 
@@ -3231,10 +3331,9 @@ class GeoExplorer:
         formatted_query = _add_cols_to_sql_query(query.replace('"', "'"))
         if " join " in formatted_query.lower():
             return self._polars_sql_join(df, formatted_query)
-        try:
+        if " df " in query:
             return pl.sql(formatted_query, eager=False)
-        except Exception:
-            return df.sql(formatted_query)
+        return df.sql(formatted_query)
 
     @time_method_call(_PROFILE_DICT)
     def _polars_sql_join(self, df, query):
@@ -3659,9 +3758,13 @@ def _add_data_one_path(
     alpha,
     n_rows_per_path,
     columns: dict[str, set[str]],
+    current_columns: set[str],
 ):
     columns: set[str] = {
-        col for key, cols in columns.items() for col in cols if path in key
+        col
+        for key, cols in columns.items()
+        for col in cols
+        if path in key and col in current_columns
     } | {"split_index"}
 
     df = concatted_data.filter(pl.col("__file_path").str.contains(path)).select(
