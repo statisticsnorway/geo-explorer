@@ -427,6 +427,7 @@ class GeoExplorer:
         )
         self._current_table_view = None
         self.max_read_size_per_callback = max_read_size_per_callback
+        self._force_categorical = False
 
         if is_jupyter():
             service_prefix = os.environ["JUPYTERHUB_SERVICE_PREFIX"].strip("/")
@@ -1287,21 +1288,21 @@ class GeoExplorer:
             bounds = self._nested_bounds_to_bounds(bounds)
 
             if triggered in ["file-deleted"]:
-                self._max_unique_id_int = 0
+                self._max_unique_id_int = -1
                 for path, df in self._loaded_data.items():
+                    self._max_unique_id_int += 1
                     id_prev = df.select(pl.col("_unique_id").first()).collect().item()
                     self._loaded_data[path] = df.with_columns(
                         _unique_id=_get_unique_id(self._max_unique_id_int)
                     )
-                    self._max_unique_id_int += 1
                     for idx in list(self.selected_features):
                         if idx[0] != id_prev[0]:
                             continue
 
                         # rounding values to avoid floating point precicion problems
-                        new_idx = f"{self._max_unique_id_int}{idx[2:]}"
+                        new_idx = f"{self._max_unique_id_int}.{idx[2:]}"
                         feature = self.selected_features.pop(idx)
-                        feature["_unique_id"] = new_idx
+                        feature["id"] = new_idx
                         self.selected_features[new_idx] = feature
 
                 update_table = True
@@ -1904,6 +1905,7 @@ class GeoExplorer:
             prevent_initial_call=True,
         )
         def reset_force_categorical(_):
+            self._force_categorical = False
             return 0
 
         @callback(
@@ -2044,9 +2046,10 @@ class GeoExplorer:
             force_categorical_button = _get_force_categorical_button(
                 values_no_nans, force_categorical_clicks
             )
+            self._force_categorical = (force_categorical_clicks or 0) % 2 == 1
             is_numeric: bool = (
-                force_categorical_clicks or 0
-            ) % 2 == 0 and values_no_nans.dtype.is_numeric()
+                not self._force_categorical and values_no_nans.dtype.is_numeric()
+            )
 
             if is_numeric and len(values_no_nans):
                 if len(values_no_nans_unique) <= k:
@@ -2453,6 +2456,7 @@ class GeoExplorer:
                 f"No rows in '{self._get_unique_stem(clicked_path)}' after queries.",
                 color="info",
                 dismissable=True,
+                duration=10_000,
             )
 
             df, _ = self._concat_data(bounds=None, paths=[clicked_path])
@@ -2492,7 +2496,9 @@ class GeoExplorer:
                 query = _get_default_sql_query(df, cols)
                 for col in reversed(sorted(cols)):
                     try:
-                        query = _get_sql_query_with_col(df, col, cols, all_cols=False)
+                        query = _get_sql_query_with_col(
+                            df.lazy(), col, cols, all_cols=False
+                        )
                         break
                     except Exception as e:
                         debug_print("failed query", e)
@@ -3108,6 +3114,7 @@ class GeoExplorer:
                 if (
                     self._deleted_categories
                     and self.column
+                    and not self._force_categorical
                     and self._has_column(key, self.column)
                     and self._get_dtype(key, self.column).is_numeric()
                 ):
@@ -3118,7 +3125,12 @@ class GeoExplorer:
                             x.children == error_mess for x in alerts if x is not None
                         )
                         alerts.add(
-                            dbc.Alert(error_mess, color="warning", dismissable=True)
+                            dbc.Alert(
+                                error_mess,
+                                color="warning",
+                                dismissable=True,
+                                duration=5_000,
+                            )
                         )
                     except AssertionError:
                         pass
