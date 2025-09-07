@@ -154,7 +154,7 @@ def _get_sql_query_with_col(
     df: pl.LazyFrame, col: str, columns: list[str], all_cols: bool
 ) -> str:
     if len(df.select(col).unique().collect()) <= 1:
-        return
+        raise ValueError(f"Not enough unique values in {col} (0 or 1)")
 
     def maybe_to_string(value: Any):
         if isinstance(value, str):
@@ -181,7 +181,7 @@ def _get_sql_query_with_col(
         query = f"SELECT {cols} FROM df WHERE {col}={maybe_to_string(value)}"
     results = pl.sql(query, eager=False).collect()
     if not len(results):
-        raise ValueError(f"No rows s query {query}")
+        raise ValueError(f"No rows after query {query}")
     if len(results) > 100_000:
         query += " LIMIT 100000"
     return query
@@ -1032,7 +1032,6 @@ class GeoExplorer:
             try:
                 self._append_to_bounds_series([selected_path])
             except Exception as e:
-                raise e
                 return dbc.Alert(
                     f"Couldn't read {selected_path}. {type(e)}: {e}",
                     color="warning",
@@ -3106,7 +3105,24 @@ class GeoExplorer:
                 df = self._loaded_data[key]
                 if bounds is not None:
                     df = filter_by_bounds(df, bounds)
-                if self._deleted_categories and self.column in df:
+                if (
+                    self._deleted_categories
+                    and self.column
+                    and self._has_column(key, self.column)
+                    and self._get_dtype(key, self.column).is_numeric()
+                ):
+                    try:
+                        error_mess = "Cannot remove categories from numeric columns. Use an SQL query instead"
+                        # make sure we only give one warning
+                        assert not any(
+                            x.children == error_mess for x in alerts if x is not None
+                        )
+                        alerts.add(
+                            dbc.Alert(error_mess, color="warning", dismissable=True)
+                        )
+                    except AssertionError:
+                        pass
+                elif self._deleted_categories and self.column in df:
                     try:
                         expression = (
                             pl.col(self.column).is_in(list(self._deleted_categories))
