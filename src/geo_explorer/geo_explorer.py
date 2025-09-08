@@ -3795,7 +3795,10 @@ def _add_data_one_path(
         if path in key and col in current_columns
     } | {"split_index"}
 
-    df = concatted_data.filter(pl.col("__file_path").str.contains(path)).select(
+    df = concatted_data.filter(
+        (pl.col("__file_path") == path)
+        | (pl.col("__file_path").str.contains(path + "/"))
+    ).select(
         "geometry", "_unique_id", *((column,) if column and column in columns else ())
     )
     n_rows = sum(count for key, count in n_rows_per_path.items() if path in key)
