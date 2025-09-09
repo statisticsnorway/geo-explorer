@@ -4093,7 +4093,11 @@ def _read_files(explorer, paths: list[str], mask=None, **kwargs) -> None:
     paths = [
         path
         for path in paths
-        if mask is None or shapely.intersects(mask, explorer._bounds_series[path])
+        if mask is None
+        or (
+            path in explorer._bounds_series
+            and shapely.intersects(mask, explorer._bounds_series[path])
+        )
     ]
     if not paths:
         return
