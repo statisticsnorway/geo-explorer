@@ -924,6 +924,9 @@ class GeoExplorer:
             )
         except KeyboardInterrupt:
             os.kill(os.getpid(), signal.SIGTERM)
+        finally:
+            print("\nExiting with configs:")
+            print(self._get_self_as_string_without_defaults())
 
     def _register_callbacks(self) -> None:
 
@@ -955,12 +958,7 @@ class GeoExplorer:
                 ):
                     print(k, v)
 
-            data = self._get_self_as_dict()
-            defaults = inspect.getfullargspec(self.__class__).kwonlydefaults
-            data = {
-                key: value for key, value in data.items() if value != defaults.get(key)
-            } | self._kwargs
-            txt = self._get_self_as_string(data)
+            txt = self._get_self_as_string_without_defaults()
             return html.Div(f"{txt}.run()"), True
 
         @callback(
@@ -1789,7 +1787,7 @@ class GeoExplorer:
         def update_splitter_style(_, column):
             if column is None:
                 self.column = None
-                self.splitted = None
+                self.splitted = False
                 self._deleted_categories = set()
             if self.splitted and column == "split_index":
                 return _clicked_button_style()
@@ -2489,7 +2487,7 @@ class GeoExplorer:
                 df = df.rename({"_unique_id": "id"})
 
             if (
-                len(df) * len(df.columns) > 5_000_000
+                len(df) * len(df.columns) > 1_000_000
                 and " limit " not in self._queries.get(clicked_path, "").lower()
             ):
                 cols = set(df.columns).difference(ADDED_COLUMNS).union({"area"})
@@ -2915,7 +2913,7 @@ class GeoExplorer:
         df, _ = self._concat_data(bounds=bounds, paths=[path])
         row = df.filter(pl.col("_unique_id") == unique_id)
         geometries = row.select("geometry").collect()["geometry"]
-        if not len(geometries):
+        if not len(geometries) and recurse:
             time.sleep(0.1)
             return self._get_selected_feature(
                 unique_id, path, bounds=None, recurse=False
@@ -2923,9 +2921,11 @@ class GeoExplorer:
         geometry = next(iter(geometries))
 
         if DEBUG:
-            row = row.with_columns(pl.col("_unique_id").alias("id"))
+            row = row.drop("id", strict=False).with_columns(
+                pl.col("_unique_id").alias("id")
+            )
         else:
-            row = row.rename({"_unique_id": "id"})
+            row = row.drop("id", strict=False).rename({"_unique_id": "id"}, strict=True)
 
         row = row.drop(
             *ADDED_COLUMNS.difference({"_unique_id"}).union({"split_index"}),
@@ -3163,7 +3163,15 @@ class GeoExplorer:
                 dfs[key] = df
 
         if dfs:
-            df = pl.concat(list(dfs.values()), how="diagonal_relaxed")
+            try:
+                df = (
+                    pl.concat(list(dfs.values()), how="diagonal_relaxed")
+                    .collect()
+                    .lazy()
+                )
+            except Exception as e:
+                df = None
+                alerts.add(f"{type(e).__name__}: {e}")
         else:
             df = None
 
@@ -3617,6 +3625,11 @@ class GeoExplorer:
             and not (isinstance(value, (dict, list, tuple)) and not value)
         }
 
+        if "wms_layers_checked" in data and not any(
+            x for x in data["wms_layers_checked"].values()
+        ):
+            data.pop("wms_layers_checked")
+
         if self.selected_files:
             data = {
                 "data": {
@@ -3645,6 +3658,14 @@ class GeoExplorer:
 
         txt = ", ".join(f"{k}={maybe_to_string(k, v)}" for k, v in data.items())
         return f"{self.__class__.__name__}({txt})"
+
+    def _get_self_as_string_without_defaults(self):
+        data = self._get_self_as_dict()
+        defaults = inspect.getfullargspec(self.__class__).kwonlydefaults
+        data = {
+            key: value for key, value in data.items() if value != defaults.get(key)
+        } | self._kwargs
+        return self._get_self_as_string(data)
 
     def __str__(self) -> str:
         """String representation."""
@@ -3911,6 +3932,8 @@ def _fix_colors(df, column, bins, is_numeric, color_dict, nan_color, nan_label):
         ]
         bin_index_expr = pl.when(conditions[0]).then(pl.lit(color_dict[0]))
         for i, cond in enumerate(conditions[1:], start=1):
+            if i not in color_dict:
+                raise KeyError(f"{i} not in {color_dict}")
             bin_index_expr = bin_index_expr.when(cond).then(pl.lit(color_dict[i]))
         notnas = notnas.with_columns(bin_index_expr.alias("_color"))
 
@@ -4090,12 +4113,14 @@ def _get_unique_id(i: float) -> pl.Expr:
 def _read_files(explorer, paths: list[str], mask=None, **kwargs) -> None:
     if not paths:
         return
+    bounds_set = set(explorer._bounds_series.index)
+
     paths = [
         path
         for path in paths
         if mask is None
         or (
-            path in explorer._bounds_series
+            path in bounds_set
             and shapely.intersects(mask, explorer._bounds_series[path])
         )
     ]
@@ -4412,13 +4437,11 @@ def _is_sql(txt: Any) -> bool:
 def _is_likely_geopandas_func(df, txt: Any):
     if not isinstance(txt, str) or "pl." in txt:
         return False
-    # geopandas_methods = {
-    #     # "buffer", "area", "length", "is_empty", "sjoin", "overlay", "clip", "sjoin_nearest", "bounds", "boundary", "geom_type", "set_precision", "make_valid", "is_valid", "centroid", ""
-    # }
     geopandas_methods = {
         x
         for x in set(dir(GeoDataFrame))
         .union(set(dir(GeoSeries)))
+        .union(set(dir(sg)))
         .difference(set(dir(pd.DataFrame)))
         .difference(set(dir(pd.Series)))
         .difference(set(dir(pd.Series.str)))
