@@ -924,6 +924,9 @@ class GeoExplorer:
             )
         except KeyboardInterrupt:
             os.kill(os.getpid(), signal.SIGTERM)
+        finally:
+            print("\nExiting with configs:")
+            print(self._get_self_as_string_without_defaults())
 
     def _register_callbacks(self) -> None:
 
@@ -955,12 +958,7 @@ class GeoExplorer:
                 ):
                     print(k, v)
 
-            data = self._get_self_as_dict()
-            defaults = inspect.getfullargspec(self.__class__).kwonlydefaults
-            data = {
-                key: value for key, value in data.items() if value != defaults.get(key)
-            } | self._kwargs
-            txt = self._get_self_as_string(data)
+            txt = self._get_self_as_string_without_defaults()
             return html.Div(f"{txt}.run()"), True
 
         @callback(
@@ -2915,7 +2913,7 @@ class GeoExplorer:
         df, _ = self._concat_data(bounds=bounds, paths=[path])
         row = df.filter(pl.col("_unique_id") == unique_id)
         geometries = row.select("geometry").collect()["geometry"]
-        if not len(geometries):
+        if not len(geometries) and recurse:
             time.sleep(0.1)
             return self._get_selected_feature(
                 unique_id, path, bounds=None, recurse=False
@@ -3163,7 +3161,15 @@ class GeoExplorer:
                 dfs[key] = df
 
         if dfs:
-            df = pl.concat(list(dfs.values()), how="diagonal_relaxed")
+            try:
+                df = (
+                    pl.concat(list(dfs.values()), how="diagonal_relaxed")
+                    .collect()
+                    .lazy()
+                )
+            except Exception as e:
+                df = None
+                alerts.add(f"{type(e).__name__}: {e}")
         else:
             df = None
 
@@ -3646,6 +3652,14 @@ class GeoExplorer:
         txt = ", ".join(f"{k}={maybe_to_string(k, v)}" for k, v in data.items())
         return f"{self.__class__.__name__}({txt})"
 
+    def _get_self_as_string_without_defaults(self):
+        data = self._get_self_as_dict()
+        defaults = inspect.getfullargspec(self.__class__).kwonlydefaults
+        data = {
+            key: value for key, value in data.items() if value != defaults.get(key)
+        } | self._kwargs
+        return self._get_self_as_string(data)
+
     def __str__(self) -> str:
         """String representation."""
         data = self._get_self_as_dict()
@@ -3911,6 +3925,8 @@ def _fix_colors(df, column, bins, is_numeric, color_dict, nan_color, nan_label):
         ]
         bin_index_expr = pl.when(conditions[0]).then(pl.lit(color_dict[0]))
         for i, cond in enumerate(conditions[1:], start=1):
+            if i not in color_dict:
+                raise KeyError(f"{i} not in {color_dict}")
             bin_index_expr = bin_index_expr.when(cond).then(pl.lit(color_dict[i]))
         notnas = notnas.with_columns(bin_index_expr.alias("_color"))
 
@@ -4090,12 +4106,14 @@ def _get_unique_id(i: float) -> pl.Expr:
 def _read_files(explorer, paths: list[str], mask=None, **kwargs) -> None:
     if not paths:
         return
+    bounds_set = set(explorer._bounds_series.index)
+
     paths = [
         path
         for path in paths
         if mask is None
         or (
-            path in explorer._bounds_series
+            path in bounds_set
             and shapely.intersects(mask, explorer._bounds_series[path])
         )
     ]
