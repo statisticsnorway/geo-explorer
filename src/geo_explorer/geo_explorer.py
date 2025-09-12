@@ -1787,7 +1787,7 @@ class GeoExplorer:
         def update_splitter_style(_, column):
             if column is None:
                 self.column = None
-                self.splitted = None
+                self.splitted = False
                 self._deleted_categories = set()
             if self.splitted and column == "split_index":
                 return _clicked_button_style()
@@ -2487,7 +2487,7 @@ class GeoExplorer:
                 df = df.rename({"_unique_id": "id"})
 
             if (
-                len(df) * len(df.columns) > 5_000_000
+                len(df) * len(df.columns) > 1_000_000
                 and " limit " not in self._queries.get(clicked_path, "").lower()
             ):
                 cols = set(df.columns).difference(ADDED_COLUMNS).union({"area"})
@@ -2921,9 +2921,11 @@ class GeoExplorer:
         geometry = next(iter(geometries))
 
         if DEBUG:
-            row = row.with_columns(pl.col("_unique_id").alias("id"))
+            row = row.drop("id", strict=False).with_columns(
+                pl.col("_unique_id").alias("id")
+            )
         else:
-            row = row.rename({"_unique_id": "id"})
+            row = row.drop("id", strict=False).rename({"_unique_id": "id"}, strict=True)
 
         row = row.drop(
             *ADDED_COLUMNS.difference({"_unique_id"}).union({"split_index"}),
@@ -3622,6 +3624,11 @@ class GeoExplorer:
             and not key.startswith("_")
             and not (isinstance(value, (dict, list, tuple)) and not value)
         }
+
+        if "wms_layers_checked" in data and not any(
+            x for x in data["wms_layers_checked"].values()
+        ):
+            data.pop("wms_layers_checked")
 
         if self.selected_files:
             data = {
@@ -4430,13 +4437,11 @@ def _is_sql(txt: Any) -> bool:
 def _is_likely_geopandas_func(df, txt: Any):
     if not isinstance(txt, str) or "pl." in txt:
         return False
-    # geopandas_methods = {
-    #     # "buffer", "area", "length", "is_empty", "sjoin", "overlay", "clip", "sjoin_nearest", "bounds", "boundary", "geom_type", "set_precision", "make_valid", "is_valid", "centroid", ""
-    # }
     geopandas_methods = {
         x
         for x in set(dir(GeoDataFrame))
         .union(set(dir(GeoSeries)))
+        .union(set(dir(sg)))
         .difference(set(dir(pd.DataFrame)))
         .difference(set(dir(pd.Series)))
         .difference(set(dir(pd.Series.str)))
