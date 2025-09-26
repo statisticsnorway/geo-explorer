@@ -78,8 +78,8 @@ FILE_CHECKED_COLOR: str = "#3e82ff"
 DEFAULT_ZOOM: int = 12
 DEFAULT_CENTER: tuple[float, float] = (59.91740845, 10.71394444)
 CURRENT_YEAR: int = datetime.datetime.now().year
-FILE_SPLITTER_TXT: str = "-_-"
-ADDED_COLUMNS = {
+FILE_SPLITTER_TXT: str = "/splitted-"
+HIDDEN_ADDED_COLUMNS = {
     "minx",
     "miny",
     "maxx",
@@ -88,6 +88,7 @@ ADDED_COLUMNS = {
     "__file_path",
     "geometry",
 }
+ADDED_COLUMNS = HIDDEN_ADDED_COLUMNS | {"area"}
 ns = Namespace("onEachFeatureToggleHighlight", "default")
 
 DEBUG: bool = False
@@ -216,15 +217,30 @@ def read_file(
             df, dtypes = _geopandas_to_polars(df, path)
             return df.lazy(), dtypes
     rows = path.split(FILE_SPLITTER_TXT)[-1]
+    path = path.split(FILE_SPLITTER_TXT)[0]
     nrow, nth_batch = rows.split("-")
     nrow = int(nrow)
     nth_batch = int(nth_batch)
-    path = path.split(FILE_SPLITTER_TXT)[0]
     try:
         table = read_nrows(path, nrow, nth_batch, file_system=file_system)
     except Exception:
         table = read_nrows(path, nrow, nth_batch, file_system=None)
     return _pyarrow_to_polars(table, path, file_system)
+
+
+def run_or_reset() -> Callable:
+    def decorator(method):
+        @wraps(method)
+        def wrapper(self, *args, **kwargs):
+            try:
+                return method(self, *args, **kwargs)
+            except Exception as e:
+                self._reset()
+            return method(self, *args, **kwargs)
+
+        return wrapper
+
+    return decorator
 
 
 class GeoExplorer:
@@ -967,9 +983,12 @@ class GeoExplorer:
             State("map", "zoom"),
         )
         def maybe_tip_about_buffer(_, zoom):
-            if self._concatted_data is None:
+            if self._concatted_data is None or zoom <= 11:
                 return None
-            area_max = self._concatted_data.select("area").max().collect().item()
+            try:
+                area_max = self._concatted_data.select("area").max().collect().item()
+            except pl.exceptions.ColumnNotFoundError:
+                return None
             if area_max is None:
                 return None
             return (
@@ -977,7 +996,7 @@ class GeoExplorer:
                     "Tip: add query 'df.buffer(3000)' if geometries are difficult to see",
                     style={"font-size": 20},
                 )
-                if zoom <= 11 and 0 < area_max < 10000
+                if 0 < area_max < 10000
                 else None
             )
 
@@ -1031,6 +1050,8 @@ class GeoExplorer:
             try:
                 self._append_to_bounds_series([selected_path])
             except Exception as e:
+                if DEBUG:
+                    raise e
                 return dbc.Alert(
                     f"Couldn't read {selected_path}. {type(e)}: {e}",
                     color="warning",
@@ -1076,9 +1097,10 @@ class GeoExplorer:
             if triggered != "missing":
                 box = shapely.box(*self._nested_bounds_to_bounds(bounds))
                 files_in_bounds = set(sg.sfilter(self._bounds_series, box).index)
-                files_in_bounds |= set(
+                non_geodata = set(
                     self._bounds_series[lambda x: (x.isna()) | (x.is_empty)].index
                 )
+                files_in_bounds |= non_geodata
 
                 def is_checked(path) -> bool:
                     return any(
@@ -1094,72 +1116,34 @@ class GeoExplorer:
                         if path not in self._loaded_data and is_checked(path)
                     }
                 )
-                if not all(path in self._loaded_data_sizes for path in missing):
-                    paths_missing_size = [
-                        path for path in missing if path not in self._loaded_data_sizes
-                    ]
-                    with ThreadPoolExecutor() as executor:
-                        more_sizes = {
-                            path: x["size"]
-                            for path, x in zip(
-                                paths_missing_size,
-                                executor.map(self.file_system.info, paths_missing_size),
-                                strict=True,
-                            )
-                        }
-                    self._loaded_data_sizes |= more_sizes
 
-            if triggered != "interval-component":
-                new_missing = []
-                for path in missing:
-                    size = self._loaded_data_sizes[path]
-                    if size < self.max_read_size_per_callback:
-                        new_missing.append(path)
-                        continue
-                    with self.file_system.open(path, "rb") as file:
-                        nrow = pq.read_metadata(file).num_rows
-                    n = 30
-                    rows_to_read = nrow // n
-                    for i in range(n):
-                        new_path = path + f"{FILE_SPLITTER_TXT}{rows_to_read}-{i}"
-                        if new_path in missing:
-                            continue
-                        new_missing.append(new_path)
-                        self._loaded_data_sizes[new_path] = size / n
-                        self._bounds_series = pd.concat(
-                            [
-                                self._bounds_series,
-                                GeoSeries({new_path: self._bounds_series.loc[path]}),
-                            ]
-                        )
-                missing = new_missing
-
-            if missing:
-                if len(missing) > 10:
-                    to_read = 0
-                    cumsum = 0
-                    for i, path in enumerate(missing):
-                        size = self._loaded_data_sizes[path]
-                        cumsum += size
-                        to_read += 1
-                        if cumsum > 500_000_000 or to_read > cpu_count() * 2:
-                            break
-                else:
-                    to_read = min(10, len(missing))
-                debug_print(f"{to_read=}, {len(missing)=}")
-                if len(missing) > to_read:
-                    _read_files(self, missing[:to_read])
-                    missing = missing[to_read:]
-                    disabled = False if len(missing) else True
-                    new_data_read = dash.no_update if len(missing) else False
-                else:
-                    _read_files(self, missing)
-                    missing = []
-                    disabled = True
-                    new_data_read = True
-            else:
+            if not missing:
                 new_data_read = True
                 disabled = True
+                return new_data_read, missing, disabled
+
+            if len(missing) > 10:
+                to_read = 0
+                cumsum = 0
+                for path in missing:
+                    size = self._loaded_data_sizes[path]
+                    cumsum += size
+                    to_read += 1
+                    if cumsum > 500_000_000 or to_read > cpu_count() * 2:
+                        break
+            else:
+                to_read = min(10, len(missing))
+            debug_print(f"{to_read=}, {len(missing)=}")
+            if len(missing) > to_read:
+                _read_files(self, missing[:to_read])
+                missing = missing[to_read:]
+                disabled = False if len(missing) else True
+                new_data_read = dash.no_update if len(missing) else False
+            else:
+                _read_files(self, missing)
+                missing = []
+                disabled = True
+                new_data_read = True
 
             debug_print(
                 "get_files_in_bounds ferdig etter",
@@ -1286,22 +1270,22 @@ class GeoExplorer:
             bounds = self._nested_bounds_to_bounds(bounds)
 
             if triggered in ["file-deleted"]:
-                self._max_unique_id_int = -1
-                for path, df in self._loaded_data.items():
-                    self._max_unique_id_int += 1
-                    id_prev = df.select(pl.col("_unique_id").first()).collect().item()
-                    self._loaded_data[path] = df.with_columns(
-                        _unique_id=_get_unique_id(self._max_unique_id_int)
-                    )
-                    for idx in list(self.selected_features):
-                        if idx[0] != id_prev[0]:
-                            continue
+                # self._max_unique_id_int = -1
+                # for path, df in self._loaded_data.items():
+                #     self._max_unique_id_int += 1
+                #     id_prev = df.select(pl.col("_unique_id").first()).collect().item()
+                #     self._loaded_data[path] = df.with_columns(
+                #         _unique_id=_get_unique_id(self._max_unique_id_int)
+                #     )
+                #     for idx in list(self.selected_features):
+                #         if idx[0] != id_prev[0]:
+                #             continue
 
-                        # rounding values to avoid floating point precicion problems
-                        new_idx = f"{self._max_unique_id_int}.{idx[2:]}"
-                        feature = self.selected_features.pop(idx)
-                        feature["id"] = new_idx
-                        self.selected_features[new_idx] = feature
+                #         # rounding values to avoid floating point precicion problems
+                #         new_idx = f"{self._max_unique_id_int}.{idx[2:]}"
+                #         feature = self.selected_features.pop(idx)
+                #         feature["id"] = new_idx
+                #         self.selected_features[new_idx] = feature
 
                 update_table = True
             else:
@@ -1678,7 +1662,7 @@ class GeoExplorer:
                     f"{join_df_name}.{col}" for col in cols_to_keep
                 )
 
-                for col in set(join_df_cols).difference(ADDED_COLUMNS | {"area"}):
+                for col in set(join_df_cols).difference(ADDED_COLUMNS):
 
                     if col not in df_cols or self._get_dtype(join_path, col).is_float():
                         continue
@@ -1740,7 +1724,7 @@ class GeoExplorer:
                 )
             )
 
-            for i, col in enumerate(set(df_cols).difference(ADDED_COLUMNS)):
+            for i, col in enumerate(set(df_cols).difference(HIDDEN_ADDED_COLUMNS)):
                 try:
                     query = _get_sql_query_with_col(
                         df, col, df_cols, all_cols=i % 2 == 0
@@ -1870,9 +1854,9 @@ class GeoExplorer:
             if self._concatted_data is None:
                 return dash.no_update
             cols_to_drop = (
-                ADDED_COLUMNS
+                HIDDEN_ADDED_COLUMNS
                 if not DEBUG
-                else ADDED_COLUMNS.difference({"_unique_id", "__file_path"})
+                else HIDDEN_ADDED_COLUMNS.difference({"_unique_id", "__file_path"})
             )
             columns = (
                 {
@@ -2183,8 +2167,6 @@ class GeoExplorer:
             )
             t = perf_counter()
 
-            # if isinstance(triggered, dict) and triggered["type"] == "colorpicker" and
-
             if max_rows_value is not None:
                 self.max_rows = max_rows_value
 
@@ -2371,7 +2353,7 @@ class GeoExplorer:
                         )
                     )
                     .drop(
-                        *ADDED_COLUMNS.difference({"_unique_id"}).union(
+                        *HIDDEN_ADDED_COLUMNS.difference({"_unique_id"}).union(
                             {"split_index"}
                         ),
                         strict=False,
@@ -2459,7 +2441,7 @@ class GeoExplorer:
 
             df, _ = self._concat_data(bounds=None, paths=[clicked_path])
             if df is not None:
-                df = df.drop(ADDED_COLUMNS.difference({"_unique_id"})).collect()
+                df = df.drop(HIDDEN_ADDED_COLUMNS.difference({"_unique_id"})).collect()
             if df is None or not len(df):
                 # read data out of bounds to get table
                 _read_files(
@@ -2476,7 +2458,7 @@ class GeoExplorer:
                 if df is None:
                     self._current_table_view = None
                     return None, out_alert
-                df = df.drop(ADDED_COLUMNS.difference({"_unique_id"})).collect()
+                df = df.drop(HIDDEN_ADDED_COLUMNS.difference({"_unique_id"})).collect()
 
             if not len(df) or not len(df.columns):
                 self._current_table_view = None
@@ -2490,7 +2472,7 @@ class GeoExplorer:
                 len(df) * len(df.columns) > 1_000_000
                 and " limit " not in self._queries.get(clicked_path, "").lower()
             ):
-                cols = set(df.columns).difference(ADDED_COLUMNS).union({"area"})
+                cols = set(df.columns).difference(HIDDEN_ADDED_COLUMNS)
                 query = _get_default_sql_query(df, cols)
                 for col in reversed(sorted(cols)):
                     try:
@@ -2513,6 +2495,7 @@ class GeoExplorer:
                     color="warning",
                     dismissable=True,
                 )
+                self._current_table_view = None
                 return None, alert
 
             clicked_features = df.to_dicts()
@@ -2882,6 +2865,23 @@ class GeoExplorer:
             lambda x: ~x.index.isin(deleted_files2)
         ]
 
+        self._max_unique_id_int = -1
+        for path, df in self._loaded_data.items():
+            self._max_unique_id_int += 1
+            id_prev = df.select(pl.col("_unique_id").first()).collect().item()
+            self._loaded_data[path] = df.with_columns(
+                _unique_id=_get_unique_id(self._max_unique_id_int)
+            )
+            for idx in list(self.selected_features):
+                if idx[0] != id_prev[0]:
+                    continue
+
+                # rounding values to avoid floating point precicion problems
+                new_idx = f"{self._max_unique_id_int}.{idx[2:]}"
+                feature = self.selected_features.pop(idx)
+                feature["id"] = new_idx
+                self.selected_features[new_idx] = feature
+
         return None, None
 
     @time_method_call(_PROFILE_DICT)
@@ -2928,7 +2928,7 @@ class GeoExplorer:
             row = row.drop("id", strict=False).rename({"_unique_id": "id"}, strict=True)
 
         row = row.drop(
-            *ADDED_COLUMNS.difference({"_unique_id"}).union({"split_index"}),
+            *HIDDEN_ADDED_COLUMNS.difference({"_unique_id"}).union({"split_index"}),
             strict=False,
         ).collect()
 
@@ -3218,7 +3218,9 @@ class GeoExplorer:
                 )
 
         # df_with_added_cols = df.select(ADDED_COLUMNS.difference({"geometry"}))
-        df2 = df.drop(ADDED_COLUMNS.difference({"geometry", "_unique_id"})).collect()
+        df2 = df.drop(
+            HIDDEN_ADDED_COLUMNS.difference({"geometry", "_unique_id"})
+        ).collect()
         df2, alert = self._run_df_function(df2, df, query, path)
         if df2 is None:
             return df, alert
@@ -3282,10 +3284,10 @@ class GeoExplorer:
             )
             df2 = (
                 _polars_to_gdf(
-                    df2.drop(*ADDED_COLUMNS.difference({"geometry"})).collect()
+                    df2.drop(*HIDDEN_ADDED_COLUMNS.difference({"geometry"})).collect()
                 )
                 if is_likely_geopandas
-                else df2.drop(*ADDED_COLUMNS).collect().to_pandas()
+                else df2.drop(*HIDDEN_ADDED_COLUMNS).collect().to_pandas()
             )
             locals()[name] = df2
             globals()[name] = df2
@@ -3343,7 +3345,7 @@ class GeoExplorer:
         if isinstance(called, GeoSeries):
             geometries, areas, bounds = _get_area_and_bounds(geometries=called.values)
             called = _add_columns(
-                df.drop(ADDED_COLUMNS),
+                df.drop(HIDDEN_ADDED_COLUMNS),
                 geometries,
                 areas,
                 bounds,
@@ -3573,26 +3575,23 @@ class GeoExplorer:
 
         self.wms[wms_name] = constructor(**(current_kwargs | kwargs))
 
-    def _append_to_bounds_series(self, paths) -> None:
+    def _append_to_bounds_series(self, paths, recurse: bool = True) -> None:
         try:
-            child_paths = _get_child_paths(paths, self.file_system)
+            child_paths = self._get_child_paths(paths)
+            self._loaded_data_sizes |= child_paths
             paths_with_meta, paths_without_meta = (
-                self._get_paths_with_and_without_metadata(child_paths)
+                self._get_paths_with_and_without_metadata(list(child_paths))
             )
             more_bounds = _get_bounds_series_as_4326(
                 paths_with_meta,
                 file_system=self.file_system,
             )
-        except Exception:
-            # reload file system to avoid cached reading of old files that don't exist any more
+        except Exception as e:
+            if not recurse:
+                raise e
+            # reload file system to avoid cached reading of files that don't exist any more
             self.file_system = self.file_system.__class__()
-            child_paths = _get_child_paths(paths, self.file_system)
-            paths_with_meta, paths_without_meta = (
-                self._get_paths_with_and_without_metadata(child_paths)
-            )
-            more_bounds = _get_bounds_series_as_4326(
-                paths_with_meta, file_system=self.file_system
-            )
+            return self._append_to_bounds_series(paths, recurse=False)
         self._bounds_series = pd.concat(
             [
                 self._bounds_series,
@@ -3603,6 +3602,49 @@ class GeoExplorer:
                 ),
             ]
         )[lambda x: ~x.index.duplicated()]
+
+    def _get_child_paths(self, paths):
+        child_paths = {}
+        for path in paths:
+            path = _standardize_path(path)
+            child_paths |= self._get_paths_and_sizes(path)
+        return child_paths
+
+    def _get_paths_and_sizes(self, path):
+        suffix = Path(path).suffix
+        child_pattern = f"**/*{suffix}" if suffix else "**/*.*"
+        child_paths = {
+            _standardize_path(child_path): x["size"]
+            for child_path, x in self.file_system.glob(
+                str(Path(path) / child_pattern), detail=True
+            ).items()
+        }
+        out_paths = {}
+        more_bounds = []
+        for child_path, size in child_paths.items():
+            if size < self.max_read_size_per_callback:
+                out_paths[child_path] = size
+                continue
+            with self.file_system.open(path, "rb") as file:
+                nrow = pq.read_metadata(file).num_rows
+            n = 30
+            rows_to_read = nrow // n
+            for i in range(n):
+                new_path = path + f"{FILE_SPLITTER_TXT}{rows_to_read}-{i}"
+                out_paths[new_path] = size / n
+                more_bounds.append(GeoSeries({new_path: self._bounds_series.loc[path]}))
+            new_path = path + f"{FILE_SPLITTER_TXT}{rows_to_read}-{n}"
+            out_paths[new_path] = size / n
+            more_bounds.append(GeoSeries({new_path: self._bounds_series.loc[path]}))
+
+        self._bounds_series = pd.concat([self._bounds_series] + more_bounds)
+
+        if len(out_paths) > 1:
+            out_paths.pop(_standardize_path(path), None)
+            return out_paths
+        if len(out_paths):
+            return out_paths
+        return {_standardize_path(path): self.file_system.info(path)["size"]}
 
     def _get_paths_with_and_without_metadata(self, paths):
         filt = [
@@ -4026,7 +4068,7 @@ def _pyarrow_to_polars(
             raise e
         df = pl.from_pandas(table.to_pandas())
     dtypes = dict(zip(df.columns, df.dtypes, strict=False))
-    return _prepare_df(df.lazy(), path, metadata), dtypes
+    return _prepare_df(df.lazy(), path, metadata, dtypes)
 
 
 @time_function_call(_PROFILE_DICT)
@@ -4041,7 +4083,7 @@ def _get_area_and_bounds(geometries: GeometryArray | GeoSeries):
 
 
 @time_function_call(_PROFILE_DICT)
-def _prepare_df(df: pl.LazyFrame, path, metadata) -> pl.LazyFrame:
+def _prepare_df(df: pl.LazyFrame, path, metadata, dtypes) -> pl.LazyFrame:
     primary_column = metadata["primary_column"]
     geo_metadata = metadata["columns"][primary_column]
     crs = geo_metadata["crs"]
@@ -4053,8 +4095,9 @@ def _prepare_df(df: pl.LazyFrame, path, metadata) -> pl.LazyFrame:
     )
     df = df.drop(primary_column)
     df = _add_columns(df, geometries, areas, bounds, path)
+    df, dtypes = _remove_columns(df, dtypes)
     # collecting, then back to lazy to only do these calculations once
-    return df.collect().lazy()
+    return df.collect().lazy(), dtypes
 
 
 @time_function_call(_PROFILE_DICT)
@@ -4062,8 +4105,9 @@ def _geopandas_to_polars(df: GeoDataFrame, path) -> pl.DataFrame:
     geometries, areas, bounds = _get_area_and_bounds(geometries=df.geometry.values)
     df = df.drop(columns=df.geometry.name)
     df = pl.from_pandas(df)
-    dtypes = dict(zip(df.columns, df.dtypes, strict=False))
+    dtypes = dict(zip(df.columns, df.dtypes, strict=True))
     df = _add_columns(df, geometries, areas, bounds, path)
+    df, dtypes = _remove_columns(df, dtypes)
     return df, dtypes
 
 
@@ -4093,6 +4137,13 @@ def _add_columns(df, geometries, areas, bounds, path):
         pl.Series("maxy", bounds[:, 3]),
         __file_path=pl.lit(path),
     )
+
+
+def _remove_columns(df, dtypes):
+    cols_to_drop = {col for col, dtype in dtypes.items() if dtype.is_nested()}
+    return df.drop(*cols_to_drop), {
+        col: dtype for col, dtype in dtypes.items() if col not in cols_to_drop
+    }
 
 
 @time_function_call(_PROFILE_DICT)
@@ -4165,30 +4216,6 @@ def _get_stem_from_parent(path):
     name = Path(path).stem
     parent_name = Path(path).parent.stem
     return f"{parent_name}/{name}"
-
-
-def _get_child_paths(paths, file_system):
-    child_paths = set()
-    for path in paths:
-        path = _standardize_path(path)
-        suffix = Path(path).suffix
-        if suffix:
-            these_child_paths = {
-                _standardize_path(x)
-                for x in file_system.glob(str(Path(path) / f"**/*{suffix}"))
-                if Path(path).parts != Path(x).parts
-            }
-        else:
-            these_child_paths = {
-                _standardize_path(x)
-                for x in file_system.glob(str(Path(path) / f"**/*.*"))
-                if Path(path).parts != Path(x).parts
-            }
-        if not these_child_paths:
-            child_paths.add(path)
-        else:
-            child_paths |= these_child_paths
-    return child_paths
 
 
 def _try_to_get_bounds_else_none(
