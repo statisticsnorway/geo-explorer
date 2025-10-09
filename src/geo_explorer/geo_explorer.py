@@ -213,7 +213,13 @@ def read_file(
             table = _read_pyarrow(path, file_system=file_system, **kwargs)
             return _pyarrow_to_polars(table, path, file_system)
         except Exception as e:
-            if "file size is 0 bytes" in str(e):
+            if any(
+                txt in str(e)
+                for txt in [
+                    "file size is 0 bytes",
+                    "Parquet magic bytes not found in footer",
+                ]
+            ):
                 return None, None
             df = sg.read_geopandas(path, file_system=file_system, **kwargs)
             df, dtypes = _geopandas_to_polars(df, path)
@@ -1277,23 +1283,6 @@ class GeoExplorer:
             bounds = self._nested_bounds_to_bounds(bounds)
 
             if triggered in ["file-deleted"]:
-                # self._max_unique_id_int = -1
-                # for path, df in self._loaded_data.items():
-                #     self._max_unique_id_int += 1
-                #     id_prev = df.select(pl.col("_unique_id").first()).collect().item()
-                #     self._loaded_data[path] = df.with_columns(
-                #         _unique_id=_get_unique_id(self._max_unique_id_int)
-                #     )
-                #     for idx in list(self.selected_features):
-                #         if idx[0] != id_prev[0]:
-                #             continue
-
-                #         # rounding values to avoid floating point precicion problems
-                #         new_idx = f"{self._max_unique_id_int}.{idx[2:]}"
-                #         feature = self.selected_features.pop(idx)
-                #         feature["id"] = new_idx
-                #         self.selected_features[new_idx] = feature
-
                 update_table = True
             else:
                 update_table = dash.no_update
