@@ -212,7 +212,9 @@ def read_file(
             # return _prepare_df(df, path, metadata)
             table = _read_pyarrow(path, file_system=file_system, **kwargs)
             return _pyarrow_to_polars(table, path, file_system)
-        except Exception:
+        except Exception as e:
+            if "file size is 0 bytes" in str(e):
+                return None, None
             df = sg.read_geopandas(path, file_system=file_system, **kwargs)
             df, dtypes = _geopandas_to_polars(df, path)
             return df.lazy(), dtypes
@@ -228,19 +230,23 @@ def read_file(
     return _pyarrow_to_polars(table, path, file_system)
 
 
-def run_or_reset() -> Callable:
-    def decorator(method):
-        @wraps(method)
-        def wrapper(self, *args, **kwargs):
-            try:
-                return method(self, *args, **kwargs)
-            except Exception as e:
-                self._reset()
-            return method(self, *args, **kwargs)
+def run_or_reset(method) -> Callable:
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        try:
+            results = method(self, *args, **kwargs)
+            self._is_recursing = False
+            return results
+        except Exception as e:
+            if self._is_recursing:
+                raise e
+            self._reset()
+            self._is_recursing = True
+            results = method(self, *args, **kwargs)
+            self._is_recursing = False
+            return results
 
-        return wrapper
-
-    return decorator
+    return wrapper
 
 
 class GeoExplorer:
@@ -444,6 +450,7 @@ class GeoExplorer:
         self._current_table_view = None
         self.max_read_size_per_callback = max_read_size_per_callback
         self._force_categorical = False
+        self._is_recursing = False
 
         if is_jupyter():
             service_prefix = os.environ["JUPYTERHUB_SERVICE_PREFIX"].strip("/")
@@ -983,7 +990,7 @@ class GeoExplorer:
             State("map", "zoom"),
         )
         def maybe_tip_about_buffer(_, zoom):
-            if self._concatted_data is None or zoom <= 11:
+            if self._concatted_data is None or zoom >= 11:
                 return None
             try:
                 area_max = self._concatted_data.select("area").max().collect().item()
@@ -2906,6 +2913,7 @@ class GeoExplorer:
         maxy, maxx = maxs
         return minx, miny, maxx, maxy
 
+    @run_or_reset
     @time_method_call(_PROFILE_DICT)
     def _get_selected_feature(
         self, unique_id: float, path: str, bounds: tuple[float], recurse: bool = True
@@ -3299,9 +3307,7 @@ class GeoExplorer:
             except NameError:
                 error_mess += query_error
             except Exception as e:
-                error_mess += (
-                    f"Query function failed with pandas ({type(e).__name__}: {e}) "
-                )
+                error_mess += f"Query function failed with {'geo' if is_likely_geopandas else ''}pandas ({type(e).__name__}: {e}) "
                 for name in added_to_globals:
                     globals().pop(name)
                 return None, error_mess
@@ -3708,6 +3714,16 @@ class GeoExplorer:
             key: value for key, value in data.items() if value != defaults.get(key)
         } | self._kwargs
         return self._get_self_as_string(data)
+
+    def _reset(self):
+        self._max_unique_id_int = 0
+        for path, df in self._loaded_data.items():
+            if df is None:
+                continue
+            self._loaded_data[path] = df.with_columns(
+                _unique_id=_get_unique_id(self._max_unique_id_int)
+            )
+            self._max_unique_id_int += 1
 
     def __str__(self) -> str:
         """String representation."""
@@ -4188,6 +4204,8 @@ def _read_files(explorer, paths: list[str], mask=None, **kwargs) -> None:
             for path in paths
         )
     for path, (df, dtypes) in zip(paths, more_data, strict=True):
+        if df is None:
+            continue
         explorer._loaded_data[path] = df.with_columns(
             _unique_id=_get_unique_id(explorer._max_unique_id_int)
         )
@@ -4239,12 +4257,12 @@ def _get_bounds_series_as_4326(paths, file_system):
         bounds_and_crs = list(executor.map(func, paths))
 
     crss = {json.dumps(x[1]) for x in bounds_and_crs}
-    crs = {
+    crss = {
         crs
         for crs in crss
         if not any(str(crs).lower() == txt for txt in ["none", "null"])
     }
-    if not crs:
+    if not crss:
         return GeoSeries([None for _ in range(len(paths))], index=paths)
     crs = get_common_crs(crss)
     return GeoSeries(
