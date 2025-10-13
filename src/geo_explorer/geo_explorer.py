@@ -78,8 +78,8 @@ FILE_CHECKED_COLOR: str = "#3e82ff"
 DEFAULT_ZOOM: int = 12
 DEFAULT_CENTER: tuple[float, float] = (59.91740845, 10.71394444)
 CURRENT_YEAR: int = datetime.datetime.now().year
-FILE_SPLITTER_TXT: str = "-_-"
-ADDED_COLUMNS = {
+FILE_SPLITTER_TXT: str = "/splitted-"
+HIDDEN_ADDED_COLUMNS = {
     "minx",
     "miny",
     "maxx",
@@ -88,6 +88,7 @@ ADDED_COLUMNS = {
     "__file_path",
     "geometry",
 }
+ADDED_COLUMNS = HIDDEN_ADDED_COLUMNS | {"area"}
 ns = Namespace("onEachFeatureToggleHighlight", "default")
 
 DEBUG: bool = False
@@ -211,20 +212,902 @@ def read_file(
             # return _prepare_df(df, path, metadata)
             table = _read_pyarrow(path, file_system=file_system, **kwargs)
             return _pyarrow_to_polars(table, path, file_system)
-        except Exception:
+        except Exception as e:
+            if any(
+                txt in str(e)
+                for txt in [
+                    "file size is 0 bytes",
+                    "Parquet magic bytes not found in footer",
+                ]
+            ):
+                return None, None
             df = sg.read_geopandas(path, file_system=file_system, **kwargs)
             df, dtypes = _geopandas_to_polars(df, path)
             return df.lazy(), dtypes
     rows = path.split(FILE_SPLITTER_TXT)[-1]
+    path = path.split(FILE_SPLITTER_TXT)[0]
     nrow, nth_batch = rows.split("-")
     nrow = int(nrow)
     nth_batch = int(nth_batch)
-    path = path.split(FILE_SPLITTER_TXT)[0]
     try:
         table = read_nrows(path, nrow, nth_batch, file_system=file_system)
     except Exception:
         table = read_nrows(path, nrow, nth_batch, file_system=None)
     return _pyarrow_to_polars(table, path, file_system)
+
+
+def run_or_reset(method) -> Callable:
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        try:
+            results = method(self, *args, **kwargs)
+            self._is_recursing = False
+            return results
+        except Exception as e:
+            if self._is_recursing:
+                raise e
+            self._reset()
+            self._is_recursing = True
+            results = method(self, *args, **kwargs)
+            self._is_recursing = False
+            return results
+
+    return wrapper
+
+
+@time_function_call(_PROFILE_DICT)
+def _get_max_rows_displayed_component(max_rows: int):
+    return [
+        dbc.Row(html.Div("Max rows displayed")),
+        dbc.Row(
+            dbc.Input(
+                id="max_rows_value",
+                value=max_rows,
+                type="number",
+                debounce=1,
+            ),
+            style={"width": "13vh"},
+        ),
+        dbc.Tooltip(
+            "Set number of rows rendered. Currently showing random sample of data to avoid crashing.",
+            target="max_rows_value",
+            delay={"show": 500, "hide": 100},
+        ),
+    ]
+
+
+@time_function_call(_PROFILE_DICT)
+def _change_order(explorer, n_clicks_list, ids, buttons, what: str):
+    if what not in ["up", "down"]:
+        raise ValueError(what)
+    path = get_index_if_clicks(n_clicks_list, ids)
+    if path is None or not buttons:
+        return dash.no_update
+    i = list(reversed(explorer.selected_files)).index(path)
+    if (what == "up" and i == 0) or (what == "down" and i == len(buttons) - 1):
+        return dash.no_update
+    if what == "up":
+        i2 = i - 1
+    else:
+        i2 = i + 1
+    buttons[i], buttons[i2] = buttons[i2], buttons[i]
+    keys = list(reversed(explorer.selected_files))
+    values = list(reversed(explorer.selected_files.values()))
+    keys[i], keys[i2] = keys[i2], keys[i]
+    values[i], values[i2] = values[i2], values[i]
+    explorer.selected_files = dict(reversed(list(zip(keys, values, strict=False))))
+    return buttons
+
+
+def _named_color_to_hex(color: str) -> str:
+    return mcolors.to_hex(color)
+
+
+@time_function_call(_PROFILE_DICT)
+def _get_colorpicker_container(color_dict: dict[str, str]) -> html.Div:
+    def to_python_type(x):
+        if isinstance(x, Number):
+            return float(x)
+        return x
+
+    color_dict = {
+        to_python_type(column_value): color
+        for column_value, color in color_dict.items()
+    }
+
+    return html.Div(
+        [
+            dbc.Row(
+                [
+                    dbc.Col(
+                        dbc.Input(
+                            type="color",
+                            id={
+                                "type": "colorpicker",
+                                "column_value": column_value,
+                            },
+                            value=color,
+                            style={"width": 50, "height": 50},
+                        ),
+                        width="auto",
+                    ),
+                    dbc.Col(
+                        dbc.Label([column_value]),
+                        width="auto",
+                    ),
+                    dbc.Col(
+                        get_button_with_tooltip(
+                            "❌",
+                            id={
+                                "type": "delete-cat-btn",
+                                "index": column_value,
+                            },
+                            n_clicks=0,
+                            style={
+                                "color": "red",
+                                "border": "none",
+                                "background": "none",
+                                "cursor": "pointer",
+                                "marginLeft": "auto",
+                            },
+                            tooltip_text="Remove all data in this category",
+                        ),
+                        width="auto",
+                    ),
+                ],
+                style={
+                    "display": "flex",
+                    "justifyContent": "flex-start",
+                    "alignItems": "center",
+                    "marginBottom": "5px",
+                },
+            )
+            for column_value, color in color_dict.items()
+        ],
+        id="color-container",
+    )
+
+
+@time_function_call(_PROFILE_DICT)
+def _add_data_one_path(
+    path,
+    column,
+    is_numeric,
+    color_dict,
+    bins,
+    max_rows,
+    concatted_data,
+    nan_color,
+    nan_label,
+    alpha,
+    n_rows_per_path,
+    columns: dict[str, set[str]],
+    current_columns: set[str],
+):
+    columns: set[str] = {
+        col
+        for key, cols in columns.items()
+        for col in cols
+        if path in key and col in current_columns
+    } | {"split_index"}
+
+    df = concatted_data.filter(
+        (pl.col("__file_path") == path)
+        | (pl.col("__file_path").str.contains(path + "/"))
+    ).select(
+        "geometry", "_unique_id", *((column,) if column and column in columns else ())
+    )
+    n_rows = sum(count for key, count in n_rows_per_path.items() if path in key)
+    if not n_rows:
+        return (
+            False,
+            [_get_leaflet_overlay(data=None, path=path)],
+        )
+
+    rows_are_hidden = n_rows > max_rows
+    if rows_are_hidden:
+        indices = np.random.choice(n_rows, size=max_rows, replace=False)
+        df = df.filter(pl.int_range(pl.len()).is_in(indices))
+
+    if column is not None and column in columns:
+        df = _fix_colors(df, column, bins, is_numeric, color_dict, nan_color, nan_label)
+
+    if column and column not in columns:
+        return rows_are_hidden, [
+            _get_leaflet_overlay(
+                data=_cheap_geo_interface(df.collect()),
+                path=path,
+                style={
+                    "color": nan_color,
+                    "fillColor": nan_color,
+                    "weight": 2,
+                    "fillOpacity": alpha,
+                },
+                onEachFeature=ns("yellowIfHighlighted"),
+                pointToLayer=ns("pointToLayerCircle"),
+                hideout=dict(
+                    circleOptions=dict(fillOpacity=1, stroke=False, radius=5),
+                ),
+            )
+        ]
+    elif column:
+        return rows_are_hidden, [
+            _get_multiple_leaflet_overlay(
+                df,
+                path,
+                column,
+                nan_color,
+                alpha,
+                onEachFeature=ns("yellowIfHighlighted"),
+                pointToLayer=ns("pointToLayerCircle"),
+                hideout=dict(
+                    circleOptions=dict(fillOpacity=1, stroke=False, radius=5),
+                ),
+            )
+        ]
+    else:
+        # no column
+        try:
+            color = color_dict[_get_stem(path)]
+        except KeyError:
+            color = color_dict[_get_stem_from_parent(path)]
+        return rows_are_hidden, [
+            _get_leaflet_overlay(
+                data=_cheap_geo_interface(df.collect()),
+                path=path,
+                style={
+                    "color": color,
+                    "fillColor": color,
+                    "weight": 2,
+                    "fillOpacity": alpha,
+                },
+                onEachFeature=ns("yellowIfHighlighted"),
+                pointToLayer=ns("pointToLayerCircle"),
+                hideout=dict(
+                    circleOptions=dict(fillOpacity=1, stroke=False, radius=5),
+                ),
+            )
+        ]
+
+
+@time_function_call(_PROFILE_DICT)
+def _fix_colors(df, column, bins, is_numeric, color_dict, nan_color, nan_label):
+    if not is_numeric:
+        return df.with_columns(
+            _color=pl.col(column).replace(
+                {
+                    value: color
+                    for value, color in color_dict.items()
+                    if value != nan_label
+                },
+                default=pl.lit(nan_color),
+                return_dtype=pl.String(),
+            )
+        )
+    elif bins is None:
+        return df.with_columns(_color=pl.lit(nan_color))
+
+    notnas = df.filter((pl.col(column).is_not_null()) & (pl.col(column).is_not_nan()))
+    if bins is not None and len(bins) == 1:
+        notnas = notnas.with_columns(
+            _color=pl.lit(
+                next(iter(color for color in color_dict.values() if color != nan_color))
+            )
+        )
+    else:
+        conditions = [
+            (pl.col(column) < bins[1]) & (pl.col(column).is_not_null()),
+            *[
+                (pl.col(column) >= bins[i])
+                & (pl.col(column) < bins[i + 1])
+                & (pl.col(column).is_not_null())
+                for i in range(1, len(bins) - 1)
+            ],
+            (pl.col(column) >= bins[-1]) & (pl.col(column).is_not_null()),
+        ]
+        bin_index_expr = pl.when(conditions[0]).then(pl.lit(color_dict[0]))
+        for i, cond in enumerate(conditions[1:], start=1):
+            if i not in color_dict:
+                raise KeyError(f"{i} not in {color_dict}")
+            bin_index_expr = bin_index_expr.when(cond).then(pl.lit(color_dict[i]))
+        notnas = notnas.with_columns(bin_index_expr.alias("_color"))
+
+    return pl.concat(
+        [notnas, df.filter((pl.col(column).is_null()) | (pl.col(column).is_nan()))],
+        how="diagonal_relaxed",
+    )
+
+
+def polars_isna(df):
+    try:
+        return (df.is_nan()) | (df.is_null())
+    except pl.exceptions.InvalidOperationError:
+        return df.is_null()
+
+
+@time_function_call(_PROFILE_DICT)
+def filter_by_bounds(df: pl.LazyFrame, bounds: tuple[float]) -> pl.LazyFrame:
+    minx, miny, maxx, maxy = bounds
+
+    df = df.filter(
+        (
+            (pl.col("minx") <= float(maxx))
+            & (pl.col("maxx") >= float(minx))
+            & (pl.col("miny") <= float(maxy))
+            & (pl.col("maxy") >= float(miny))
+        )
+        | (pl.col("minx").is_null())
+    )
+    return df
+
+
+@time_function_call(_PROFILE_DICT)
+def read_nrows(file, nrow: int, nth_batch: int, file_system) -> pyarrow.Table:
+    """Read first n rows of a parquet file."""
+    for _, batch in zip(
+        range(nth_batch + 1),
+        pq.ParquetFile(file, filesystem=file_system).iter_batches(nrow),
+        strict=False,
+    ):
+        pass
+    return pyarrow.Table.from_batches([batch])
+
+
+@time_function_call(_PROFILE_DICT)
+def _read_polars(path, file_system, primary_column, **kwargs):
+    with file_system.open(path, "rb") as file:
+        return pl.scan_parquet(
+            file,
+            schema={primary_column: pl.Binary()},
+            missing_columns="insert",
+            **kwargs,
+        )
+
+
+@time_function_call(_PROFILE_DICT)
+def _pyarrow_to_polars(
+    table: pyarrow.Table,
+    path: str,
+    file_system: AbstractFileSystem,
+    pandas_fallback: bool = True,
+) -> tuple[pl.LazyFrame, dict[str, pl.DataType]]:
+    """Convert pyarrow.Table with geo-metadata to polars.LazyFrame.
+
+    The geometry column must have no metadata for it to be accepted by polars.
+
+    Turning the frame lazy might have no performance benefit. Ideally should
+    use polars.scan_parquet, but
+    """
+    metadata = _get_geo_metadata(path, file_system)
+    primary_column = metadata["primary_column"]
+    try:
+        table = table.cast(
+            pyarrow.schema(
+                [
+                    *[
+                        (
+                            (col, table.schema.field(col).type)
+                            if col != primary_column
+                            else (col, pyarrow.binary())
+                        )
+                        for col in table.schema.names
+                    ],
+                ]
+            )
+        )
+        df = pl.from_arrow(table, schema_overrides={primary_column: pl.Binary()})
+    except Exception as e:
+        if DEBUG or not pandas_fallback:
+            raise e
+        df = pl.from_pandas(table.to_pandas())
+    dtypes = dict(zip(df.columns, df.dtypes, strict=False))
+    return _prepare_df(df.lazy(), path, metadata, dtypes)
+
+
+@time_function_call(_PROFILE_DICT)
+def _get_area_and_bounds(geometries: GeometryArray | GeoSeries):
+    areas = shapely.area(geometries)
+    if np.median(areas) > 10:
+        # as int because easier to read
+        areas = areas.astype(np.int64)
+    if geometries.crs is not None:
+        geometries = geometries.to_crs(4326)
+    return geometries, areas, shapely.bounds(geometries)
+
+
+@time_function_call(_PROFILE_DICT)
+def _prepare_df(df: pl.LazyFrame, path, metadata, dtypes) -> pl.LazyFrame:
+    primary_column = metadata["primary_column"]
+    geo_metadata = metadata["columns"][primary_column]
+    crs = geo_metadata["crs"]
+    geometries, areas, bounds = _get_area_and_bounds(
+        geometries=GeometryArray(
+            shapely.from_wkb(df.select(primary_column).collect()[primary_column]),
+            crs=crs,
+        )
+    )
+    df = df.drop(primary_column)
+    df = _add_columns(df, geometries, areas, bounds, path)
+    df, dtypes = _remove_columns(df, dtypes)
+    # collecting, then back to lazy to only do these calculations once
+    return df.collect().lazy(), dtypes
+
+
+@time_function_call(_PROFILE_DICT)
+def _geopandas_to_polars(df: GeoDataFrame, path) -> pl.DataFrame:
+    geometries, areas, bounds = _get_area_and_bounds(geometries=df.geometry.values)
+    df = df.drop(columns=df.geometry.name)
+    df = pl.from_pandas(df)
+    dtypes = dict(zip(df.columns, df.dtypes, strict=True))
+    df = _add_columns(df, geometries, areas, bounds, path)
+    df, dtypes = _remove_columns(df, dtypes)
+    return df, dtypes
+
+
+@time_function_call(_PROFILE_DICT)
+def _pandas_to_polars(df: pd.DataFrame, path) -> pl.DataFrame:
+    df = pl.from_pandas(df)
+    dtypes = dict(zip(df.columns, df.dtypes, strict=False))
+    df = df.with_columns(
+        area=pl.lit(None).cast(pl.Float64()),
+        geometry=pl.lit(None).cast(pl.Binary()),
+        minx=pl.lit(None).cast(pl.Float64()),
+        miny=pl.lit(None).cast(pl.Float64()),
+        maxx=pl.lit(None).cast(pl.Float64()),
+        maxy=pl.lit(None).cast(pl.Float64()),
+        __file_path=pl.lit(path),
+    )
+    return df, dtypes
+
+
+def _add_columns(df, geometries, areas, bounds, path):
+    return df.with_columns(
+        pl.Series("area", areas),
+        pl.Series("geometry", shapely.to_wkb(geometries), dtype=pl.Binary()),
+        pl.Series("minx", bounds[:, 0]),
+        pl.Series("miny", bounds[:, 1]),
+        pl.Series("maxx", bounds[:, 2]),
+        pl.Series("maxy", bounds[:, 3]),
+        __file_path=pl.lit(path),
+    )
+
+
+def _remove_columns(df, dtypes):
+    cols_to_drop = {col for col, dtype in dtypes.items() if dtype.is_nested()}
+    return df.drop(*cols_to_drop), {
+        col: dtype for col, dtype in dtypes.items() if col not in cols_to_drop
+    }
+
+
+@time_function_call(_PROFILE_DICT)
+def _polars_to_gdf(df: pl.LazyFrame) -> GeoDataFrame:
+    return GeoDataFrame(
+        df.drop("geometry").to_pandas(),
+        geometry=shapely.from_wkb(df["geometry"].to_pandas()),
+        crs=4326,
+    ).to_crs(3035)
+
+
+def _get_unique_id(i: float) -> pl.Expr:
+    """Lazy float column: 0.0, 0.01, ..., N / divider + i."""
+    return pl.lit(f"{i}.") + (pl.int_range(pl.len(), eager=False)).cast(pl.Utf8)
+
+
+@time_function_call(_PROFILE_DICT)
+def _read_files(explorer, paths: list[str], mask=None, **kwargs) -> None:
+    if not paths:
+        return
+    bounds_set = set(explorer._bounds_series.index)
+
+    paths = [
+        path
+        for path in paths
+        if mask is None
+        or (
+            path in bounds_set
+            and shapely.intersects(mask, explorer._bounds_series[path])
+        )
+    ]
+    if not paths:
+        return
+    # loky because to_crs is slow with threading
+    backend = "threading" if len(paths) <= 3 else "loky"
+    file_system = explorer.file_system
+    with joblib.Parallel(len(paths), backend=backend) as parallel:
+        more_data = parallel(
+            joblib.delayed(explorer.__class__.read_func)(
+                path=path, file_system=file_system, **kwargs
+            )
+            for path in paths
+        )
+    for path, (df, dtypes) in zip(paths, more_data, strict=True):
+        if df is None:
+            continue
+        explorer._loaded_data[path] = df.with_columns(
+            _unique_id=_get_unique_id(explorer._max_unique_id_int)
+        )
+        explorer._dtypes[path] = dtypes | {"area": pl.Float64()}
+        explorer._max_unique_id_int += 1
+
+
+def _random_color(min_diff: int = 50) -> str:
+    """Get a random hex color code that is not too gray.
+
+    Args:
+        min_diff: minimum total distance between red, green and blue.
+            Maximum possible value will be 510, if one value is 0 and another is 255 (the third one will not matter).
+    """
+    while True:
+        r, g, b = np.random.choice(range(256), size=3)
+        if abs(r - g) + abs(r - b) > min_diff:
+            return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def _get_stem(path):
+    return Path(path).stem
+
+
+def _get_stem_from_parent(path):
+    name = Path(path).stem
+    parent_name = Path(path).parent.stem
+    return f"{parent_name}/{name}"
+
+
+def _try_to_get_bounds_else_none(
+    path, file_system
+) -> tuple[tuple[float] | None, str | None]:
+    try:
+        return _get_bounds_parquet(path, file_system, pandas_fallback=True)
+    except Exception:
+        try:
+            return _get_bounds_parquet_from_open_file(path, file_system)
+        except Exception:
+            return None, None
+
+
+def _get_bounds_series_as_4326(paths, file_system):
+    # bounds_series = sg.get_bounds_series(paths, file_system=file_system)
+    # return bounds_series.to_crs(4326)
+
+    func = partial(_try_to_get_bounds_else_none, file_system=file_system)
+    with ThreadPoolExecutor() as executor:
+        bounds_and_crs = list(executor.map(func, paths))
+
+    crss = {json.dumps(x[1]) for x in bounds_and_crs}
+    crss = {
+        crs
+        for crs in crss
+        if not any(str(crs).lower() == txt for txt in ["none", "null"])
+    }
+    if not crss:
+        return GeoSeries([None for _ in range(len(paths))], index=paths)
+    crs = get_common_crs(crss)
+    return GeoSeries(
+        [
+            shapely.box(*bbox[0]) if bbox[0] is not None else None
+            for bbox in bounds_and_crs
+        ],
+        index=paths,
+        crs=crs,
+    ).to_crs(4326)
+
+
+def get_index(values: list[Any], ids: list[Any], index: Any):
+    i = [x["index"] for x in ids].index(index)
+    return values[i]
+
+
+def get_zoom_from_bounds(
+    lon_min, lat_min, lon_max, lat_max, map_width_px, map_height_px
+):
+    """Estimate Leaflet zoom level for a bounding box and viewport size.
+
+    Parameters:
+        lat_min, lon_min: coordinates of bottom-left corner
+        lat_max, lon_max: coordinates of top-right corner
+        map_width_px: width of map in pixels
+        map_height_px: height of map in pixels
+    Returns:
+        Approximate zoom level (can be float)
+    """
+    # Earth's circumference in meters (WGS 84)
+    C = 40075016.686
+
+    # Center latitude for cosine correction
+    lat = (lat_min + lat_max) / 2
+    lat_rad = math.radians(lat)
+
+    # Width and height in degrees
+    lon_delta = abs(lon_max - lon_min)
+    lat_delta = abs(lat_max - lat_min)
+
+    if not lon_delta + lon_delta:
+        # if point geometries
+        return 16
+
+    # Adjusted width in meters at that latitude
+    width_m = lon_delta * (C / 360.0) * math.cos(lat_rad)
+    height_m = lat_delta * (C / 360.0)
+
+    # Meters per pixel required
+    meters_per_pixel_w = width_m / map_width_px
+    meters_per_pixel_h = height_m / map_height_px
+    meters_per_pixel = max(meters_per_pixel_w, meters_per_pixel_h)
+
+    # Invert the meters/pixel formula:
+    zoom = math.log2(C * math.cos(lat_rad) / (meters_per_pixel * 256))
+    return round(zoom, 2)
+
+
+def get_index_if_clicks(n_clicks_list, ids) -> str | None:
+    if not any(n_clicks_list):
+        return None
+    triggered = dash.callback_context.triggered_id
+    if not isinstance(triggered, dict):
+        return None
+    triggered_index = triggered["index"]
+    for index in (i for i, id_ in enumerate(ids) if id_["index"] == triggered_index):
+        n_clicks = n_clicks_list[index]
+        if n_clicks:
+            return ids[index]["index"]
+    return None
+
+
+def get_data_table(*data, title_id: str, table_id: str, div_id: str, clear_id: str):
+    return dbc.Col(
+        [
+            dbc.Row(
+                [
+                    dbc.Col(html.B(id=title_id)),
+                    *[dbc.Col(x) for x in data],
+                    dbc.Col(
+                        html.Button(
+                            "❌ Clear table",
+                            id=clear_id,
+                            style={
+                                "color": "red",
+                                "border": "none",
+                                "background": "none",
+                                "cursor": "pointer",
+                            },
+                        ),
+                        width=2,
+                    ),
+                ]
+            ),
+            dbc.Row(
+                dash_table.DataTable(
+                    id=table_id,
+                    style_header={
+                        "background-color": "#2f2f2f",
+                        "color": "white",
+                        "fontWeight": "bold",
+                    },
+                    style_data={
+                        "background-color": OFFWHITE,
+                        "color": "black",
+                    },
+                    style_table={
+                        "overflow-x": "visible",
+                        "overflow-y": "scroll",
+                        "height": "1vh",
+                    },
+                    sort_action="native",
+                    row_deletable=True,
+                ),
+            ),
+        ],
+        style={"display": "none"},
+        id=div_id,
+    )
+
+
+def is_jupyter():
+    return (
+        "JUPYTERHUB_SERVICE_PREFIX" in os.environ
+        and "JUPYTERHUB_HTTP_REFERER" in os.environ
+    )
+
+
+def get_split_index(df: pl.LazyFrame) -> pl.LazyFrame:
+    return df.with_columns(
+        (
+            pl.col("__file_path").map_elements(_get_stem, return_dtype=pl.Utf8)
+            + " "
+            + pl.col("__file_path").cum_count().over("__file_path").cast(pl.Utf8)
+        ).alias("split_index")
+    )
+
+
+def _get_force_categorical_button(
+    values_no_nans: pl.Series, force_categorical_clicks: int | None
+):
+    if not values_no_nans.dtype.is_numeric():
+        return None
+    elif (force_categorical_clicks or 0) % 2 == 0:
+        return get_button_with_tooltip(
+            "Force categorical",
+            id="force-categorical-button",
+            n_clicks=force_categorical_clicks,
+            tooltip_text="Get all numeric values as a single color group",
+            style={
+                "background": "white",
+                "color": "black",
+            },
+        )
+    else:
+        return get_button_with_tooltip(
+            "Force categorical",
+            id="force-categorical-button",
+            tooltip_text="Back to numeric values",
+            n_clicks=force_categorical_clicks,
+            style={
+                "background": "black",
+                "color": "white",
+            },
+        )
+
+
+class NoRowsError(ValueError):
+    pass
+
+
+def _get_file_system(path, file_system) -> AbstractFileSystem:
+    if file_system is not None:
+        return file_system
+    if str(path).startswith("gs://"):
+        from gcsfs import GCSFileSystem
+
+        return GCSFileSystem()
+    return LocalFileSystem()
+
+
+def get_google_earth_url(center, zoom_m: int = 150) -> str:
+    y, x = center
+    return f"https://earth.google.com/web/@{y},{x},{zoom_m}a,70.30108914d,35y,0h,0t,0r/data=CgwqBggBEgAYAUICCAE6AwoBMEICCABKDQj___________8BEAA"
+
+
+def get_google_maps_url(center, zoom_m: int = 150) -> str:
+    y, x = center
+    url = f"https://www.google.com/maps/@{y},{x},{zoom_m}m/data=!3m1!1e3?entry=ttu&g_ep=EgoyMDI0MTEyNC4xIKXMDSoASAFQAw%3D%3D"
+    return url
+
+
+def _add_cols_to_sql_query(query: str) -> str:
+    query = _unformat_query(query)
+    if "*" in query:
+        return query
+    pat = r"\b(SELECT DISTINCT|SELECT)\b"
+    select_statement = re.search(pat, query, re.IGNORECASE).group(1)
+    _, rest = query.split(select_statement)
+    rest = rest.replace("\n", " ")
+    cols = ", ".join(col for col in ADDED_COLUMNS if col not in rest)
+    return f"{select_statement} {cols}, {rest}"
+
+
+def _is_polars_expression(txt: Any):
+    return (isinstance(txt, str) and "pl.col" in txt) or (isinstance(txt, pl.Expr))
+
+
+def _is_sql(txt: Any) -> bool:
+    return isinstance(txt, str) and txt.replace("\n", "").strip().lower().startswith(
+        "select"
+    )
+
+
+@time_function_call(_PROFILE_DICT)
+def _is_likely_geopandas_func(df, txt: Any):
+    if not isinstance(txt, str) or "pl." in txt:
+        return False
+    geopandas_methods = {
+        x
+        for x in set(dir(GeoDataFrame))
+        .union(set(dir(GeoSeries)))
+        .union(set(dir(sg)))
+        .difference(set(dir(pd.DataFrame)))
+        .difference(set(dir(pd.Series)))
+        .difference(set(dir(pd.Series.str)))
+        .difference(set(dir(pl.DataFrame)))
+        .difference(set(dir(pl.Series)))
+        .difference(set(dir(pl.Series.str)))
+        if not x.startswith("__")
+    }
+    cols = set(df.columns)
+    return any(x in txt and len(x) > 2 and x not in cols for x in geopandas_methods)
+
+
+def _unformat_query(query: str) -> str:
+    """Remove newlines and multiple whitespaces from SQL query."""
+    query = query.replace("\n", " ").strip()
+    while "  " in query:
+        query = query.replace("  ", " ")
+    return query
+
+
+@time_function_call(_PROFILE_DICT)
+def _cheap_geo_interface(df: pl.DataFrame) -> dict:
+    debug_print("_cheap_geo_interface", len(df))
+    return {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "id": str(i),
+                "type": "Feature",
+                "properties": {"_unique_id": id_},
+                "geometry": msgspec.json.decode(geom),
+            }
+            for i, (geom, id_) in enumerate(
+                zip(
+                    shapely.to_geojson(shapely.from_wkb(df["geometry"])),
+                    df["_unique_id"],
+                    strict=True,
+                )
+            )
+        ],
+    }
+
+
+@time_function_call(_PROFILE_DICT)
+def _get_leaflet_overlay(data, path, **kwargs):
+    return dl.Overlay(
+        dl.GeoJSON(data=data, id={"type": "geojson", "filename": path}, **kwargs),
+        name=_get_stem(path),
+        id={"type": "geoj   son-overlay", "filename": path},
+        checked=True,
+    )
+
+
+@time_function_call(_PROFILE_DICT)
+def _get_multiple_leaflet_overlay(df, path, column, nan_color, alpha, **kwargs):
+    values = df.select("_color").unique().collect()["_color"]
+    return dl.Overlay(
+        dl.LayerGroup(
+            [
+                dl.GeoJSON(
+                    data=_cheap_geo_interface(
+                        df.filter(pl.col("_color") == color_).collect()
+                    ),
+                    style={
+                        "color": color_,
+                        "fillColor": color_,
+                        "weight": 2,
+                        "fillOpacity": alpha,
+                    },
+                    id={
+                        "type": "geojson",
+                        "filename": path + color_,
+                    },
+                    **kwargs,
+                )
+                for color_ in values.drop_nulls()  # .drop_nans()
+            ]
+            + (
+                []
+                if not values.is_null().any()
+                else [
+                    dl.GeoJSON(
+                        data=_cheap_geo_interface(
+                            df.filter(pl.col(column).is_null()).collect()
+                        ),
+                        style={
+                            "color": nan_color,
+                            "fillColor": nan_color,
+                            "weight": 2,
+                            "fillOpacity": alpha,
+                        },
+                        id={
+                            "type": "geojson",
+                            "filename": path + "_nan",
+                        },
+                        **kwargs,
+                    )
+                ]
+            )
+        ),
+        name=_get_stem(path),
+        checked=True,
+        id={"type": "geojson-overlay", "filename": path},
+    )
 
 
 class GeoExplorer:
@@ -428,6 +1311,7 @@ class GeoExplorer:
         self._current_table_view = None
         self.max_read_size_per_callback = max_read_size_per_callback
         self._force_categorical = False
+        self._is_recursing = False
 
         if is_jupyter():
             service_prefix = os.environ["JUPYTERHUB_SERVICE_PREFIX"].strip("/")
@@ -967,9 +1851,12 @@ class GeoExplorer:
             State("map", "zoom"),
         )
         def maybe_tip_about_buffer(_, zoom):
-            if self._concatted_data is None:
+            if self._concatted_data is None or zoom >= 11:
                 return None
-            area_max = self._concatted_data.select("area").max().collect().item()
+            try:
+                area_max = self._concatted_data.select("area").max().collect().item()
+            except pl.exceptions.ColumnNotFoundError:
+                return None
             if area_max is None:
                 return None
             return (
@@ -977,7 +1864,7 @@ class GeoExplorer:
                     "Tip: add query 'df.buffer(3000)' if geometries are difficult to see",
                     style={"font-size": 20},
                 )
-                if zoom <= 11 and 0 < area_max < 10000
+                if 0 < area_max < 10000
                 else None
             )
 
@@ -1031,6 +1918,8 @@ class GeoExplorer:
             try:
                 self._append_to_bounds_series([selected_path])
             except Exception as e:
+                if DEBUG:
+                    raise e
                 return dbc.Alert(
                     f"Couldn't read {selected_path}. {type(e)}: {e}",
                     color="warning",
@@ -1076,9 +1965,10 @@ class GeoExplorer:
             if triggered != "missing":
                 box = shapely.box(*self._nested_bounds_to_bounds(bounds))
                 files_in_bounds = set(sg.sfilter(self._bounds_series, box).index)
-                files_in_bounds |= set(
+                non_geodata = set(
                     self._bounds_series[lambda x: (x.isna()) | (x.is_empty)].index
                 )
+                files_in_bounds |= non_geodata
 
                 def is_checked(path) -> bool:
                     return any(
@@ -1094,72 +1984,34 @@ class GeoExplorer:
                         if path not in self._loaded_data and is_checked(path)
                     }
                 )
-                if not all(path in self._loaded_data_sizes for path in missing):
-                    paths_missing_size = [
-                        path for path in missing if path not in self._loaded_data_sizes
-                    ]
-                    with ThreadPoolExecutor() as executor:
-                        more_sizes = {
-                            path: x["size"]
-                            for path, x in zip(
-                                paths_missing_size,
-                                executor.map(self.file_system.info, paths_missing_size),
-                                strict=True,
-                            )
-                        }
-                    self._loaded_data_sizes |= more_sizes
 
-            if triggered != "interval-component":
-                new_missing = []
-                for path in missing:
-                    size = self._loaded_data_sizes[path]
-                    if size < self.max_read_size_per_callback:
-                        new_missing.append(path)
-                        continue
-                    with self.file_system.open(path, "rb") as file:
-                        nrow = pq.read_metadata(file).num_rows
-                    n = 30
-                    rows_to_read = nrow // n
-                    for i in range(n):
-                        new_path = path + f"{FILE_SPLITTER_TXT}{rows_to_read}-{i}"
-                        if new_path in missing:
-                            continue
-                        new_missing.append(new_path)
-                        self._loaded_data_sizes[new_path] = size / n
-                        self._bounds_series = pd.concat(
-                            [
-                                self._bounds_series,
-                                GeoSeries({new_path: self._bounds_series.loc[path]}),
-                            ]
-                        )
-                missing = new_missing
-
-            if missing:
-                if len(missing) > 10:
-                    to_read = 0
-                    cumsum = 0
-                    for i, path in enumerate(missing):
-                        size = self._loaded_data_sizes[path]
-                        cumsum += size
-                        to_read += 1
-                        if cumsum > 500_000_000 or to_read > cpu_count() * 2:
-                            break
-                else:
-                    to_read = min(10, len(missing))
-                debug_print(f"{to_read=}, {len(missing)=}")
-                if len(missing) > to_read:
-                    _read_files(self, missing[:to_read])
-                    missing = missing[to_read:]
-                    disabled = False if len(missing) else True
-                    new_data_read = dash.no_update if len(missing) else False
-                else:
-                    _read_files(self, missing)
-                    missing = []
-                    disabled = True
-                    new_data_read = True
-            else:
+            if not missing:
                 new_data_read = True
                 disabled = True
+                return new_data_read, missing, disabled
+
+            if len(missing) > 10:
+                to_read = 0
+                cumsum = 0
+                for path in missing:
+                    size = self._loaded_data_sizes[path]
+                    cumsum += size
+                    to_read += 1
+                    if cumsum > 500_000_000 or to_read > cpu_count() * 2:
+                        break
+            else:
+                to_read = min(10, len(missing))
+            debug_print(f"{to_read=}, {len(missing)=}")
+            if len(missing) > to_read:
+                _read_files(self, missing[:to_read])
+                missing = missing[to_read:]
+                disabled = False if len(missing) else True
+                new_data_read = dash.no_update if len(missing) else False
+            else:
+                _read_files(self, missing)
+                missing = []
+                disabled = True
+                new_data_read = True
 
             debug_print(
                 "get_files_in_bounds ferdig etter",
@@ -1286,23 +2138,6 @@ class GeoExplorer:
             bounds = self._nested_bounds_to_bounds(bounds)
 
             if triggered in ["file-deleted"]:
-                self._max_unique_id_int = -1
-                for path, df in self._loaded_data.items():
-                    self._max_unique_id_int += 1
-                    id_prev = df.select(pl.col("_unique_id").first()).collect().item()
-                    self._loaded_data[path] = df.with_columns(
-                        _unique_id=_get_unique_id(self._max_unique_id_int)
-                    )
-                    for idx in list(self.selected_features):
-                        if idx[0] != id_prev[0]:
-                            continue
-
-                        # rounding values to avoid floating point precicion problems
-                        new_idx = f"{self._max_unique_id_int}.{idx[2:]}"
-                        feature = self.selected_features.pop(idx)
-                        feature["id"] = new_idx
-                        self.selected_features[new_idx] = feature
-
                 update_table = True
             else:
                 update_table = dash.no_update
@@ -1678,7 +2513,7 @@ class GeoExplorer:
                     f"{join_df_name}.{col}" for col in cols_to_keep
                 )
 
-                for col in set(join_df_cols).difference(ADDED_COLUMNS | {"area"}):
+                for col in set(join_df_cols).difference(ADDED_COLUMNS):
 
                     if col not in df_cols or self._get_dtype(join_path, col).is_float():
                         continue
@@ -1740,7 +2575,7 @@ class GeoExplorer:
                 )
             )
 
-            for i, col in enumerate(set(df_cols).difference(ADDED_COLUMNS)):
+            for i, col in enumerate(set(df_cols).difference(HIDDEN_ADDED_COLUMNS)):
                 try:
                     query = _get_sql_query_with_col(
                         df, col, df_cols, all_cols=i % 2 == 0
@@ -1870,9 +2705,9 @@ class GeoExplorer:
             if self._concatted_data is None:
                 return dash.no_update
             cols_to_drop = (
-                ADDED_COLUMNS
+                HIDDEN_ADDED_COLUMNS
                 if not DEBUG
-                else ADDED_COLUMNS.difference({"_unique_id", "__file_path"})
+                else HIDDEN_ADDED_COLUMNS.difference({"_unique_id", "__file_path"})
             )
             columns = (
                 {
@@ -2183,8 +3018,6 @@ class GeoExplorer:
             )
             t = perf_counter()
 
-            # if isinstance(triggered, dict) and triggered["type"] == "colorpicker" and
-
             if max_rows_value is not None:
                 self.max_rows = max_rows_value
 
@@ -2371,7 +3204,7 @@ class GeoExplorer:
                         )
                     )
                     .drop(
-                        *ADDED_COLUMNS.difference({"_unique_id"}).union(
+                        *HIDDEN_ADDED_COLUMNS.difference({"_unique_id"}).union(
                             {"split_index"}
                         ),
                         strict=False,
@@ -2459,7 +3292,7 @@ class GeoExplorer:
 
             df, _ = self._concat_data(bounds=None, paths=[clicked_path])
             if df is not None:
-                df = df.drop(ADDED_COLUMNS.difference({"_unique_id"})).collect()
+                df = df.drop(HIDDEN_ADDED_COLUMNS.difference({"_unique_id"})).collect()
             if df is None or not len(df):
                 # read data out of bounds to get table
                 _read_files(
@@ -2476,7 +3309,7 @@ class GeoExplorer:
                 if df is None:
                     self._current_table_view = None
                     return None, out_alert
-                df = df.drop(ADDED_COLUMNS.difference({"_unique_id"})).collect()
+                df = df.drop(HIDDEN_ADDED_COLUMNS.difference({"_unique_id"})).collect()
 
             if not len(df) or not len(df.columns):
                 self._current_table_view = None
@@ -2490,7 +3323,7 @@ class GeoExplorer:
                 len(df) * len(df.columns) > 1_000_000
                 and " limit " not in self._queries.get(clicked_path, "").lower()
             ):
-                cols = set(df.columns).difference(ADDED_COLUMNS).union({"area"})
+                cols = set(df.columns).difference(HIDDEN_ADDED_COLUMNS)
                 query = _get_default_sql_query(df, cols)
                 for col in reversed(sorted(cols)):
                     try:
@@ -2513,6 +3346,7 @@ class GeoExplorer:
                     color="warning",
                     dismissable=True,
                 )
+                self._current_table_view = None
                 return None, alert
 
             clicked_features = df.to_dicts()
@@ -2882,6 +3716,23 @@ class GeoExplorer:
             lambda x: ~x.index.isin(deleted_files2)
         ]
 
+        self._max_unique_id_int = -1
+        for path, df in self._loaded_data.items():
+            self._max_unique_id_int += 1
+            id_prev = df.select(pl.col("_unique_id").first()).collect().item()
+            self._loaded_data[path] = df.with_columns(
+                _unique_id=_get_unique_id(self._max_unique_id_int)
+            )
+            for idx in list(self.selected_features):
+                if idx[0] != id_prev[0]:
+                    continue
+
+                # rounding values to avoid floating point precicion problems
+                new_idx = f"{self._max_unique_id_int}.{idx[2:]}"
+                feature = self.selected_features.pop(idx)
+                feature["id"] = new_idx
+                self.selected_features[new_idx] = feature
+
         return None, None
 
     @time_method_call(_PROFILE_DICT)
@@ -2906,6 +3757,7 @@ class GeoExplorer:
         maxy, maxx = maxs
         return minx, miny, maxx, maxy
 
+    @run_or_reset
     @time_method_call(_PROFILE_DICT)
     def _get_selected_feature(
         self, unique_id: float, path: str, bounds: tuple[float], recurse: bool = True
@@ -2928,7 +3780,7 @@ class GeoExplorer:
             row = row.drop("id", strict=False).rename({"_unique_id": "id"}, strict=True)
 
         row = row.drop(
-            *ADDED_COLUMNS.difference({"_unique_id"}).union({"split_index"}),
+            *HIDDEN_ADDED_COLUMNS.difference({"_unique_id"}).union({"split_index"}),
             strict=False,
         ).collect()
 
@@ -3218,7 +4070,9 @@ class GeoExplorer:
                 )
 
         # df_with_added_cols = df.select(ADDED_COLUMNS.difference({"geometry"}))
-        df2 = df.drop(ADDED_COLUMNS.difference({"geometry", "_unique_id"})).collect()
+        df2 = df.drop(
+            HIDDEN_ADDED_COLUMNS.difference({"geometry", "_unique_id"})
+        ).collect()
         df2, alert = self._run_df_function(df2, df, query, path)
         if df2 is None:
             return df, alert
@@ -3282,10 +4136,10 @@ class GeoExplorer:
             )
             df2 = (
                 _polars_to_gdf(
-                    df2.drop(*ADDED_COLUMNS.difference({"geometry"})).collect()
+                    df2.drop(*HIDDEN_ADDED_COLUMNS.difference({"geometry"})).collect()
                 )
                 if is_likely_geopandas
-                else df2.drop(*ADDED_COLUMNS).collect().to_pandas()
+                else df2.drop(*HIDDEN_ADDED_COLUMNS).collect().to_pandas()
             )
             locals()[name] = df2
             globals()[name] = df2
@@ -3297,9 +4151,7 @@ class GeoExplorer:
             except NameError:
                 error_mess += query_error
             except Exception as e:
-                error_mess += (
-                    f"Query function failed with pandas ({type(e).__name__}: {e}) "
-                )
+                error_mess += f"Query function failed with {'geo' if is_likely_geopandas else ''}pandas ({type(e).__name__}: {e}) "
                 for name in added_to_globals:
                     globals().pop(name)
                 return None, error_mess
@@ -3343,7 +4195,7 @@ class GeoExplorer:
         if isinstance(called, GeoSeries):
             geometries, areas, bounds = _get_area_and_bounds(geometries=called.values)
             called = _add_columns(
-                df.drop(ADDED_COLUMNS),
+                df.drop(HIDDEN_ADDED_COLUMNS),
                 geometries,
                 areas,
                 bounds,
@@ -3573,26 +4425,23 @@ class GeoExplorer:
 
         self.wms[wms_name] = constructor(**(current_kwargs | kwargs))
 
-    def _append_to_bounds_series(self, paths) -> None:
+    def _append_to_bounds_series(self, paths, recurse: bool = True) -> None:
         try:
-            child_paths = _get_child_paths(paths, self.file_system)
+            child_paths = self._get_child_paths(paths)
+            self._loaded_data_sizes |= child_paths
             paths_with_meta, paths_without_meta = (
-                self._get_paths_with_and_without_metadata(child_paths)
+                self._get_paths_with_and_without_metadata(list(child_paths))
             )
             more_bounds = _get_bounds_series_as_4326(
                 paths_with_meta,
                 file_system=self.file_system,
             )
-        except Exception:
-            # reload file system to avoid cached reading of old files that don't exist any more
+        except Exception as e:
+            if not recurse:
+                raise e
+            # reload file system to avoid cached reading of files that don't exist any more
             self.file_system = self.file_system.__class__()
-            child_paths = _get_child_paths(paths, self.file_system)
-            paths_with_meta, paths_without_meta = (
-                self._get_paths_with_and_without_metadata(child_paths)
-            )
-            more_bounds = _get_bounds_series_as_4326(
-                paths_with_meta, file_system=self.file_system
-            )
+            return self._append_to_bounds_series(paths, recurse=False)
         self._bounds_series = pd.concat(
             [
                 self._bounds_series,
@@ -3603,6 +4452,49 @@ class GeoExplorer:
                 ),
             ]
         )[lambda x: ~x.index.duplicated()]
+
+    def _get_child_paths(self, paths):
+        child_paths = {}
+        for path in paths:
+            path = _standardize_path(path)
+            child_paths |= self._get_paths_and_sizes(path)
+        return child_paths
+
+    def _get_paths_and_sizes(self, path):
+        suffix = Path(path).suffix
+        child_pattern = f"**/*{suffix}" if suffix else "**/*.*"
+        child_paths = {
+            _standardize_path(child_path): x["size"]
+            for child_path, x in self.file_system.glob(
+                str(Path(path) / child_pattern), detail=True
+            ).items()
+        }
+        out_paths = {}
+        more_bounds = []
+        for child_path, size in child_paths.items():
+            if size < self.max_read_size_per_callback:
+                out_paths[child_path] = size
+                continue
+            with self.file_system.open(path, "rb") as file:
+                nrow = pq.read_metadata(file).num_rows
+            n = 30
+            rows_to_read = nrow // n
+            for i in range(n):
+                new_path = path + f"{FILE_SPLITTER_TXT}{rows_to_read}-{i}"
+                out_paths[new_path] = size / n
+                more_bounds.append(GeoSeries({new_path: self._bounds_series.loc[path]}))
+            new_path = path + f"{FILE_SPLITTER_TXT}{rows_to_read}-{n}"
+            out_paths[new_path] = size / n
+            more_bounds.append(GeoSeries({new_path: self._bounds_series.loc[path]}))
+
+        self._bounds_series = pd.concat([self._bounds_series] + more_bounds)
+
+        if len(out_paths) > 1:
+            out_paths.pop(_standardize_path(path), None)
+            return out_paths
+        if len(out_paths):
+            return out_paths
+        return {_standardize_path(path): self.file_system.info(path)["size"]}
 
     def _get_paths_with_and_without_metadata(self, paths):
         filt = [
@@ -3667,6 +4559,16 @@ class GeoExplorer:
         } | self._kwargs
         return self._get_self_as_string(data)
 
+    def _reset(self):
+        self._max_unique_id_int = 0
+        for path, df in self._loaded_data.items():
+            if df is None:
+                continue
+            self._loaded_data[path] = df.with_columns(
+                _unique_id=_get_unique_id(self._max_unique_id_int)
+            )
+            self._max_unique_id_int += 1
+
     def __str__(self) -> str:
         """String representation."""
         data = self._get_self_as_dict()
@@ -3678,871 +4580,3 @@ class GeoExplorer:
                 pickle.dumps(value)
             except pickle.PicklingError:
                 print(f"{variable_name} with value {value} is not pickable")
-
-
-@time_function_call(_PROFILE_DICT)
-def _get_max_rows_displayed_component(max_rows: int):
-    return [
-        dbc.Row(html.Div("Max rows displayed")),
-        dbc.Row(
-            dbc.Input(
-                id="max_rows_value",
-                value=max_rows,
-                type="number",
-                debounce=1,
-            ),
-            style={"width": "13vh"},
-        ),
-        dbc.Tooltip(
-            "Set number of rows rendered. Currently showing random sample of data to avoid crashing.",
-            target="max_rows_value",
-            delay={"show": 500, "hide": 100},
-        ),
-    ]
-
-
-@time_function_call(_PROFILE_DICT)
-def _change_order(explorer, n_clicks_list, ids, buttons, what: str):
-    if what not in ["up", "down"]:
-        raise ValueError(what)
-    path = get_index_if_clicks(n_clicks_list, ids)
-    if path is None or not buttons:
-        return dash.no_update
-    i = list(reversed(explorer.selected_files)).index(path)
-    if (what == "up" and i == 0) or (what == "down" and i == len(buttons) - 1):
-        return dash.no_update
-    if what == "up":
-        i2 = i - 1
-    else:
-        i2 = i + 1
-    buttons[i], buttons[i2] = buttons[i2], buttons[i]
-    keys = list(reversed(explorer.selected_files))
-    values = list(reversed(explorer.selected_files.values()))
-    keys[i], keys[i2] = keys[i2], keys[i]
-    values[i], values[i2] = values[i2], values[i]
-    explorer.selected_files = dict(reversed(list(zip(keys, values, strict=False))))
-    return buttons
-
-
-def _named_color_to_hex(color: str) -> str:
-    return mcolors.to_hex(color)
-
-
-@time_function_call(_PROFILE_DICT)
-def _get_colorpicker_container(color_dict: dict[str, str]) -> html.Div:
-    def to_python_type(x):
-        if isinstance(x, Number):
-            return float(x)
-        return x
-
-    color_dict = {
-        to_python_type(column_value): color
-        for column_value, color in color_dict.items()
-    }
-
-    return html.Div(
-        [
-            dbc.Row(
-                [
-                    dbc.Col(
-                        dbc.Input(
-                            type="color",
-                            id={
-                                "type": "colorpicker",
-                                "column_value": column_value,
-                            },
-                            value=color,
-                            style={"width": 50, "height": 50},
-                        ),
-                        width="auto",
-                    ),
-                    dbc.Col(
-                        dbc.Label([column_value]),
-                        width="auto",
-                    ),
-                    dbc.Col(
-                        get_button_with_tooltip(
-                            "❌",
-                            id={
-                                "type": "delete-cat-btn",
-                                "index": column_value,
-                            },
-                            n_clicks=0,
-                            style={
-                                "color": "red",
-                                "border": "none",
-                                "background": "none",
-                                "cursor": "pointer",
-                                "marginLeft": "auto",
-                            },
-                            tooltip_text="Remove all data in this category",
-                        ),
-                        width="auto",
-                    ),
-                ],
-                style={
-                    "display": "flex",
-                    "justifyContent": "flex-start",
-                    "alignItems": "center",
-                    "marginBottom": "5px",
-                },
-            )
-            for column_value, color in color_dict.items()
-        ],
-        id="color-container",
-    )
-
-
-@time_function_call(_PROFILE_DICT)
-def _add_data_one_path(
-    path,
-    column,
-    is_numeric,
-    color_dict,
-    bins,
-    max_rows,
-    concatted_data,
-    nan_color,
-    nan_label,
-    alpha,
-    n_rows_per_path,
-    columns: dict[str, set[str]],
-    current_columns: set[str],
-):
-    columns: set[str] = {
-        col
-        for key, cols in columns.items()
-        for col in cols
-        if path in key and col in current_columns
-    } | {"split_index"}
-
-    df = concatted_data.filter(
-        (pl.col("__file_path") == path)
-        | (pl.col("__file_path").str.contains(path + "/"))
-    ).select(
-        "geometry", "_unique_id", *((column,) if column and column in columns else ())
-    )
-    n_rows = sum(count for key, count in n_rows_per_path.items() if path in key)
-    if not n_rows:
-        return (
-            False,
-            [_get_leaflet_overlay(data=None, path=path)],
-        )
-
-    rows_are_hidden = n_rows > max_rows
-    if rows_are_hidden:
-        indices = np.random.choice(n_rows, size=max_rows, replace=False)
-        df = df.filter(pl.int_range(pl.len()).is_in(indices))
-
-    if column is not None and column in columns:
-        df = _fix_colors(df, column, bins, is_numeric, color_dict, nan_color, nan_label)
-
-    if column and column not in columns:
-        return rows_are_hidden, [
-            _get_leaflet_overlay(
-                data=_cheap_geo_interface(df.collect()),
-                path=path,
-                style={
-                    "color": nan_color,
-                    "fillColor": nan_color,
-                    "weight": 2,
-                    "fillOpacity": alpha,
-                },
-                onEachFeature=ns("yellowIfHighlighted"),
-                pointToLayer=ns("pointToLayerCircle"),
-                hideout=dict(
-                    circleOptions=dict(fillOpacity=1, stroke=False, radius=5),
-                ),
-            )
-        ]
-    elif column:
-        return rows_are_hidden, [
-            _get_multiple_leaflet_overlay(
-                df,
-                path,
-                column,
-                nan_color,
-                alpha,
-                onEachFeature=ns("yellowIfHighlighted"),
-                pointToLayer=ns("pointToLayerCircle"),
-                hideout=dict(
-                    circleOptions=dict(fillOpacity=1, stroke=False, radius=5),
-                ),
-            )
-        ]
-    else:
-        # no column
-        try:
-            color = color_dict[_get_stem(path)]
-        except KeyError:
-            color = color_dict[_get_stem_from_parent(path)]
-        return rows_are_hidden, [
-            _get_leaflet_overlay(
-                data=_cheap_geo_interface(df.collect()),
-                path=path,
-                style={
-                    "color": color,
-                    "fillColor": color,
-                    "weight": 2,
-                    "fillOpacity": alpha,
-                },
-                onEachFeature=ns("yellowIfHighlighted"),
-                pointToLayer=ns("pointToLayerCircle"),
-                hideout=dict(
-                    circleOptions=dict(fillOpacity=1, stroke=False, radius=5),
-                ),
-            )
-        ]
-
-
-@time_function_call(_PROFILE_DICT)
-def _fix_colors(df, column, bins, is_numeric, color_dict, nan_color, nan_label):
-    if not is_numeric:
-        return df.with_columns(
-            _color=pl.col(column).replace(
-                {
-                    value: color
-                    for value, color in color_dict.items()
-                    if value != nan_label
-                },
-                default=pl.lit(nan_color),
-                return_dtype=pl.String(),
-            )
-        )
-    elif bins is None:
-        return df.with_columns(_color=pl.lit(nan_color))
-
-    notnas = df.filter((pl.col(column).is_not_null()) & (pl.col(column).is_not_nan()))
-    if bins is not None and len(bins) == 1:
-        notnas = notnas.with_columns(
-            _color=pl.lit(
-                next(iter(color for color in color_dict.values() if color != nan_color))
-            )
-        )
-    else:
-        conditions = [
-            (pl.col(column) < bins[1]) & (pl.col(column).is_not_null()),
-            *[
-                (pl.col(column) >= bins[i])
-                & (pl.col(column) < bins[i + 1])
-                & (pl.col(column).is_not_null())
-                for i in range(1, len(bins) - 1)
-            ],
-            (pl.col(column) >= bins[-1]) & (pl.col(column).is_not_null()),
-        ]
-        bin_index_expr = pl.when(conditions[0]).then(pl.lit(color_dict[0]))
-        for i, cond in enumerate(conditions[1:], start=1):
-            if i not in color_dict:
-                raise KeyError(f"{i} not in {color_dict}")
-            bin_index_expr = bin_index_expr.when(cond).then(pl.lit(color_dict[i]))
-        notnas = notnas.with_columns(bin_index_expr.alias("_color"))
-
-    return pl.concat(
-        [notnas, df.filter((pl.col(column).is_null()) | (pl.col(column).is_nan()))],
-        how="diagonal_relaxed",
-    )
-
-
-def polars_isna(df):
-    try:
-        return (df.is_nan()) | (df.is_null())
-    except pl.exceptions.InvalidOperationError:
-        return df.is_null()
-
-
-@time_function_call(_PROFILE_DICT)
-def filter_by_bounds(df: pl.LazyFrame, bounds: tuple[float]) -> pl.LazyFrame:
-    minx, miny, maxx, maxy = bounds
-
-    df = df.filter(
-        (
-            (pl.col("minx") <= float(maxx))
-            & (pl.col("maxx") >= float(minx))
-            & (pl.col("miny") <= float(maxy))
-            & (pl.col("maxy") >= float(miny))
-        )
-        | (pl.col("minx").is_null())
-    )
-    return df
-
-
-@time_function_call(_PROFILE_DICT)
-def read_nrows(file, nrow: int, nth_batch: int, file_system) -> pyarrow.Table:
-    """Read first n rows of a parquet file."""
-    for _, batch in zip(
-        range(nth_batch + 1),
-        pq.ParquetFile(file, filesystem=file_system).iter_batches(nrow),
-        strict=False,
-    ):
-        pass
-    return pyarrow.Table.from_batches([batch])
-
-
-@time_function_call(_PROFILE_DICT)
-def _read_polars(path, file_system, primary_column, **kwargs):
-    with file_system.open(path, "rb") as file:
-        return pl.scan_parquet(
-            file,
-            schema={primary_column: pl.Binary()},
-            missing_columns="insert",
-            **kwargs,
-        )
-
-
-@time_function_call(_PROFILE_DICT)
-def _pyarrow_to_polars(
-    table: pyarrow.Table,
-    path: str,
-    file_system: AbstractFileSystem,
-    pandas_fallback: bool = True,
-) -> tuple[pl.LazyFrame, dict[str, pl.DataType]]:
-    """Convert pyarrow.Table with geo-metadata to polars.LazyFrame.
-
-    The geometry column must have no metadata for it to be accepted by polars.
-
-    Turning the frame lazy might have no performance benefit. Ideally should
-    use polars.scan_parquet, but
-    """
-    metadata = _get_geo_metadata(path, file_system)
-    primary_column = metadata["primary_column"]
-    try:
-        table = table.cast(
-            pyarrow.schema(
-                [
-                    *[
-                        (
-                            (col, table.schema.field(col).type)
-                            if col != primary_column
-                            else (col, pyarrow.binary())
-                        )
-                        for col in table.schema.names
-                    ],
-                ]
-            )
-        )
-        df = pl.from_arrow(table, schema_overrides={primary_column: pl.Binary()})
-    except Exception as e:
-        if DEBUG or not pandas_fallback:
-            raise e
-        df = pl.from_pandas(table.to_pandas())
-    dtypes = dict(zip(df.columns, df.dtypes, strict=False))
-    return _prepare_df(df.lazy(), path, metadata), dtypes
-
-
-@time_function_call(_PROFILE_DICT)
-def _get_area_and_bounds(geometries: GeometryArray | GeoSeries):
-    areas = shapely.area(geometries)
-    if np.median(areas) > 10:
-        # as int because easier to read
-        areas = areas.astype(np.int64)
-    if geometries.crs is not None:
-        geometries = geometries.to_crs(4326)
-    return geometries, areas, shapely.bounds(geometries)
-
-
-@time_function_call(_PROFILE_DICT)
-def _prepare_df(df: pl.LazyFrame, path, metadata) -> pl.LazyFrame:
-    primary_column = metadata["primary_column"]
-    geo_metadata = metadata["columns"][primary_column]
-    crs = geo_metadata["crs"]
-    geometries, areas, bounds = _get_area_and_bounds(
-        geometries=GeometryArray(
-            shapely.from_wkb(df.select(primary_column).collect()[primary_column]),
-            crs=crs,
-        )
-    )
-    df = df.drop(primary_column)
-    df = _add_columns(df, geometries, areas, bounds, path)
-    # collecting, then back to lazy to only do these calculations once
-    return df.collect().lazy()
-
-
-@time_function_call(_PROFILE_DICT)
-def _geopandas_to_polars(df: GeoDataFrame, path) -> pl.DataFrame:
-    geometries, areas, bounds = _get_area_and_bounds(geometries=df.geometry.values)
-    df = df.drop(columns=df.geometry.name)
-    df = pl.from_pandas(df)
-    dtypes = dict(zip(df.columns, df.dtypes, strict=False))
-    df = _add_columns(df, geometries, areas, bounds, path)
-    return df, dtypes
-
-
-@time_function_call(_PROFILE_DICT)
-def _pandas_to_polars(df: pd.DataFrame, path) -> pl.DataFrame:
-    df = pl.from_pandas(df)
-    dtypes = dict(zip(df.columns, df.dtypes, strict=False))
-    df = df.with_columns(
-        area=pl.lit(None).cast(pl.Float64()),
-        geometry=pl.lit(None).cast(pl.Binary()),
-        minx=pl.lit(None).cast(pl.Float64()),
-        miny=pl.lit(None).cast(pl.Float64()),
-        maxx=pl.lit(None).cast(pl.Float64()),
-        maxy=pl.lit(None).cast(pl.Float64()),
-        __file_path=pl.lit(path),
-    )
-    return df, dtypes
-
-
-def _add_columns(df, geometries, areas, bounds, path):
-    return df.with_columns(
-        pl.Series("area", areas),
-        pl.Series("geometry", shapely.to_wkb(geometries), dtype=pl.Binary()),
-        pl.Series("minx", bounds[:, 0]),
-        pl.Series("miny", bounds[:, 1]),
-        pl.Series("maxx", bounds[:, 2]),
-        pl.Series("maxy", bounds[:, 3]),
-        __file_path=pl.lit(path),
-    )
-
-
-@time_function_call(_PROFILE_DICT)
-def _polars_to_gdf(df: pl.LazyFrame) -> GeoDataFrame:
-    return GeoDataFrame(
-        df.drop("geometry").to_pandas(),
-        geometry=shapely.from_wkb(df["geometry"].to_pandas()),
-        crs=4326,
-    ).to_crs(3035)
-
-
-def _get_unique_id(i: float) -> pl.Expr:
-    """Lazy float column: 0.0, 0.01, ..., N / divider + i."""
-    return pl.lit(f"{i}.") + (pl.int_range(pl.len(), eager=False)).cast(pl.Utf8)
-
-
-@time_function_call(_PROFILE_DICT)
-def _read_files(explorer, paths: list[str], mask=None, **kwargs) -> None:
-    if not paths:
-        return
-    bounds_set = set(explorer._bounds_series.index)
-
-    paths = [
-        path
-        for path in paths
-        if mask is None
-        or (
-            path in bounds_set
-            and shapely.intersects(mask, explorer._bounds_series[path])
-        )
-    ]
-    if not paths:
-        return
-    # loky because to_crs is slow with threading
-    backend = "threading" if len(paths) <= 3 else "loky"
-    file_system = explorer.file_system
-    with joblib.Parallel(len(paths), backend=backend) as parallel:
-        more_data = parallel(
-            joblib.delayed(explorer.__class__.read_func)(
-                path=path, file_system=file_system, **kwargs
-            )
-            for path in paths
-        )
-    for path, (df, dtypes) in zip(paths, more_data, strict=True):
-        explorer._loaded_data[path] = df.with_columns(
-            _unique_id=_get_unique_id(explorer._max_unique_id_int)
-        )
-        explorer._dtypes[path] = dtypes | {"area": pl.Float64()}
-        explorer._max_unique_id_int += 1
-
-
-def _random_color(min_diff: int = 50) -> str:
-    """Get a random hex color code that is not too gray.
-
-    Args:
-        min_diff: minimum total distance between red, green and blue.
-            Maximum possible value will be 510, if one value is 0 and another is 255 (the third one will not matter).
-    """
-    while True:
-        r, g, b = np.random.choice(range(256), size=3)
-        if abs(r - g) + abs(r - b) > min_diff:
-            return f"#{r:02x}{g:02x}{b:02x}"
-
-
-def _get_stem(path):
-    return Path(path).stem
-
-
-def _get_stem_from_parent(path):
-    name = Path(path).stem
-    parent_name = Path(path).parent.stem
-    return f"{parent_name}/{name}"
-
-
-def _get_child_paths(paths, file_system):
-    child_paths = set()
-    for path in paths:
-        path = _standardize_path(path)
-        suffix = Path(path).suffix
-        if suffix:
-            these_child_paths = {
-                _standardize_path(x)
-                for x in file_system.glob(str(Path(path) / f"**/*{suffix}"))
-                if Path(path).parts != Path(x).parts
-            }
-        else:
-            these_child_paths = {
-                _standardize_path(x)
-                for x in file_system.glob(str(Path(path) / f"**/*.*"))
-                if Path(path).parts != Path(x).parts
-            }
-        if not these_child_paths:
-            child_paths.add(path)
-        else:
-            child_paths |= these_child_paths
-    return child_paths
-
-
-def _try_to_get_bounds_else_none(
-    path, file_system
-) -> tuple[tuple[float] | None, str | None]:
-    try:
-        return _get_bounds_parquet(path, file_system, pandas_fallback=True)
-    except Exception:
-        try:
-            return _get_bounds_parquet_from_open_file(path, file_system)
-        except Exception:
-            return None, None
-
-
-def _get_bounds_series_as_4326(paths, file_system):
-    # bounds_series = sg.get_bounds_series(paths, file_system=file_system)
-    # return bounds_series.to_crs(4326)
-
-    func = partial(_try_to_get_bounds_else_none, file_system=file_system)
-    with ThreadPoolExecutor() as executor:
-        bounds_and_crs = list(executor.map(func, paths))
-
-    crss = {json.dumps(x[1]) for x in bounds_and_crs}
-    crs = {
-        crs
-        for crs in crss
-        if not any(str(crs).lower() == txt for txt in ["none", "null"])
-    }
-    if not crs:
-        return GeoSeries([None for _ in range(len(paths))], index=paths)
-    crs = get_common_crs(crss)
-    return GeoSeries(
-        [
-            shapely.box(*bbox[0]) if bbox[0] is not None else None
-            for bbox in bounds_and_crs
-        ],
-        index=paths,
-        crs=crs,
-    ).to_crs(4326)
-
-
-def get_index(values: list[Any], ids: list[Any], index: Any):
-    i = [x["index"] for x in ids].index(index)
-    return values[i]
-
-
-def get_zoom_from_bounds(
-    lon_min, lat_min, lon_max, lat_max, map_width_px, map_height_px
-):
-    """Estimate Leaflet zoom level for a bounding box and viewport size.
-
-    Parameters:
-        lat_min, lon_min: coordinates of bottom-left corner
-        lat_max, lon_max: coordinates of top-right corner
-        map_width_px: width of map in pixels
-        map_height_px: height of map in pixels
-    Returns:
-        Approximate zoom level (can be float)
-    """
-    # Earth's circumference in meters (WGS 84)
-    C = 40075016.686
-
-    # Center latitude for cosine correction
-    lat = (lat_min + lat_max) / 2
-    lat_rad = math.radians(lat)
-
-    # Width and height in degrees
-    lon_delta = abs(lon_max - lon_min)
-    lat_delta = abs(lat_max - lat_min)
-
-    if not lon_delta + lon_delta:
-        # if point geometries
-        return 16
-
-    # Adjusted width in meters at that latitude
-    width_m = lon_delta * (C / 360.0) * math.cos(lat_rad)
-    height_m = lat_delta * (C / 360.0)
-
-    # Meters per pixel required
-    meters_per_pixel_w = width_m / map_width_px
-    meters_per_pixel_h = height_m / map_height_px
-    meters_per_pixel = max(meters_per_pixel_w, meters_per_pixel_h)
-
-    # Invert the meters/pixel formula:
-    zoom = math.log2(C * math.cos(lat_rad) / (meters_per_pixel * 256))
-    return round(zoom, 2)
-
-
-def get_index_if_clicks(n_clicks_list, ids) -> str | None:
-    if not any(n_clicks_list):
-        return None
-    triggered = dash.callback_context.triggered_id
-    if not isinstance(triggered, dict):
-        return None
-    triggered_index = triggered["index"]
-    for index in (i for i, id_ in enumerate(ids) if id_["index"] == triggered_index):
-        n_clicks = n_clicks_list[index]
-        if n_clicks:
-            return ids[index]["index"]
-    return None
-
-
-def get_data_table(*data, title_id: str, table_id: str, div_id: str, clear_id: str):
-    return dbc.Col(
-        [
-            dbc.Row(
-                [
-                    dbc.Col(html.B(id=title_id)),
-                    *[dbc.Col(x) for x in data],
-                    dbc.Col(
-                        html.Button(
-                            "❌ Clear table",
-                            id=clear_id,
-                            style={
-                                "color": "red",
-                                "border": "none",
-                                "background": "none",
-                                "cursor": "pointer",
-                            },
-                        ),
-                        width=2,
-                    ),
-                ]
-            ),
-            dbc.Row(
-                dash_table.DataTable(
-                    id=table_id,
-                    style_header={
-                        "background-color": "#2f2f2f",
-                        "color": "white",
-                        "fontWeight": "bold",
-                    },
-                    style_data={
-                        "background-color": OFFWHITE,
-                        "color": "black",
-                    },
-                    style_table={
-                        "overflow-x": "visible",
-                        "overflow-y": "scroll",
-                        "height": "1vh",
-                    },
-                    sort_action="native",
-                    row_deletable=True,
-                ),
-            ),
-        ],
-        style={"display": "none"},
-        id=div_id,
-    )
-
-
-def is_jupyter():
-    return (
-        "JUPYTERHUB_SERVICE_PREFIX" in os.environ
-        and "JUPYTERHUB_HTTP_REFERER" in os.environ
-    )
-
-
-def get_split_index(df: pl.LazyFrame) -> pl.LazyFrame:
-    return df.with_columns(
-        (
-            pl.col("__file_path").map_elements(_get_stem, return_dtype=pl.Utf8)
-            + " "
-            + pl.col("__file_path").cum_count().over("__file_path").cast(pl.Utf8)
-        ).alias("split_index")
-    )
-
-
-def _get_force_categorical_button(
-    values_no_nans: pl.Series, force_categorical_clicks: int | None
-):
-    if not values_no_nans.dtype.is_numeric():
-        return None
-    elif (force_categorical_clicks or 0) % 2 == 0:
-        return get_button_with_tooltip(
-            "Force categorical",
-            id="force-categorical-button",
-            n_clicks=force_categorical_clicks,
-            tooltip_text="Get all numeric values as a single color group",
-            style={
-                "background": "white",
-                "color": "black",
-            },
-        )
-    else:
-        return get_button_with_tooltip(
-            "Force categorical",
-            id="force-categorical-button",
-            tooltip_text="Back to numeric values",
-            n_clicks=force_categorical_clicks,
-            style={
-                "background": "black",
-                "color": "white",
-            },
-        )
-
-
-class NoRowsError(ValueError):
-    pass
-
-
-def _get_file_system(path, file_system) -> AbstractFileSystem:
-    if file_system is not None:
-        return file_system
-    if str(path).startswith("gs://"):
-        from gcsfs import GCSFileSystem
-
-        return GCSFileSystem()
-    return LocalFileSystem()
-
-
-def get_google_earth_url(center, zoom_m: int = 150) -> str:
-    y, x = center
-    return f"https://earth.google.com/web/@{y},{x},{zoom_m}a,70.30108914d,35y,0h,0t,0r/data=CgwqBggBEgAYAUICCAE6AwoBMEICCABKDQj___________8BEAA"
-
-
-def get_google_maps_url(center, zoom_m: int = 150) -> str:
-    y, x = center
-    url = f"https://www.google.com/maps/@{y},{x},{zoom_m}m/data=!3m1!1e3?entry=ttu&g_ep=EgoyMDI0MTEyNC4xIKXMDSoASAFQAw%3D%3D"
-    return url
-
-
-def _add_cols_to_sql_query(query: str) -> str:
-    query = _unformat_query(query)
-    if "*" in query:
-        return query
-    pat = r"\b(SELECT DISTINCT|SELECT)\b"
-    select_statement = re.search(pat, query, re.IGNORECASE).group(1)
-    _, rest = query.split(select_statement)
-    rest = rest.replace("\n", " ")
-    cols = ", ".join(col for col in ADDED_COLUMNS if col not in rest)
-    return f"{select_statement} {cols}, {rest}"
-
-
-def _is_polars_expression(txt: Any):
-    return (isinstance(txt, str) and "pl.col" in txt) or (isinstance(txt, pl.Expr))
-
-
-def _is_sql(txt: Any) -> bool:
-    return isinstance(txt, str) and txt.replace("\n", "").strip().lower().startswith(
-        "select"
-    )
-
-
-@time_function_call(_PROFILE_DICT)
-def _is_likely_geopandas_func(df, txt: Any):
-    if not isinstance(txt, str) or "pl." in txt:
-        return False
-    geopandas_methods = {
-        x
-        for x in set(dir(GeoDataFrame))
-        .union(set(dir(GeoSeries)))
-        .union(set(dir(sg)))
-        .difference(set(dir(pd.DataFrame)))
-        .difference(set(dir(pd.Series)))
-        .difference(set(dir(pd.Series.str)))
-        .difference(set(dir(pl.DataFrame)))
-        .difference(set(dir(pl.Series)))
-        .difference(set(dir(pl.Series.str)))
-        if not x.startswith("__")
-    }
-    cols = set(df.columns)
-    return any(x in txt and len(x) > 2 and x not in cols for x in geopandas_methods)
-
-
-def _unformat_query(query: str) -> str:
-    """Remove newlines and multiple whitespaces from SQL query."""
-    query = query.replace("\n", " ").strip()
-    while "  " in query:
-        query = query.replace("  ", " ")
-    return query
-
-
-@time_function_call(_PROFILE_DICT)
-def _cheap_geo_interface(df: pl.DataFrame) -> dict:
-    debug_print("_cheap_geo_interface", len(df))
-    return {
-        "type": "FeatureCollection",
-        "features": [
-            {
-                "id": str(i),
-                "type": "Feature",
-                "properties": {"_unique_id": id_},
-                "geometry": msgspec.json.decode(geom),
-            }
-            for i, (geom, id_) in enumerate(
-                zip(
-                    shapely.to_geojson(shapely.from_wkb(df["geometry"])),
-                    df["_unique_id"],
-                    strict=True,
-                )
-            )
-        ],
-    }
-
-
-@time_function_call(_PROFILE_DICT)
-def _get_leaflet_overlay(data, path, **kwargs):
-    return dl.Overlay(
-        dl.GeoJSON(data=data, id={"type": "geojson", "filename": path}, **kwargs),
-        name=_get_stem(path),
-        id={"type": "geoj   son-overlay", "filename": path},
-        checked=True,
-    )
-
-
-@time_function_call(_PROFILE_DICT)
-def _get_multiple_leaflet_overlay(df, path, column, nan_color, alpha, **kwargs):
-    values = df.select("_color").unique().collect()["_color"]
-    return dl.Overlay(
-        dl.LayerGroup(
-            [
-                dl.GeoJSON(
-                    data=_cheap_geo_interface(
-                        df.filter(pl.col("_color") == color_).collect()
-                    ),
-                    style={
-                        "color": color_,
-                        "fillColor": color_,
-                        "weight": 2,
-                        "fillOpacity": alpha,
-                    },
-                    id={
-                        "type": "geojson",
-                        "filename": path + color_,
-                    },
-                    **kwargs,
-                )
-                for color_ in values.drop_nulls()  # .drop_nans()
-            ]
-            + (
-                []
-                if not values.is_null().any()
-                else [
-                    dl.GeoJSON(
-                        data=_cheap_geo_interface(
-                            df.filter(pl.col(column).is_null()).collect()
-                        ),
-                        style={
-                            "color": nan_color,
-                            "fillColor": nan_color,
-                            "weight": 2,
-                            "fillOpacity": alpha,
-                        },
-                        id={
-                            "type": "geojson",
-                            "filename": path + "_nan",
-                        },
-                        **kwargs,
-                    )
-                ]
-            )
-        ),
-        name=_get_stem(path),
-        checked=True,
-        id={"type": "geojson-overlay", "filename": path},
-    )

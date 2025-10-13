@@ -28,7 +28,7 @@ class LocalFileSystem(AbstractFileSystem):
         if not detail:
             return list(relevant_paths)
         with ThreadPoolExecutor() as executor:
-            return list(executor.map(get_file_info, relevant_paths))
+            return {x["name"]: x for x in executor.map(get_file_info, relevant_paths)}
 
     @classmethod
     def ls(cls, path: str, detail: bool = False, **kwargs):
