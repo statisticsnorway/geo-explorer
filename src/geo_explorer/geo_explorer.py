@@ -62,7 +62,9 @@ from sgis.maps.wms import WmsLoader
 from shapely import Geometry
 from shapely.errors import GEOSException
 from shapely.geometry import Point
+from shapely.geometry import Polygon
 from sgis import get_common_crs
+import rasterio
 
 from .file_browser import FileBrowser
 from .fs import LocalFileSystem
@@ -91,7 +93,7 @@ HIDDEN_ADDED_COLUMNS = {
 ADDED_COLUMNS = HIDDEN_ADDED_COLUMNS | {"area"}
 ns = Namespace("onEachFeatureToggleHighlight", "default")
 
-DEBUG: bool = False
+DEBUG: bool = 1
 
 _PROFILE_DICT = {}
 
@@ -508,7 +510,7 @@ def _fix_colors(df, column, bins, is_numeric, color_dict, nan_color, nan_label):
         bin_index_expr = pl.when(conditions[0]).then(pl.lit(color_dict[0]))
         for i, cond in enumerate(conditions[1:], start=1):
             if i not in color_dict:
-                raise KeyError(f"{i} not in {color_dict}")
+                continue
             bin_index_expr = bin_index_expr.when(cond).then(pl.lit(color_dict[i]))
         notnas = notnas.with_columns(bin_index_expr.alias("_color"))
 
@@ -725,7 +727,7 @@ def _read_files(explorer, paths: list[str], mask=None, **kwargs) -> None:
             continue
         explorer._loaded_data[path] = df.with_columns(
             _unique_id=_get_unique_id(explorer._max_unique_id_int)
-        )
+        ).drop("id", strict=False)
         explorer._dtypes[path] = dtypes | {"area": pl.Float64()}
         explorer._max_unique_id_int += 1
 
@@ -1016,8 +1018,10 @@ def _is_likely_geopandas_func(df, txt: Any):
     return any(x in txt and len(x) > 2 and x not in cols for x in geopandas_methods)
 
 
-def _unformat_query(query: str) -> str:
+def _unformat_query(query: str | None) -> str:
     """Remove newlines and multiple whitespaces from SQL query."""
+    if query is None:
+        return None
     query = query.replace("\n", " ").strip()
     while "  " in query:
         query = query.replace("  ", " ")
@@ -1299,6 +1303,7 @@ class GeoExplorer:
         self._bounds_series = GeoSeries()
         self.selected_files: dict[str, int] = {}
         self._loaded_data: dict[str, pl.LazyFrame] = {}
+        self._images: dict[str, Polygon] = {}
         self._dtypes: dict[str, dict[str, pl.DataType]] = {}
         self._max_unique_id_int: int = 0
         self._loaded_data_sizes: dict[str, int] = {}
@@ -1745,14 +1750,14 @@ class GeoExplorer:
                     df = self._loaded_data[key]
                     loaded_data_sorted[key] = df.with_columns(
                         _unique_id=_get_unique_id(self._max_unique_id_int)
-                    )
+                    ).drop("id", errors="ignore")
                     self._max_unique_id_int += 1
             else:
                 x = _standardize_path(x)
                 df = self._loaded_data[x]
                 loaded_data_sorted[x] = df.with_columns(
                     _unique_id=_get_unique_id(self._max_unique_id_int)
-                )
+                ).drop("id", errors="ignore")
                 self._max_unique_id_int += 1
 
         self._loaded_data = loaded_data_sorted
@@ -1989,6 +1994,16 @@ class GeoExplorer:
                 new_data_read = True
                 disabled = True
                 return new_data_read, missing, disabled
+
+            for path in list(missing):
+                if any(path.lower().endswith(txt) for txt in [".tif", ".tiff"]):
+                    missing.pop(missing.index(path))
+                    # with self.file_system.open(path) as file, rasterio.open(
+                    with rasterio.open(path) as src:
+                        img_bounds = GeoSeries(
+                            [shapely.box(*src.bounds)], crs=src.crs
+                        ).to_crs(4326)
+                        self._images[path] = next(iter(img_bounds))
 
             if len(missing) > 10:
                 to_read = 0
@@ -3071,8 +3086,58 @@ class GeoExplorer:
             else:
                 max_rows_component = _get_max_rows_displayed_component(self.max_rows)
 
+            bbox = shapely.box(*bounds)
+            image_overlays = []
+            for img_path, img_bounds in self._images.items():
+                if not img_bounds.intersects(bbox):
+                    continue
+                # with self.file_system.open(img_path) as file, rasterio.open(
+                #     file
+                # ) as src:
+                with rasterio.open(img_path) as src:
+                    bbox_in_img_crs = (
+                        GeoSeries([bbox], crs=4326).to_crs(src.crs).total_bounds
+                    )
+                    window = rasterio.windows.from_bounds(
+                        *bbox_in_img_crs, transform=src.transform
+                    )
+                    arr = src.read(
+                        indexes=(1,),
+                        window=window,
+                        **({"boundless": False, "masked": False}),
+                    )
+                    debug_print(img_path, arr)
+                    debug_print(img_path, arr.shape)
+                    arr = arr[0]
+                    debug_print(img_path, arr.shape)
+                    minx, miny, maxx, maxy = bounds
+                    import folium
+
+                    image_overlay = folium.raster_layers.ImageOverlay(
+                        arr,
+                        bounds=[[miny, minx], [maxy, maxx]],
+                        vmin=arr.min(),
+                        vmax=arr.max(),
+                    )
+                    image_overlay.layer_name = Path(img_path).stem
+                    image_overlay = dl.ImageOverlay(
+                        url=image_overlay.url,
+                        # arr,
+                        bounds=bounds,
+                        # show=True,
+                        # vmin=arr.min(),
+                        # vmax=arr.max(),
+                    )
+                    image_overlay.layerName = Path(img_path).stem
+                    image_overlays.append(image_overlay)
+
             return (
-                dl.LayersControl(list(self._base_layers.values()) + wms_layers + data),
+                dl.LayersControl(
+                    list(self._base_layers.values())
+                    + wms_layers
+                    + data
+                    + image_overlays
+                ),
                 None,
                 max_rows_component,
                 all_tiles_lists,

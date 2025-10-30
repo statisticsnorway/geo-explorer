@@ -2,6 +2,7 @@ import datetime
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import ClassVar
 
 import dash
 import dash_bootstrap_components as dbc
@@ -21,6 +22,8 @@ from .utils import get_button_with_tooltip
 
 
 class FileBrowser:
+    file_types: ClassVar[list[str]] = [".parquet", ".tif", ".tiff"]
+
     def __init__(
         self,
         start_dir: str,
@@ -313,7 +316,7 @@ class FileBrowser:
                 ]
                 alert = None
             else:
-                file_data_dict, file_list, alert = _list_dir(
+                file_data_dict, file_list, alert = self._list_dir(
                     path, search_word, case_sensitive, recursive, self.file_system
                 )
                 if sum(sort_by_clicks):
@@ -347,131 +350,146 @@ class FileBrowser:
 
             return (file_data_dict, file_list, alert, sort_by_clicks, self._history[1:])
 
+    def _list_dir(
+        self,
+        path: str,
+        containing: str,
+        case_sensitive: bool,
+        recursive: bool,
+        file_system,
+    ):
+        containing = containing or ""
+        containing = [txt.strip() for txt in containing.split(",") if txt.strip()]
+        if (case_sensitive or 0) % 2 == 0:
 
-def _list_dir(
-    path: str, containing: str, case_sensitive: bool, recursive: bool, file_system
-):
-    containing = containing or ""
-    containing = [txt.strip() for txt in containing.split(",") if txt.strip()]
-    if (case_sensitive or 0) % 2 == 0:
-
-        def _contains(path):
-            if not containing:
-                return True
-            return all(
-                any(
-                    txt.strip().lower() in path.lower()
-                    for txt in x.split("|")
-                    if txt.strip()
+            def _contains(path):
+                if not containing:
+                    return True
+                return all(
+                    any(
+                        txt.strip().lower() in path.lower()
+                        for txt in x.split("|")
+                        if txt.strip()
+                    )
+                    for x in containing
                 )
-                for x in containing
-            )
 
-    else:
+        else:
 
-        def _contains(path):
-            if not containing:
-                return True
-            return all(
-                any(txt.strip() in path for txt in x.split("|") if txt.strip())
-                for x in containing
-            )
+            def _contains(path):
+                if not containing:
+                    return True
+                return all(
+                    any(txt.strip() in path for txt in x.split("|") if txt.strip())
+                    for x in containing
+                )
 
-    if (recursive or 0) % 2 == 0:
+        if (recursive or 0) % 2 == 0:
 
-        def _ls(path):
-            return file_system.ls(path, detail=True)
+            def _ls(path):
+                return file_system.ls(path, detail=True)
 
-    else:
+        else:
 
-        def _ls(path):
-            path = str(Path(path) / "**")
-            return _try_glob(path, file_system)
+            def _ls(path):
+                path = str(Path(path) / "**")
+                return _try_glob(path, file_system)
 
-    try:
-        paths = _ls(path)
-    except Exception as e:
         try:
+            paths = _ls(path)
+        except Exception as e:
+            try:
+                paths = _try_glob(path, file_system)
+            except Exception:
+                return (
+                    [],
+                    [],
+                    dbc.Alert(
+                        f"Couldn't list files in {path}. {type(e)}: {e}",
+                        color="warning",
+                        dismissable=True,
+                    ),
+                )
+
+        if not paths:
             paths = _try_glob(path, file_system)
-        except Exception:
-            return (
-                [],
-                [],
-                dbc.Alert(
-                    f"Couldn't list files in {path}. {type(e)}: {e}",
-                    color="warning",
-                    dismissable=True,
-                ),
+
+        if isinstance(paths, dict):
+            paths = list(paths.values())
+
+        def is_dir_or_is_partitioned_parquet(x) -> bool:
+            return x["type"] == "directory" or any(
+                x["name"].endswith(txt) for txt in self.file_types
             )
 
-    if not paths:
-        paths = _try_glob(path, file_system)
-
-    if isinstance(paths, dict):
-        paths = list(paths.values())
-
-    def is_dir_or_is_partitioned_parquet(x) -> bool:
-        return x["type"] == "directory" or any(
-            x["name"].endswith(txt) for txt in [".parquet"]
-        )
-
-    paths = [
-        x
-        for x in paths
-        if isinstance(x, dict)
-        and _contains(x["name"])
-        and is_dir_or_is_partitioned_parquet(x)
-        and Path(path).parts != Path(x["name"]).parts
-    ]
-
-    paths.sort(key=lambda x: x["name"])
-    isdir_list = [x["type"] == "directory" for x in paths]
-
-    partitioned = {
-        i: x
-        for i, x in enumerate(paths)
-        if x["type"] == "directory"
-        and any(
-            str(x).endswith(".parquet") for x in (x["name"], *Path(x["name"]).parents)
-        )
-    }
-
-    def get_summed_size_and_latest_timestamp_in_subdirs(
-        x,
-    ) -> tuple[float, datetime.datetime]:
-        file_info = _try_glob(str(Path(x["name"]) / "**/*.parquet"), file_system)
-
-        if isinstance(file_info, dict):
-            file_info = list(file_info.values())
-
-        file_info = [
-            x for x in file_info if isinstance(x, dict) and x["type"] != "directory"
-        ]
-        if not file_info:
-            return 0, str(datetime.datetime.fromtimestamp(0))
-        return sum(x["size"] for x in file_info), max(x["updated"] for x in file_info)
-
-    with ThreadPoolExecutor() as executor:
-        summed_size_ant_time = list(
-            executor.map(
-                get_summed_size_and_latest_timestamp_in_subdirs, partitioned.values()
-            )
-        )
-        for i, (size, timestamp) in zip(partitioned, summed_size_ant_time, strict=True):
-            paths[i]["size"] = size
-            paths[i]["updated"] = timestamp
-
-    return (
-        paths,
-        [
-            _get_file_list_row(
-                x["name"], x.get("updated", None), x["size"], isdir, path, file_system
-            )
-            for x, isdir in zip(paths, isdir_list, strict=True)
+        paths = [
+            x
+            for x in paths
             if isinstance(x, dict)
-        ],
-        None,
-    )
+            and _contains(x["name"])
+            and is_dir_or_is_partitioned_parquet(x)
+            and Path(path).parts != Path(x["name"]).parts
+        ]
+
+        paths.sort(key=lambda x: x["name"])
+        isdir_list = [x["type"] == "directory" for x in paths]
+
+        partitioned = {
+            i: x
+            for i, x in enumerate(paths)
+            if x["type"] == "directory"
+            and any(
+                str(x).endswith(".parquet")
+                for x in (x["name"], *Path(x["name"]).parents)
+            )
+        }
+
+        def get_summed_size_and_latest_timestamp_in_subdirs(
+            x,
+        ) -> tuple[float, datetime.datetime]:
+            file_info = _try_glob(str(Path(x["name"]) / "**/*.parquet"), file_system)
+
+            if isinstance(file_info, dict):
+                file_info = list(file_info.values())
+
+            file_info = [
+                x for x in file_info if isinstance(x, dict) and x["type"] != "directory"
+            ]
+            if not file_info:
+                return 0, str(datetime.datetime.fromtimestamp(0))
+            return sum(x["size"] for x in file_info), max(
+                x["updated"] for x in file_info
+            )
+
+        with ThreadPoolExecutor() as executor:
+            summed_size_ant_time = list(
+                executor.map(
+                    get_summed_size_and_latest_timestamp_in_subdirs,
+                    partitioned.values(),
+                )
+            )
+            for i, (size, timestamp) in zip(
+                partitioned, summed_size_ant_time, strict=True
+            ):
+                paths[i]["size"] = size
+                paths[i]["updated"] = timestamp
+
+        return (
+            paths,
+            [
+                _get_file_list_row(
+                    x["name"],
+                    x.get("updated", None),
+                    x["size"],
+                    isdir,
+                    path,
+                    file_system,
+                )
+                for x, isdir in zip(paths, isdir_list, strict=True)
+                if isinstance(x, dict)
+            ],
+            None,
+        )
 
 
 def _get_file_list_row(path, timestamp, size, isdir: bool, current_path, file_system):
