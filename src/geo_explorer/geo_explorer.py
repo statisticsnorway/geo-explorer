@@ -23,6 +23,7 @@ from typing import Any
 from typing import ClassVar
 import random
 
+import folium
 import pickle
 import geopandas as gpd
 import dash
@@ -93,7 +94,7 @@ HIDDEN_ADDED_COLUMNS = {
 ADDED_COLUMNS = HIDDEN_ADDED_COLUMNS | {"area"}
 ns = Namespace("onEachFeatureToggleHighlight", "default")
 
-DEBUG: bool = 1
+DEBUG: bool = False
 
 _PROFILE_DICT = {}
 
@@ -2003,7 +2004,10 @@ class GeoExplorer:
                         img_bounds = GeoSeries(
                             [shapely.box(*src.bounds)], crs=src.crs
                         ).to_crs(4326)
-                        self._images[path] = next(iter(img_bounds))
+                        self._images[path] = {
+                            "bounds": next(iter(img_bounds)),
+                            "checked": True,
+                        }
 
             if len(missing) > 10:
                 to_read = 0
@@ -3089,14 +3093,20 @@ class GeoExplorer:
             bbox = shapely.box(*bounds)
             image_overlays = []
             for img_path, img_bounds in self._images.items():
-                if not img_bounds.intersects(bbox):
+                is_checked = self.selected_files[img_path]
+                if not is_checked:
+                    continue
+                clipped_bounds = img_bounds.intersection(bbox)
+                if clipped_bounds.is_empty:
                     continue
                 # with self.file_system.open(img_path) as file, rasterio.open(
                 #     file
                 # ) as src:
                 with rasterio.open(img_path) as src:
                     bbox_in_img_crs = (
-                        GeoSeries([bbox], crs=4326).to_crs(src.crs).total_bounds
+                        GeoSeries([clipped_bounds], crs=4326)
+                        .to_crs(src.crs)
+                        .total_bounds
                     )
                     window = rasterio.windows.from_bounds(
                         *bbox_in_img_crs, transform=src.transform
@@ -3106,29 +3116,38 @@ class GeoExplorer:
                         window=window,
                         **({"boundless": False, "masked": False}),
                     )
-                    debug_print(img_path, arr)
-                    debug_print(img_path, arr.shape)
                     arr = arr[0]
-                    debug_print(img_path, arr.shape)
-                    minx, miny, maxx, maxy = bounds
-                    import folium
+                    if "int" in str(arr.dtype).lower():
+                        vmin = np.iinfo(arr.dtype).min
+                        vmax = np.iinfo(arr.dtype).max
+                    else:
+                        vmin = np.finfo(arr.dtype).min
+                        vmax = np.finfo(arr.dtype).max
+                    minx, miny, maxx, maxy = clipped_bounds.bounds
 
                     image_overlay = folium.raster_layers.ImageOverlay(
                         arr,
                         bounds=[[miny, minx], [maxy, maxx]],
-                        vmin=arr.min(),
-                        vmax=arr.max(),
+                        vmin=vmin,
+                        vmax=vmax,
                     )
-                    image_overlay.layer_name = Path(img_path).stem
+                    img_name = Path(img_path).stem
+                    image_overlay.layer_name = img_name
                     image_overlay = dl.ImageOverlay(
                         url=image_overlay.url,
                         # arr,
-                        bounds=bounds,
+                        bounds=[[miny, minx], [maxy, maxx]],
+                        opacity=self.alpha,
                         # show=True,
                         # vmin=arr.min(),
                         # vmax=arr.max(),
                     )
-                    image_overlay.layerName = Path(img_path).stem
+                    # image_overlay.layerName = Path(img_path).stem
+                    image_overlay = dl.Overlay(
+                        image_overlay,
+                        name=img_name,
+                        checked=is_checked,
+                    )
                     image_overlays.append(image_overlay)
 
             return (
