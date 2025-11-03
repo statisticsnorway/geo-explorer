@@ -110,6 +110,8 @@ DEBUG: bool = False
 
 _PROFILE_DICT = {}
 
+loc = {}
+
 if DEBUG:
 
     def debug_print(*args):
@@ -1156,6 +1158,7 @@ class NetCDFPanel:
         #         .values
         #     }
         # )
+        self.times = [str(x)[:10] for x in list(self.ds.time.values)]
         self.selected_time = self.ds.time[0].values
         self._register_callbacks()
 
@@ -1179,7 +1182,7 @@ class NetCDFPanel:
                         id="nc-time-dropdown",
                         value=self.selected_time,
                         options=[
-                            {"label": str(x)[:10], "value": x}
+                            {"label": str(x)[:10], "value": str(x)[:10]}
                             for x in np.sort(self.ds.time.values)
                         ],
                         style={
@@ -1193,7 +1196,7 @@ class NetCDFPanel:
                 dbc.Row(
                     dcc.Input(
                         id="nc-code-block-input",
-                        value=None,
+                        value=self.code_block,
                         type="text",
                         debounce=1,
                         placeholder="NetCDF code block...",
@@ -1207,10 +1210,13 @@ class NetCDFPanel:
     def dataset_is_empty(ds):
         for attr in ds.coords:
             if not any(getattr(ds, attr).shape):
+                print("empty", attr, getattr(ds, attr).shape)
                 return True
         return False
 
     def nc_to_polars(self, bounds) -> pl.LazyFrame:
+        import xarray as xr
+
         if self.code_block is None:
             return pl.LazyFrame()
         bbox_correct_crs = (
@@ -1222,11 +1228,15 @@ class NetCDFPanel:
         print(int(bbox_correct_crs.area / 1_000_000))
         print(int(clipped_bbox.area / 1_000_000))
 
+        # selected_time_index = self.times.index(self.selected_time)
+        # time = self.ds.time.values[selected_time_index]
         filtered = self.ds.sel(
+            # time=(self.ds.time == time),
             # time=(self.ds.time == self.selected_time),
             x=slice(minx, maxx),
             y=slice(maxy, miny),
-        )
+        )  # .isel(time=selected_time_index)
+
         if self.dataset_is_empty(filtered):
             return pl.LazyFrame()
 
@@ -1236,12 +1246,18 @@ class NetCDFPanel:
             if callable(xarr):
                 xarr = xarr(ds)
         except SyntaxError:
-            exec(self.code_block)
-            func_name = self.code_block.split("def ")[1].split("(")[0]
-            xarr = eval(func_name)(ds)
+            exec(self.code_block, globals=globals() | {"ds": ds}, locals=loc)
+            xarr = loc["xarr"]
+            # func_name = self.code_block.split("def ")[1].split("(")[0]
+            # xarr = eval(func_name)(ds)
 
-        print(xarr.shape)
-        print(int(xarr.notnull().sum()))
+        print(ds)
+        print(xarr)
+
+        if not isinstance(xarr, (xr.DataArray | xr.Dataset)):
+            print(type(xarr))
+            return pl.LazyFrame()
+
         df: GeoDataFrame = xarry_to_geopandas(
             xarr, "value", bounds=clipped_bbox.bounds, crs=self.crs
         )
@@ -1272,7 +1288,10 @@ class NetCDFPanel:
             Input("nc-time-dropdown", "value"),
         )
         def update_time(value):
+            print(value, self.selected_time)
             if value is not None:
+                if isinstance(value, int):
+                    value = datetime.datetime.fromtimestamp(value / 1_000_000_000)
                 self.selected_time = value
 
         @callback(
@@ -1309,6 +1328,8 @@ def xarry_to_geopandas(xarr, name: str, bounds, crs):
     if len(xarr.shape) == 2:
         height, width = xarr.shape
     elif len(xarr.shape) == 3:
+        if xarr.shape[0] != 1:
+            raise ValueError("0th dimension/axis must have 1 level")
         height, width = xarr.shape[1:]
     else:
         raise ValueError(xarr.shape)
