@@ -1237,6 +1237,8 @@ class NetCDFPanel:
                 xarr = xarr(ds)
         except SyntaxError:
             exec(self.code_block)
+            func_name = self.code_block.split("def ")[1].split("(")[0]
+            xarr = eval(func_name)(ds)
 
         print(xarr.shape)
         print(int(xarr.notnull().sum()))
