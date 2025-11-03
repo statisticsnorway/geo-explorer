@@ -5,6 +5,8 @@ import json
 import logging
 import math
 import os
+import pickle
+import random
 import re
 import signal
 import sys
@@ -21,25 +23,30 @@ from pathlib import PurePath
 from time import perf_counter
 from typing import Any
 from typing import ClassVar
-import random
 
-import folium
-import pickle
-import geopandas as gpd
 import dash
 import dash_bootstrap_components as dbc
 import dash_leaflet as dl
+import folium
+import geopandas as gpd
 import joblib
 import matplotlib
+import matplotlib.colors
 import matplotlib.colors as mcolors
+import matplotlib.patches as mpatches
+import matplotlib.pyplot as plt
 import msgspec
 import numpy as np
 import pandas as pd
 import polars as pl
 import pyarrow
 import pyarrow.parquet as pq
+import pyproj
+import rasterio
 import sgis as sg
 import shapely
+import xarray as xr
+from affine import Affine
 from dash import Dash
 from dash import Input
 from dash import Output
@@ -51,21 +58,26 @@ from dash import html
 from dash.development.base_component import Component
 from dash_extensions.javascript import Namespace
 from fsspec.spec import AbstractFileSystem
+from gcsfs import GCSFileSystem
 from geopandas import GeoDataFrame
 from geopandas import GeoSeries
 from geopandas.array import GeometryArray
 from jenkspy import jenks_breaks
-from sgis.io.dapla_functions import _get_geo_metadata
-from sgis.io.dapla_functions import _read_pyarrow
+from rasterio import features
+from rasterio.plot import show
+from sgis import get_common_crs
 from sgis.io.dapla_functions import _get_bounds_parquet
 from sgis.io.dapla_functions import _get_bounds_parquet_from_open_file
+from sgis.io.dapla_functions import _get_geo_metadata
+from sgis.io.dapla_functions import _read_pyarrow
 from sgis.maps.wms import WmsLoader
 from shapely import Geometry
 from shapely.errors import GEOSException
 from shapely.geometry import Point
 from shapely.geometry import Polygon
-from sgis import get_common_crs
-import rasterio
+from shapely.geometry import shape
+
+from geo_explorer import LocalFileSystem
 
 from .file_browser import FileBrowser
 from .fs import LocalFileSystem
@@ -73,8 +85,8 @@ from .utils import _clicked_button_style
 from .utils import _standardize_path
 from .utils import _unclicked_button_style
 from .utils import get_button_with_tooltip
-from .utils import time_method_call
 from .utils import time_function_call
+from .utils import time_method_call
 
 OFFWHITE: str = "#ebebeb"
 FILE_CHECKED_COLOR: str = "#3e82ff"
@@ -1115,6 +1127,243 @@ def _get_multiple_leaflet_overlay(df, path, column, nan_color, alpha, **kwargs):
     )
 
 
+class NetCDFPanel:
+    def __init__(
+        self, url: str | None = None, code_block: str | None = None, **kwargs
+    ) -> None:
+        self.url = url or ""
+        self.code_block = code_block or None
+        self.crs = None
+        self.bounds = None
+
+        if not url:
+            return
+        import xarray as xr
+
+        self.ds = xr.open_dataset(self.url, **kwargs)
+        self.kwargs = kwargs
+        self.data_vars = [
+            key
+            for key, value in self.ds.data_vars.items()
+            if len(value.shape) == len(list(self.ds.coords))
+        ]
+        # self.ds = self.ds.assign_coords(
+        #     {
+        #         "time": pd.to_datetime(self.ds.time.values)
+        #         .round("h")
+        #         .astype(str)
+        #         .str[:10]
+        #         .values
+        #     }
+        # )
+        self.selected_time = self.ds.time[0].values
+        self._register_callbacks()
+
+    def get_nc_panel(self):
+        # if not self.url:
+        #     return None
+        return dbc.Col(
+            [
+                dbc.Row(
+                    dcc.Input(
+                        self.url,
+                        type="text",
+                        id="nc-url",
+                        debounce=1,
+                        placeholder="NetCDF url...",
+                        className="expandable-input-left-aligned",
+                    ),
+                ),
+                dbc.Row(
+                    dcc.Dropdown(
+                        id="nc-time-dropdown",
+                        value=self.selected_time,
+                        options=[
+                            {"label": str(x)[:10], "value": x}
+                            for x in np.sort(self.ds.time.values)
+                        ],
+                        style={
+                            "font-size": 22,
+                            "overflow": "visible",
+                        },
+                        # maxHeight=600,
+                        clearable=False,
+                    ),
+                ),
+                dbc.Row(
+                    dcc.Input(
+                        id="nc-code-block-input",
+                        value=None,
+                        type="text",
+                        debounce=1,
+                        placeholder="NetCDF code block...",
+                        className="expandable-input-left-aligned",
+                    ),
+                ),
+            ]
+        )
+
+    @staticmethod
+    def dataset_is_empty(ds):
+        for attr in ds.coords:
+            if not any(getattr(ds, attr).shape):
+                return True
+        return False
+
+    def nc_to_polars(self, bounds) -> pl.LazyFrame:
+        if self.code_block is None:
+            return pl.LazyFrame()
+        bbox_correct_crs = (
+            GeoSeries([shapely.box(*bounds)], crs=4326).to_crs(self.crs).union_all()
+        )
+        clipped_bbox = bbox_correct_crs.intersection(shapely.box(*self.bounds))
+        minx, miny, maxx, maxy = clipped_bbox.bounds
+
+        print(int(bbox_correct_crs.area / 1_000_000))
+        print(int(clipped_bbox.area / 1_000_000))
+
+        filtered = self.ds.sel(
+            # time=(self.ds.time == self.selected_time),
+            x=slice(minx, maxx),
+            y=slice(maxy, miny),
+        )
+        if self.dataset_is_empty(filtered):
+            return pl.LazyFrame()
+
+        ds = filtered
+        try:
+            xarr = eval(self.code_block)
+            if callable(xarr):
+                xarr = xarr(ds)
+        except SyntaxError:
+            exec(self.code_block)
+
+        print(xarr.shape)
+        print(int(xarr.notnull().sum()))
+        df: GeoDataFrame = xarry_to_geopandas(
+            xarr, "value", bounds=clipped_bbox.bounds, crs=self.crs
+        )
+        print(df)
+        df, dtypes = _geopandas_to_polars(df, path=self.url)
+        df = df.with_columns(_unique_id=_get_unique_id(9999)).lazy()
+        return df
+
+    def _register_callbacks(self):
+        @callback(
+            Output("nc-hide-div", "style"),
+            Input("nc-hide-button", "n_clicks"),
+        )
+        def open_panel(n_clicks):
+            if (n_clicks or 0) % 2 == 0:
+                return {"display": "none"}
+            return None
+
+        @callback(
+            # Output("nc-hide-div", "style"),
+            Input("nc-url", "value"),
+        )
+        def update_url(value):
+            self.__init__(url=value, **self.kwargs)
+
+        @callback(
+            # Output("nc-hide-div", "style"),
+            Input("nc-time-dropdown", "value"),
+        )
+        def update_time(value):
+            if value is not None:
+                self.selected_time = value
+
+        @callback(
+            # Output("nc-hide-div", "style"),
+            Input("nc-code-block-input", "value"),
+        )
+        def update_code_block(value):
+            if value is not None:
+                self.code_block = value
+
+
+class NBSNetCDFPanel(NetCDFPanel):
+    def __init__(self, url: str, **kwargs) -> None:
+        super().__init__(url=url, **kwargs)
+        self.crs = pyproj.CRS(self.ds.UTM_projection.epsg_code)
+        self.bounds = (
+            GeoSeries(
+                [
+                    shapely.box(
+                        *[
+                            getattr(self.ds, f"geospatial_{x}")
+                            for x in ["lon_min", "lat_min", "lon_max", "lat_max"]
+                        ]
+                    )
+                ],
+                crs=self.ds.geospatial_bounds_crs,
+            )
+            .to_crs(self.crs)
+            .total_bounds
+        )
+
+
+def xarry_to_geopandas(xarr, name: str, bounds, crs):
+    if len(xarr.shape) == 2:
+        height, width = xarr.shape
+    elif len(xarr.shape) == 3:
+        height, width = xarr.shape[1:]
+    else:
+        raise ValueError(xarr.shape)
+    transform = rasterio.transform.from_bounds(*bounds, width, height)
+    return GeoDataFrame(
+        pd.DataFrame(
+            _array_to_geojson(xarr.values, transform, 1),
+            columns=[name, "geometry"],
+        ),
+        geometry="geometry",
+        crs=crs,
+    )[lambda df: (df[name].notna())]
+
+
+def _array_to_geojson(
+    array: np.ndarray, transform: Affine, processes: int
+) -> list[tuple]:
+    if hasattr(array, "mask"):
+        if isinstance(array.mask, np.ndarray):
+            mask = array.mask == False
+        else:
+            mask = None
+        array = array.data
+    else:
+        mask = None
+
+    try:
+        return _array_to_geojson_loop(array, transform, mask, processes)
+    except ValueError:
+        try:
+            array = array.astype(np.float32)
+            return _array_to_geojson_loop(array, transform, mask, processes)
+
+        except Exception as err:
+            raise err.__class__(f"{array.shape}: {err}") from err
+
+
+def _array_to_geojson_loop(array, transform, mask, processes):
+    if processes == 1:
+        return [
+            (value, shape(geom))
+            for geom, value in features.shapes(array, transform=transform, mask=mask)
+        ]
+    else:
+        with joblib.Parallel(n_jobs=processes, backend="threading") as parallel:
+            return parallel(
+                joblib.delayed(_value_geom_pair)(value, geom)
+                for geom, value in features.shapes(
+                    array, transform=transform, mask=mask
+                )
+            )
+
+
+def _value_geom_pair(value, geom):
+    return (value, shape(geom))
+
+
 class GeoExplorer:
     """Class for exploring geodata interactively.
 
@@ -1271,6 +1520,7 @@ class GeoExplorer:
         nan_color: str = "#969696",
         nan_label: str = "Missing",
         max_read_size_per_callback: int = 1e9,
+        netcdf: NetCDFPanel | None = None,
         **kwargs,
     ) -> None:
         """Initialiser."""
@@ -1318,6 +1568,7 @@ class GeoExplorer:
         self.max_read_size_per_callback = max_read_size_per_callback
         self._force_categorical = False
         self._is_recursing = False
+        self.nc = netcdf
 
         if is_jupyter():
             service_prefix = os.environ["JUPYTERHUB_SERVICE_PREFIX"].strip("/")
@@ -1549,7 +1800,31 @@ class GeoExplorer:
                                                             ),
                                                         ),
                                                     ),
+                                                    dbc.Col(
+                                                        html.Button(
+                                                            "Hide/show NetCDF options",
+                                                            id="nc-hide-button",
+                                                            n_clicks=(
+                                                                1
+                                                                if self.nc is not None
+                                                                else 0
+                                                            ),
+                                                        ),
+                                                    ),
                                                 ]
+                                            ),
+                                            html.Div(
+                                                children=(
+                                                    self.nc.get_nc_panel()
+                                                    if self.nc
+                                                    else []
+                                                ),
+                                                id="nc-hide-div",
+                                                style=(
+                                                    {"display": "none"}
+                                                    if not self.nc
+                                                    else None
+                                                ),
                                             ),
                                             html.Div(
                                                 html.Div(
@@ -2004,10 +2279,7 @@ class GeoExplorer:
                         img_bounds = GeoSeries(
                             [shapely.box(*src.bounds)], crs=src.crs
                         ).to_crs(4326)
-                        self._images[path] = {
-                            "bounds": next(iter(img_bounds)),
-                            "checked": True,
-                        }
+                        self._images[path] = next(iter(img_bounds))
 
             if len(missing) > 10:
                 to_read = 0
@@ -2904,29 +3176,9 @@ class GeoExplorer:
             )
 
             if is_numeric and len(values_no_nans):
-                if len(values_no_nans_unique) <= k:
-                    bins = list(values_no_nans_unique)
-                else:
-                    bins = jenks_breaks(values_no_nans.to_numpy(), n_classes=k)
-
-                cmap_ = matplotlib.colormaps.get_cmap(cmap)
-                colors_ = [
-                    matplotlib.colors.to_hex(cmap_(int(i)))
-                    for i in np.linspace(0, 255, num=k + 1)
-                ]
-                rounded_bins = [round(x, 1) for x in bins]
-                color_dict = {
-                    f"{round(min(values_no_nans), 1)} - {rounded_bins[0]}": colors_[0],
-                    **{
-                        f"{start} - {stop}": colors_[i + 1]
-                        for i, (start, stop) in enumerate(
-                            itertools.pairwise(rounded_bins[1:])
-                        )
-                    },
-                    f"{rounded_bins[-1]} - {round(max(values_no_nans), 1)}": colors_[
-                        -1
-                    ],
-                }
+                color_dict, bins = get_numeric_colors(
+                    values_no_nans_unique, values_no_nans, cmap, k
+                )
             else:
                 new_values = [
                     value
@@ -3125,6 +3377,7 @@ class GeoExplorer:
                         vmax = np.finfo(arr.dtype).max
                     minx, miny, maxx, maxy = clipped_bounds.bounds
 
+                    # hack: using folium because dash_leaflet doesn't accept np.array
                     image_overlay = folium.raster_layers.ImageOverlay(
                         arr,
                         bounds=[[miny, minx], [maxy, maxx]],
@@ -3132,17 +3385,11 @@ class GeoExplorer:
                         vmax=vmax,
                     )
                     img_name = Path(img_path).stem
-                    image_overlay.layer_name = img_name
                     image_overlay = dl.ImageOverlay(
                         url=image_overlay.url,
-                        # arr,
                         bounds=[[miny, minx], [maxy, maxx]],
                         opacity=self.alpha,
-                        # show=True,
-                        # vmin=arr.min(),
-                        # vmax=arr.max(),
                     )
-                    # image_overlay.layerName = Path(img_path).stem
                     image_overlay = dl.Overlay(
                         image_overlay,
                         name=img_name,
@@ -3150,12 +3397,59 @@ class GeoExplorer:
                     )
                     image_overlays.append(image_overlay)
 
+            if self.nc is not None:
+                nc_df = self.nc.nc_to_polars(bounds)
+                if len(nc_df.collect()):
+                    values_no_nans = (
+                        nc_df.select("value")
+                        .collect()["value"]
+                        .drop_nans()
+                        .drop_nulls()
+                    )
+                    values_no_nans_unique = set(values_no_nans.unique())
+                    color_dict, bins = get_numeric_colors(
+                        values_no_nans_unique, values_no_nans, cmap="viridis", k=7
+                    )
+                    color_dict = {
+                        i: color for i, color in enumerate(color_dict.values())
+                    }
+                    nc_df = _fix_colors(
+                        nc_df,
+                        "value",
+                        bins,
+                        is_numeric=True,
+                        color_dict=color_dict,
+                        nan_color=self.nan_color,
+                        nan_label=self.nan_label,
+                    )
+                    nc_overlay = [
+                        _get_multiple_leaflet_overlay(
+                            nc_df,
+                            self.nc.url,
+                            "value",
+                            self.nan_color,
+                            self.alpha,
+                            onEachFeature=ns("yellowIfHighlighted"),
+                            pointToLayer=ns("pointToLayerCircle"),
+                            hideout=dict(
+                                circleOptions=dict(
+                                    fillOpacity=1, stroke=False, radius=5
+                                ),
+                            ),
+                        )
+                    ]
+                else:
+                    nc_overlay = []
+            else:
+                nc_overlay = []
+
             return (
                 dl.LayersControl(
                     list(self._base_layers.values())
                     + wms_layers
                     + data
                     + image_overlays
+                    + nc_overlay
                 ),
                 None,
                 max_rows_component,
@@ -4664,3 +4958,25 @@ class GeoExplorer:
                 pickle.dumps(value)
             except pickle.PicklingError:
                 print(f"{variable_name} with value {value} is not pickable")
+
+
+def get_numeric_colors(values_no_nans_unique, values_no_nans, cmap, k):
+    if len(values_no_nans_unique) <= k:
+        bins = list(values_no_nans_unique)
+    else:
+        bins = jenks_breaks(values_no_nans.to_numpy(), n_classes=k)
+
+    cmap_ = matplotlib.colormaps.get_cmap(cmap)
+    colors_ = [
+        matplotlib.colors.to_hex(cmap_(int(i))) for i in np.linspace(0, 255, num=k + 1)
+    ]
+    rounded_bins = [round(x, 1) for x in bins]
+    color_dict = {
+        f"{round(min(values_no_nans), 1)} - {rounded_bins[0]}": colors_[0],
+        **{
+            f"{start} - {stop}": colors_[i + 1]
+            for i, (start, stop) in enumerate(itertools.pairwise(rounded_bins[1:]))
+        },
+        f"{rounded_bins[-1]} - {round(max(values_no_nans), 1)}": colors_[-1],
+    }
+    return color_dict, bins

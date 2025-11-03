@@ -1,7 +1,7 @@
 import time
+from collections.abc import Callable
 from functools import wraps
 from pathlib import Path
-from collections.abc import Callable
 
 import dash_bootstrap_components as dbc
 from dash import html
