@@ -1,3 +1,5 @@
+import abc
+from abc import abstractmethod
 import datetime
 import inspect
 import itertools
@@ -10,6 +12,7 @@ import random
 import re
 import signal
 import sys
+from dataclasses import dataclass
 import time
 from collections.abc import Callable
 from collections.abc import Sequence
@@ -110,8 +113,6 @@ DEBUG: bool = False
 
 _PROFILE_DICT = {}
 
-loc = {}
-
 if DEBUG:
 
     def debug_print(*args):
@@ -209,6 +210,10 @@ def _get_sql_query_with_col(
 def read_file(
     path: str, file_system: AbstractFileSystem, **kwargs
 ) -> tuple[pl.LazyFrame, dict[str, pl.DataType]]:
+
+    if Path(path).suffix in [".nc", ".ncml", ".zarr"]:
+        ds = xr.open_dataset(path, engine="netcdf4")
+        return ds, {}
 
     if not path.endswith(".parquet") and FILE_SPLITTER_TXT not in path:
         try:
@@ -740,6 +745,10 @@ def _read_files(explorer, paths: list[str], mask=None, **kwargs) -> None:
     for path, (df, dtypes) in zip(paths, more_data, strict=True):
         if df is None:
             continue
+        if isinstance(df, xr.Dataset):
+            explorer._loaded_data[path] = df
+            # explorer._nc.crs[path] = pyproj.CRS(df.UTM_projection.epsg_code)
+            continue
         explorer._loaded_data[path] = df.with_columns(
             _unique_id=_get_unique_id(explorer._max_unique_id_int)
         ).drop("id", strict=False)
@@ -1091,6 +1100,7 @@ def _get_multiple_leaflet_overlay(df, path, column, nan_color, alpha, **kwargs):
                         "fillColor": color_,
                         "weight": 2,
                         "fillOpacity": alpha,
+                        "strokeWidth": 0.1,
                     },
                     id={
                         "type": "geojson",
@@ -1129,82 +1139,70 @@ def _get_multiple_leaflet_overlay(df, path, column, nan_color, alpha, **kwargs):
     )
 
 
-class NetCDFPanel:
-    def __init__(
-        self, url: str | None = None, code_block: str | None = None, **kwargs
-    ) -> None:
-        self.url = url or ""
-        self.code_block = code_block or None
-        self.crs = None
-        self.bounds = None
+@dataclass
+class NetCDFConfig(abc.ABC):
+    code_block: str | None = None
 
-        if not url:
-            return
+    @abstractmethod
+    def crs_getter(self, ds):
+        pass
+
+    @abstractmethod
+    def bounds_getter(self, ds):
+        pass
+
+    def to_polars(
+        self,
+        ds,
+        bounds,
+        code_block: str | None,
+        path: str,
+    ) -> pl.LazyFrame:
         import xarray as xr
 
-        self.ds = xr.open_dataset(self.url, **kwargs)
-        self.kwargs = kwargs
-        self.data_vars = [
-            key
-            for key, value in self.ds.data_vars.items()
-            if len(value.shape) == len(list(self.ds.coords))
-        ]
-        # self.ds = self.ds.assign_coords(
-        #     {
-        #         "time": pd.to_datetime(self.ds.time.values)
-        #         .round("h")
-        #         .astype(str)
-        #         .str[:10]
-        #         .values
-        #     }
-        # )
-        self.times = [str(x)[:10] for x in list(self.ds.time.values)]
-        self.selected_time = self.ds.time[0].values
-        self._register_callbacks()
+        if code_block is None:
+            return pl.LazyFrame({col: [] for col in ADDED_COLUMNS})
 
-    def get_nc_panel(self):
-        # if not self.url:
-        #     return None
-        return dbc.Col(
-            [
-                dbc.Row(
-                    dcc.Input(
-                        self.url,
-                        type="text",
-                        id="nc-url",
-                        debounce=1,
-                        placeholder="NetCDF url...",
-                        className="expandable-input-left-aligned",
-                    ),
-                ),
-                dbc.Row(
-                    dcc.Dropdown(
-                        id="nc-time-dropdown",
-                        value=self.selected_time,
-                        options=[
-                            {"label": str(x)[:10], "value": str(x)[:10]}
-                            for x in np.sort(self.ds.time.values)
-                        ],
-                        style={
-                            "font-size": 22,
-                            "overflow": "visible",
-                        },
-                        # maxHeight=600,
-                        clearable=False,
-                    ),
-                ),
-                dbc.Row(
-                    dcc.Input(
-                        id="nc-code-block-input",
-                        value=self.code_block,
-                        type="text",
-                        debounce=1,
-                        placeholder="NetCDF code block...",
-                        className="expandable-input-left-aligned",
-                    ),
-                ),
-            ]
+        crs = self.crs_getter(ds)
+        ds_bounds = self.bounds_getter(ds)
+
+        bbox_correct_crs = (
+            GeoSeries([shapely.box(*bounds)], crs=4326).to_crs(crs).union_all()
         )
+        clipped_bbox = bbox_correct_crs.intersection(shapely.box(*ds_bounds))
+        minx, miny, maxx, maxy = clipped_bbox.bounds
+
+        filtered = ds.sel(
+            x=slice(minx, maxx),
+            y=slice(maxy, miny),
+        )
+
+        if self.dataset_is_empty(filtered):
+            return pl.LazyFrame({col: [] for col in ADDED_COLUMNS})
+
+        ds = filtered
+
+        loc = {}
+
+        try:
+            xarr = eval(code_block)
+            if callable(xarr):
+                xarr = xarr(ds)
+        except SyntaxError:
+            exec(code_block, globals=globals() | {"ds": ds}, locals=loc)
+            xarr = loc["xarr"]
+
+        if not isinstance(xarr, (xr.DataArray | xr.Dataset)):
+            raise ValueError(
+                f"code block must return xarray DataArray or Dataset. Got {type(xarr)} from {code_block}"
+            )
+
+        df: GeoDataFrame = xarry_to_geopandas(
+            xarr, "value", bounds=clipped_bbox.bounds, crs=crs
+        )
+        df, _ = _geopandas_to_polars(df, path=path)
+        df = df.with_columns(_unique_id=_get_unique_id(9999)).lazy()
+        return df
 
     @staticmethod
     def dataset_is_empty(ds):
@@ -1214,112 +1212,25 @@ class NetCDFPanel:
                 return True
         return False
 
-    def nc_to_polars(self, bounds) -> pl.LazyFrame:
-        import xarray as xr
 
-        if self.code_block is None:
-            return pl.LazyFrame()
-        bbox_correct_crs = (
-            GeoSeries([shapely.box(*bounds)], crs=4326).to_crs(self.crs).union_all()
-        )
-        clipped_bbox = bbox_correct_crs.intersection(shapely.box(*self.bounds))
-        minx, miny, maxx, maxy = clipped_bbox.bounds
+class NBSNetCDFConfig(NetCDFConfig):
+    def crs_getter(self, ds):
+        return pyproj.CRS(ds.UTM_projection.epsg_code)
 
-        print(int(bbox_correct_crs.area / 1_000_000))
-        print(int(clipped_bbox.area / 1_000_000))
-
-        # selected_time_index = self.times.index(self.selected_time)
-        # time = self.ds.time.values[selected_time_index]
-        filtered = self.ds.sel(
-            # time=(self.ds.time == time),
-            # time=(self.ds.time == self.selected_time),
-            x=slice(minx, maxx),
-            y=slice(maxy, miny),
-        )  # .isel(time=selected_time_index)
-
-        if self.dataset_is_empty(filtered):
-            return pl.LazyFrame()
-
-        ds = filtered
-        try:
-            xarr = eval(self.code_block)
-            if callable(xarr):
-                xarr = xarr(ds)
-        except SyntaxError:
-            exec(self.code_block, globals=globals() | {"ds": ds}, locals=loc)
-            xarr = loc["xarr"]
-            # func_name = self.code_block.split("def ")[1].split("(")[0]
-            # xarr = eval(func_name)(ds)
-
-        print(ds)
-        print(xarr)
-
-        if not isinstance(xarr, (xr.DataArray | xr.Dataset)):
-            print(type(xarr))
-            return pl.LazyFrame()
-
-        df: GeoDataFrame = xarry_to_geopandas(
-            xarr, "value", bounds=clipped_bbox.bounds, crs=self.crs
-        )
-        print(df)
-        df, dtypes = _geopandas_to_polars(df, path=self.url)
-        df = df.with_columns(_unique_id=_get_unique_id(9999)).lazy()
-        return df
-
-    def _register_callbacks(self):
-        @callback(
-            Output("nc-hide-div", "style"),
-            Input("nc-hide-button", "n_clicks"),
-        )
-        def open_panel(n_clicks):
-            if (n_clicks or 0) % 2 == 0:
-                return {"display": "none"}
-            return None
-
-        @callback(
-            # Output("nc-hide-div", "style"),
-            Input("nc-url", "value"),
-        )
-        def update_url(value):
-            self.__init__(url=value, **self.kwargs)
-
-        @callback(
-            # Output("nc-hide-div", "style"),
-            Input("nc-time-dropdown", "value"),
-        )
-        def update_time(value):
-            print(value, self.selected_time)
-            if value is not None:
-                if isinstance(value, int):
-                    value = datetime.datetime.fromtimestamp(value / 1_000_000_000)
-                self.selected_time = value
-
-        @callback(
-            # Output("nc-hide-div", "style"),
-            Input("nc-code-block-input", "value"),
-        )
-        def update_code_block(value):
-            if value is not None:
-                self.code_block = value
-
-
-class NBSNetCDFPanel(NetCDFPanel):
-    def __init__(self, url: str, **kwargs) -> None:
-        super().__init__(url=url, **kwargs)
-        self.crs = pyproj.CRS(self.ds.UTM_projection.epsg_code)
-        self.bounds = (
+    def bounds_getter(self, ds):
+        return (
             GeoSeries(
                 [
                     shapely.box(
                         *[
-                            getattr(self.ds, f"geospatial_{x}")
+                            getattr(ds, f"geospatial_{x}")
                             for x in ["lon_min", "lat_min", "lon_max", "lat_max"]
                         ]
                     )
                 ],
-                crs=self.ds.geospatial_bounds_crs,
+                crs=ds.geospatial_bounds_crs,
             )
-            .to_crs(self.crs)
+            .to_crs(pyproj.CRS(ds.UTM_projection.epsg_code))
             .total_bounds
         )
 
@@ -1543,7 +1454,6 @@ class GeoExplorer:
         nan_color: str = "#969696",
         nan_label: str = "Missing",
         max_read_size_per_callback: int = 1e9,
-        netcdf: NetCDFPanel | None = None,
         **kwargs,
     ) -> None:
         """Initialiser."""
@@ -1591,7 +1501,7 @@ class GeoExplorer:
         self.max_read_size_per_callback = max_read_size_per_callback
         self._force_categorical = False
         self._is_recursing = False
-        self.nc = netcdf
+        self._nc = {}
 
         if is_jupyter():
             service_prefix = os.environ["JUPYTERHUB_SERVICE_PREFIX"].strip("/")
@@ -1823,31 +1733,7 @@ class GeoExplorer:
                                                             ),
                                                         ),
                                                     ),
-                                                    dbc.Col(
-                                                        html.Button(
-                                                            "Hide/show NetCDF options",
-                                                            id="nc-hide-button",
-                                                            n_clicks=(
-                                                                1
-                                                                if self.nc is not None
-                                                                else 0
-                                                            ),
-                                                        ),
-                                                    ),
                                                 ]
-                                            ),
-                                            html.Div(
-                                                children=(
-                                                    self.nc.get_nc_panel()
-                                                    if self.nc
-                                                    else []
-                                                ),
-                                                id="nc-hide-div",
-                                                style=(
-                                                    {"display": "none"}
-                                                    if not self.nc
-                                                    else None
-                                                ),
                                             ),
                                             html.Div(
                                                 html.Div(
@@ -1991,6 +1877,11 @@ class GeoExplorer:
                 raise ValueError(error_mess)
             for key, value in x.items():
                 key = _standardize_path(key)
+                if isinstance(value, NetCDFConfig):
+                    self.selected_files[key] = True
+                    self._queries[key] = value.code_block
+                    self._nc[key] = value
+                    continue
                 if value is not None and not isinstance(value, (GeoDataFrame | str)):
                     raise ValueError(error_mess)
                 elif not isinstance(value, GeoDataFrame):
@@ -3130,6 +3021,10 @@ class GeoExplorer:
                 self.color_dict,
             )
 
+            if self._nc and column is None and self._concatted_data is not None:
+                column = "value"
+                self.column = "value"
+
             if not column or (
                 self._concatted_data is not None and column not in self._concatted_data
             ):
@@ -3282,7 +3177,7 @@ class GeoExplorer:
                 "style",
             ),
             State("debounced_bounds", "value"),
-            State("column-dropdown", "value"),
+            # State("column-dropdown", "value"),
             State("bins", "data"),
         )
         @time_method_call(_PROFILE_DICT)
@@ -3300,7 +3195,7 @@ class GeoExplorer:
             checked_clicks,
             checked_wms_clicks,
             bounds,
-            column,
+            # column,
             bins,
         ):
             triggered = dash.callback_context.triggered_id
@@ -3341,7 +3236,7 @@ class GeoExplorer:
                     concatted_data=self._concatted_data,
                     nan_color=self.nan_color,
                     nan_label=self.nan_label,
-                    column=column,
+                    column=self.column,
                     is_numeric=is_numeric,
                     color_dict=color_dict,
                     bins=bins,
@@ -3420,59 +3315,12 @@ class GeoExplorer:
                     )
                     image_overlays.append(image_overlay)
 
-            if self.nc is not None:
-                nc_df = self.nc.nc_to_polars(bounds)
-                if len(nc_df.collect()):
-                    values_no_nans = (
-                        nc_df.select("value")
-                        .collect()["value"]
-                        .drop_nans()
-                        .drop_nulls()
-                    )
-                    values_no_nans_unique = set(values_no_nans.unique())
-                    color_dict, bins = get_numeric_colors(
-                        values_no_nans_unique, values_no_nans, cmap="viridis", k=7
-                    )
-                    color_dict = {
-                        i: color for i, color in enumerate(color_dict.values())
-                    }
-                    nc_df = _fix_colors(
-                        nc_df,
-                        "value",
-                        bins,
-                        is_numeric=True,
-                        color_dict=color_dict,
-                        nan_color=self.nan_color,
-                        nan_label=self.nan_label,
-                    )
-                    nc_overlay = [
-                        _get_multiple_leaflet_overlay(
-                            nc_df,
-                            self.nc.url,
-                            "value",
-                            self.nan_color,
-                            self.alpha,
-                            onEachFeature=ns("yellowIfHighlighted"),
-                            pointToLayer=ns("pointToLayerCircle"),
-                            hideout=dict(
-                                circleOptions=dict(
-                                    fillOpacity=1, stroke=False, radius=5
-                                ),
-                            ),
-                        )
-                    ]
-                else:
-                    nc_overlay = []
-            else:
-                nc_overlay = []
-
             return (
                 dl.LayersControl(
                     list(self._base_layers.values())
                     + wms_layers
                     + data
                     + image_overlays
-                    + nc_overlay
                 ),
                 None,
                 max_rows_component,
@@ -4265,7 +4113,9 @@ class GeoExplorer:
 
     @property
     def _columns(self) -> dict[str, set[str]]:
-        return {path: set(dtypes) for path, dtypes in self._dtypes.items()}
+        return {path: set(dtypes) for path, dtypes in self._dtypes.items()} | {
+            path: {"value"} for path in self._nc
+        }
 
     def _has_column(self, path: str, column: str) -> bool:
         return bool(
@@ -4362,6 +4212,14 @@ class GeoExplorer:
                 if not all(part in key_parts for part in path_parts):
                     continue
                 df = self._loaded_data[key]
+                if isinstance(df, (xr.Dataset | xr.DataArray)):
+                    try:
+                        dfs[key] = self._nc[path].to_polars(
+                            df, bounds, self._queries.get(key, None), path=key
+                        )
+                    except Exception as e:
+                        alerts.add(str(e))
+                    continue
                 if bounds is not None:
                     df = filter_by_bounds(df, bounds)
                 if (
@@ -4854,6 +4712,8 @@ class GeoExplorer:
             ]
         )[lambda x: ~x.index.duplicated()]
 
+        print(self._bounds_series)
+
     def _get_child_paths(self, paths):
         child_paths = {}
         for path in paths:
@@ -4862,6 +4722,8 @@ class GeoExplorer:
         return child_paths
 
     def _get_paths_and_sizes(self, path):
+        if path.startswith("http://") or path.startswith("https://"):
+            return {_standardize_path(path): 0}
         suffix = Path(path).suffix
         child_pattern = f"**/*{suffix}" if suffix else "**/*.*"
         child_paths = {
