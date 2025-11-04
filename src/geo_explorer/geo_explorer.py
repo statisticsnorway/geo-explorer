@@ -1,5 +1,3 @@
-import abc
-from abc import abstractmethod
 import datetime
 import inspect
 import itertools
@@ -12,10 +10,8 @@ import random
 import re
 import signal
 import sys
-from dataclasses import dataclass
 import time
 from collections.abc import Callable
-from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from functools import wraps
@@ -36,20 +32,16 @@ import joblib
 import matplotlib
 import matplotlib.colors
 import matplotlib.colors as mcolors
-import matplotlib.patches as mpatches
-import matplotlib.pyplot as plt
 import msgspec
 import numpy as np
 import pandas as pd
 import polars as pl
 import pyarrow
 import pyarrow.parquet as pq
-import pyproj
 import rasterio
 import sgis as sg
 import shapely
 import xarray as xr
-from affine import Affine
 from dash import Dash
 from dash import Input
 from dash import Output
@@ -61,13 +53,10 @@ from dash import html
 from dash.development.base_component import Component
 from dash_extensions.javascript import Namespace
 from fsspec.spec import AbstractFileSystem
-from gcsfs import GCSFileSystem
 from geopandas import GeoDataFrame
 from geopandas import GeoSeries
 from geopandas.array import GeometryArray
 from jenkspy import jenks_breaks
-from rasterio import features
-from rasterio.plot import show
 from sgis import get_common_crs
 from sgis.io.dapla_functions import _get_bounds_parquet
 from sgis.io.dapla_functions import _get_bounds_parquet_from_open_file
@@ -78,12 +67,12 @@ from shapely import Geometry
 from shapely.errors import GEOSException
 from shapely.geometry import Point
 from shapely.geometry import Polygon
-from shapely.geometry import shape
 
 from geo_explorer import LocalFileSystem
 
 from .file_browser import FileBrowser
 from .fs import LocalFileSystem
+from .nc import NetCDFConfig
 from .utils import _clicked_button_style
 from .utils import _standardize_path
 from .utils import _unclicked_button_style
@@ -1139,165 +1128,6 @@ def _get_multiple_leaflet_overlay(df, path, column, nan_color, alpha, **kwargs):
     )
 
 
-@dataclass
-class NetCDFConfig(abc.ABC):
-    code_block: str | None = None
-
-    @abstractmethod
-    def crs_getter(self, ds):
-        pass
-
-    @abstractmethod
-    def bounds_getter(self, ds):
-        pass
-
-    def to_polars(
-        self,
-        ds,
-        bounds,
-        code_block: str | None,
-        path: str,
-    ) -> pl.LazyFrame:
-        import xarray as xr
-
-        if code_block is None:
-            return pl.LazyFrame({col: [] for col in ADDED_COLUMNS})
-
-        crs = self.crs_getter(ds)
-        ds_bounds = self.bounds_getter(ds)
-
-        bbox_correct_crs = (
-            GeoSeries([shapely.box(*bounds)], crs=4326).to_crs(crs).union_all()
-        )
-        clipped_bbox = bbox_correct_crs.intersection(shapely.box(*ds_bounds))
-        minx, miny, maxx, maxy = clipped_bbox.bounds
-
-        filtered = ds.sel(
-            x=slice(minx, maxx),
-            y=slice(maxy, miny),
-        )
-
-        if self.dataset_is_empty(filtered):
-            return pl.LazyFrame({col: [] for col in ADDED_COLUMNS})
-
-        ds = filtered
-
-        loc = {}
-
-        try:
-            xarr = eval(code_block)
-            if callable(xarr):
-                xarr = xarr(ds)
-        except SyntaxError:
-            exec(code_block, globals=globals() | {"ds": ds}, locals=loc)
-            xarr = loc["xarr"]
-
-        if not isinstance(xarr, (xr.DataArray | xr.Dataset)):
-            raise ValueError(
-                f"code block must return xarray DataArray or Dataset. Got {type(xarr)} from {code_block}"
-            )
-
-        df: GeoDataFrame = xarry_to_geopandas(
-            xarr, "value", bounds=clipped_bbox.bounds, crs=crs
-        )
-        df, _ = _geopandas_to_polars(df, path=path)
-        df = df.with_columns(_unique_id=_get_unique_id(9999)).lazy()
-        return df
-
-    @staticmethod
-    def dataset_is_empty(ds):
-        for attr in ds.coords:
-            if not any(getattr(ds, attr).shape):
-                print("empty", attr, getattr(ds, attr).shape)
-                return True
-        return False
-
-
-class NBSNetCDFConfig(NetCDFConfig):
-    def crs_getter(self, ds):
-        return pyproj.CRS(ds.UTM_projection.epsg_code)
-
-    def bounds_getter(self, ds):
-        return (
-            GeoSeries(
-                [
-                    shapely.box(
-                        *[
-                            getattr(ds, f"geospatial_{x}")
-                            for x in ["lon_min", "lat_min", "lon_max", "lat_max"]
-                        ]
-                    )
-                ],
-                crs=ds.geospatial_bounds_crs,
-            )
-            .to_crs(pyproj.CRS(ds.UTM_projection.epsg_code))
-            .total_bounds
-        )
-
-
-def xarry_to_geopandas(xarr, name: str, bounds, crs):
-    if len(xarr.shape) == 2:
-        height, width = xarr.shape
-    elif len(xarr.shape) == 3:
-        if xarr.shape[0] != 1:
-            raise ValueError("0th dimension/axis must have 1 level")
-        height, width = xarr.shape[1:]
-    else:
-        raise ValueError(xarr.shape)
-    transform = rasterio.transform.from_bounds(*bounds, width, height)
-    return GeoDataFrame(
-        pd.DataFrame(
-            _array_to_geojson(xarr.values, transform, 1),
-            columns=[name, "geometry"],
-        ),
-        geometry="geometry",
-        crs=crs,
-    )[lambda df: (df[name].notna())]
-
-
-def _array_to_geojson(
-    array: np.ndarray, transform: Affine, processes: int
-) -> list[tuple]:
-    if hasattr(array, "mask"):
-        if isinstance(array.mask, np.ndarray):
-            mask = array.mask == False
-        else:
-            mask = None
-        array = array.data
-    else:
-        mask = None
-
-    try:
-        return _array_to_geojson_loop(array, transform, mask, processes)
-    except ValueError:
-        try:
-            array = array.astype(np.float32)
-            return _array_to_geojson_loop(array, transform, mask, processes)
-
-        except Exception as err:
-            raise err.__class__(f"{array.shape}: {err}") from err
-
-
-def _array_to_geojson_loop(array, transform, mask, processes):
-    if processes == 1:
-        return [
-            (value, shape(geom))
-            for geom, value in features.shapes(array, transform=transform, mask=mask)
-        ]
-    else:
-        with joblib.Parallel(n_jobs=processes, backend="threading") as parallel:
-            return parallel(
-                joblib.delayed(_value_geom_pair)(value, geom)
-                for geom, value in features.shapes(
-                    array, transform=transform, mask=mask
-                )
-            )
-
-
-def _value_geom_pair(value, geom):
-    return (value, shape(geom))
-
-
 class GeoExplorer:
     """Class for exploring geodata interactively.
 
@@ -1348,7 +1178,7 @@ class GeoExplorer:
             function is cycled until all data is read. This is because long callbacks time out.
         **kwargs: Additional keyword arguments passed to dash_leaflet.Map: https://www.dash-leaflet.com/components/map_container.
 
-    A "clean" GeoExplorer can be initialized like this:
+    An empty GeoExplorer can be initialized like this:
 
     >>> from geo_explorer import GeoExplorer
     >>> from geo_explorer import LocalFileSystem
@@ -1439,7 +1269,9 @@ class GeoExplorer:
         favorites: list[str] | None = None,
         port: int = 8050,
         file_system: AbstractFileSystem | None = None,
-        data: dict[str, str | GeoDataFrame] | list[str | dict] | None = None,
+        data: (
+            dict[str, str | GeoDataFrame | NetCDFConfig] | list[str | dict] | None
+        ) = None,
         column: str | None = None,
         color_dict: dict | None = None,
         center: tuple[float, float] | None = None,
@@ -4206,7 +4038,7 @@ class GeoExplorer:
         for path in self.selected_files:
             path_parts = Path(path).parts
             for key in self._loaded_data:
-                if paths and (path not in paths and key not in paths) or key in dfs:
+                if (paths and (path not in paths and key not in paths)) or key in dfs:
                     continue
                 key_parts = Path(key).parts
                 if not all(part in key_parts for part in path_parts):
@@ -4214,11 +4046,16 @@ class GeoExplorer:
                 df = self._loaded_data[key]
                 if isinstance(df, (xr.Dataset | xr.DataArray)):
                     try:
-                        dfs[key] = self._nc[path].to_polars(
-                            df, bounds, self._queries.get(key, None), path=key
+                        df = self._nc[path].to_geopandas(
+                            df, bounds, self._queries.get(key, None)
                         )
                     except Exception as e:
                         alerts.add(str(e))
+                    df, _ = _geopandas_to_polars(df, path=key)
+                    df = df.with_columns(
+                        _unique_id=_get_unique_id(list(self._nc).index(key))
+                    ).lazy()
+                    dfs[key] = df
                     continue
                 if bounds is not None:
                     df = filter_by_bounds(df, bounds)
