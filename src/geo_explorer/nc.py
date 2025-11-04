@@ -8,12 +8,22 @@ import pandas as pd
 import pyproj
 import rasterio
 import shapely
-import xarray as xr
 from affine import Affine
 from geopandas import GeoDataFrame
 from geopandas import GeoSeries
 from rasterio import features
 from shapely.geometry import shape
+
+try:
+    from xarray import Dataset
+    from xarray import DataArray
+except ImportError:
+
+    class Dataset:
+        """Placeholder."""
+
+    class DataArray:
+        """Placeholder."""
 
 
 @dataclass
@@ -26,11 +36,11 @@ class NetCDFConfig(abc.ABC):
     code_block: str | None = None
 
     @abstractmethod
-    def crs_getter(self, ds: xr.Dataset):
+    def crs_getter(self, ds: Dataset):
         pass
 
     @abstractmethod
-    def bounds_getter(self, ds: xr.Dataset):
+    def bounds_getter(self, ds: Dataset):
         pass
 
     def to_geopandas(
@@ -72,7 +82,7 @@ class NetCDFConfig(abc.ABC):
             exec(code_block, globals=globals() | {"ds": ds}, locals=loc)
             xarr = loc["xarr"]
 
-        if not isinstance(xarr, (xr.DataArray | xr.Dataset)):
+        if not isinstance(xarr, (DataArray | Dataset)):
             raise ValueError(
                 f"code block must return xarray DataArray or Dataset. Got {type(xarr)} from {code_block}"
             )
