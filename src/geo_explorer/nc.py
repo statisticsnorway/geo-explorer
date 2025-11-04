@@ -26,11 +26,11 @@ class NetCDFConfig(abc.ABC):
     code_block: str | None = None
 
     @abstractmethod
-    def crs_getter(self, ds):
+    def crs_getter(self, ds: xr.Dataset):
         pass
 
     @abstractmethod
-    def bounds_getter(self, ds):
+    def bounds_getter(self, ds: xr.Dataset):
         pass
 
     def to_geopandas(

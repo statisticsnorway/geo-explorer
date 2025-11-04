@@ -1,3 +1,5 @@
+import abc
+from abc import abstractmethod
 import datetime
 import inspect
 import itertools
@@ -10,8 +12,10 @@ import random
 import re
 import signal
 import sys
+from dataclasses import dataclass
 import time
 from collections.abc import Callable
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from functools import wraps
@@ -32,16 +36,19 @@ import joblib
 import matplotlib
 import matplotlib.colors
 import matplotlib.colors as mcolors
+import matplotlib.patches as mpatches
+import matplotlib.pyplot as plt
 import msgspec
 import numpy as np
 import pandas as pd
 import polars as pl
 import pyarrow
 import pyarrow.parquet as pq
+import pyproj
 import rasterio
 import sgis as sg
 import shapely
-import xarray as xr
+from affine import Affine
 from dash import Dash
 from dash import Input
 from dash import Output
@@ -53,10 +60,13 @@ from dash import html
 from dash.development.base_component import Component
 from dash_extensions.javascript import Namespace
 from fsspec.spec import AbstractFileSystem
+from gcsfs import GCSFileSystem
 from geopandas import GeoDataFrame
 from geopandas import GeoSeries
 from geopandas.array import GeometryArray
 from jenkspy import jenks_breaks
+from rasterio import features
+from rasterio.plot import show
 from sgis import get_common_crs
 from sgis.io.dapla_functions import _get_bounds_parquet
 from sgis.io.dapla_functions import _get_bounds_parquet_from_open_file
@@ -67,18 +77,29 @@ from shapely import Geometry
 from shapely.errors import GEOSException
 from shapely.geometry import Point
 from shapely.geometry import Polygon
+from shapely.geometry import shape
 
-from geo_explorer import LocalFileSystem
+try:
+    from xarray import Dataset
+    from xarray import DataArray
+except ImportError:
+
+    class Dataset:
+        """Placeholder."""
+
+    class DataArray:
+        """Placeholder."""
+
 
 from .file_browser import FileBrowser
 from .fs import LocalFileSystem
-from .nc import NetCDFConfig
 from .utils import _clicked_button_style
 from .utils import _standardize_path
 from .utils import _unclicked_button_style
 from .utils import get_button_with_tooltip
 from .utils import time_function_call
 from .utils import time_method_call
+from .nc import NetCDFConfig
 
 OFFWHITE: str = "#ebebeb"
 FILE_CHECKED_COLOR: str = "#3e82ff"
@@ -201,6 +222,8 @@ def read_file(
 ) -> tuple[pl.LazyFrame, dict[str, pl.DataType]]:
 
     if Path(path).suffix in [".nc", ".ncml", ".zarr"]:
+        import xarray as xr
+
         ds = xr.open_dataset(path, engine="netcdf4")
         return ds, {}
 
@@ -734,7 +757,7 @@ def _read_files(explorer, paths: list[str], mask=None, **kwargs) -> None:
     for path, (df, dtypes) in zip(paths, more_data, strict=True):
         if df is None:
             continue
-        if isinstance(df, xr.Dataset):
+        if isinstance(df, Dataset):
             explorer._loaded_data[path] = df
             # explorer._nc.crs[path] = pyproj.CRS(df.UTM_projection.epsg_code)
             continue
@@ -4038,19 +4061,21 @@ class GeoExplorer:
         for path in self.selected_files:
             path_parts = Path(path).parts
             for key in self._loaded_data:
-                if (paths and (path not in paths and key not in paths)) or key in dfs:
+                if paths and (path not in paths and key not in paths) or key in dfs:
                     continue
                 key_parts = Path(key).parts
                 if not all(part in key_parts for part in path_parts):
                     continue
                 df = self._loaded_data[key]
-                if isinstance(df, (xr.Dataset | xr.DataArray)):
+                if isinstance(df, (Dataset | DataArray)):
                     try:
                         df = self._nc[path].to_geopandas(
                             df, bounds, self._queries.get(key, None)
                         )
                     except Exception as e:
                         alerts.add(str(e))
+                    if df is None:
+                        continue
                     df, _ = _geopandas_to_polars(df, path=key)
                     df = df.with_columns(
                         _unique_id=_get_unique_id(list(self._nc).index(key))
