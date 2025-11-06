@@ -22,7 +22,7 @@ from .utils import get_button_with_tooltip
 
 
 class FileBrowser:
-    file_types: ClassVar[list[str]] = [".parquet", ".tif", ".tiff"]
+    file_types: ClassVar[list[str]] = [".parquet", ".tif", ".tiff", ".nc"]
 
     def __init__(
         self,

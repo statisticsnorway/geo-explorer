@@ -1,5 +1,3 @@
-import abc
-from abc import abstractmethod
 import datetime
 import inspect
 import itertools
@@ -12,10 +10,8 @@ import random
 import re
 import signal
 import sys
-from dataclasses import dataclass
 import time
 from collections.abc import Callable
-from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from functools import wraps
@@ -36,19 +32,15 @@ import joblib
 import matplotlib
 import matplotlib.colors
 import matplotlib.colors as mcolors
-import matplotlib.patches as mpatches
-import matplotlib.pyplot as plt
 import msgspec
 import numpy as np
 import pandas as pd
 import polars as pl
 import pyarrow
 import pyarrow.parquet as pq
-import pyproj
 import rasterio
 import sgis as sg
 import shapely
-from affine import Affine
 from dash import Dash
 from dash import Input
 from dash import Output
@@ -60,13 +52,10 @@ from dash import html
 from dash.development.base_component import Component
 from dash_extensions.javascript import Namespace
 from fsspec.spec import AbstractFileSystem
-from gcsfs import GCSFileSystem
 from geopandas import GeoDataFrame
 from geopandas import GeoSeries
 from geopandas.array import GeometryArray
 from jenkspy import jenks_breaks
-from rasterio import features
-from rasterio.plot import show
 from sgis import get_common_crs
 from sgis.io.dapla_functions import _get_bounds_parquet
 from sgis.io.dapla_functions import _get_bounds_parquet_from_open_file
@@ -77,11 +66,10 @@ from shapely import Geometry
 from shapely.errors import GEOSException
 from shapely.geometry import Point
 from shapely.geometry import Polygon
-from shapely.geometry import shape
 
 try:
-    from xarray import Dataset
     from xarray import DataArray
+    from xarray import Dataset
 except ImportError:
 
     class Dataset:
@@ -93,13 +81,16 @@ except ImportError:
 
 from .file_browser import FileBrowser
 from .fs import LocalFileSystem
+from .nc import NetCDFConfig
+from .utils import _PROFILE_DICT
+from .utils import DEBUG
 from .utils import _clicked_button_style
 from .utils import _standardize_path
 from .utils import _unclicked_button_style
+from .utils import debug_print
 from .utils import get_button_with_tooltip
 from .utils import time_function_call
 from .utils import time_method_call
-from .nc import NetCDFConfig
 
 OFFWHITE: str = "#ebebeb"
 FILE_CHECKED_COLOR: str = "#3e82ff"
@@ -118,45 +109,6 @@ HIDDEN_ADDED_COLUMNS = {
 }
 ADDED_COLUMNS = HIDDEN_ADDED_COLUMNS | {"area"}
 ns = Namespace("onEachFeatureToggleHighlight", "default")
-
-DEBUG: bool = False
-
-_PROFILE_DICT = {}
-
-if DEBUG:
-
-    def debug_print(*args):
-        print(
-            *(
-                f"{type(arg).__name__}: {arg}" if isinstance(arg, Exception) else arg
-                for arg in args
-            )
-        )
-
-else:
-
-    def debug_print(*args):
-        pass
-
-    def time_method_call(_) -> Callable:
-        def decorator(method):
-            @wraps(method)
-            def wrapper(self, *args, **kwargs):
-                return method(self, *args, **kwargs)
-
-            return wrapper
-
-        return decorator
-
-    def time_function_call(_):
-        def decorator(func):
-            @wraps(func)
-            def wrapper(*args, **kwargs):
-                return func(*args, **kwargs)
-
-            return wrapper
-
-        return decorator
 
 
 def _get_default_sql_query(df: pl.LazyFrame | pl.DataFrame, columns: list[str]) -> str:
@@ -221,7 +173,7 @@ def read_file(
     path: str, file_system: AbstractFileSystem, **kwargs
 ) -> tuple[pl.LazyFrame, dict[str, pl.DataType]]:
 
-    if Path(path).suffix in [".nc", ".ncml", ".zarr"]:
+    if Path(path).suffix in [".nc", ".ncml"]:
         import xarray as xr
 
         ds = xr.open_dataset(path, engine="netcdf4")
@@ -369,25 +321,6 @@ def _get_colorpicker_container(color_dict: dict[str, str]) -> html.Div:
                         dbc.Label([column_value]),
                         width="auto",
                     ),
-                    dbc.Col(
-                        get_button_with_tooltip(
-                            "❌",
-                            id={
-                                "type": "delete-cat-btn",
-                                "index": column_value,
-                            },
-                            n_clicks=0,
-                            style={
-                                "color": "red",
-                                "border": "none",
-                                "background": "none",
-                                "cursor": "pointer",
-                                "marginLeft": "auto",
-                            },
-                            tooltip_text="Remove all data in this category",
-                        ),
-                        width="auto",
-                    ),
                 ],
                 style={
                     "display": "flex",
@@ -423,7 +356,7 @@ def _add_data_one_path(
         for key, cols in columns.items()
         for col in cols
         if path in key and col in current_columns
-    } | {"split_index"}
+    } | {"split_index", "_color"}
 
     df = concatted_data.filter(
         (pl.col("__file_path") == path)
@@ -446,7 +379,7 @@ def _add_data_one_path(
     if column is not None and column in columns:
         df = _fix_colors(df, column, bins, is_numeric, color_dict, nan_color, nan_label)
 
-    if column and column not in columns:
+    if column and column not in columns and column != "_color":
         return rows_are_hidden, [
             _get_leaflet_overlay(
                 data=_cheap_geo_interface(df.collect()),
@@ -454,7 +387,7 @@ def _add_data_one_path(
                 style={
                     "color": nan_color,
                     "fillColor": nan_color,
-                    "weight": 2,
+                    "weight": 1,
                     "fillOpacity": alpha,
                 },
                 onEachFeature=ns("yellowIfHighlighted"),
@@ -492,7 +425,7 @@ def _add_data_one_path(
                 style={
                     "color": color,
                     "fillColor": color,
-                    "weight": 2,
+                    "weight": 1,
                     "fillOpacity": alpha,
                 },
                 onEachFeature=ns("yellowIfHighlighted"),
@@ -506,6 +439,8 @@ def _add_data_one_path(
 
 @time_function_call(_PROFILE_DICT)
 def _fix_colors(df, column, bins, is_numeric, color_dict, nan_color, nan_label):
+    if column == "_color":
+        return df
     if not is_numeric:
         return df.with_columns(
             _color=pl.col(column).replace(
@@ -759,7 +694,13 @@ def _read_files(explorer, paths: list[str], mask=None, **kwargs) -> None:
             continue
         if isinstance(df, Dataset):
             explorer._loaded_data[path] = df
-            # explorer._nc.crs[path] = pyproj.CRS(df.UTM_projection.epsg_code)
+            img_bounds = GeoSeries(
+                [shapely.box(*explorer._nc[path].bounds_getter(df))],
+                crs=explorer._nc[path].crs_getter(df),
+            ).to_crs(4326)
+
+            explorer._images[path] = next(iter(img_bounds))
+
             continue
         explorer._loaded_data[path] = df.with_columns(
             _unique_id=_get_unique_id(explorer._max_unique_id_int)
@@ -1110,9 +1051,8 @@ def _get_multiple_leaflet_overlay(df, path, column, nan_color, alpha, **kwargs):
                     style={
                         "color": color_,
                         "fillColor": color_,
-                        "weight": 2,
+                        "weight": 1,
                         "fillOpacity": alpha,
-                        "strokeWidth": 0.1,
                     },
                     id={
                         "type": "geojson",
@@ -1133,7 +1073,7 @@ def _get_multiple_leaflet_overlay(df, path, column, nan_color, alpha, **kwargs):
                         style={
                             "color": nan_color,
                             "fillColor": nan_color,
-                            "weight": 2,
+                            "weight": 1,
                             "fillOpacity": alpha,
                         },
                         id={
@@ -1190,8 +1130,8 @@ class GeoExplorer:
         max_rows: Max number of rows to sample per dataset if number of feature in bounds excedes.
             Note that rendering more than the default (10,000) might crash the server, especially for
             polygon features.
-        selected_features: list of indices of features (rows) to show in attribute table
-            at init. Fetch this list with the "Export as code" button.
+        # selected_features: list of indices of features (rows) to show in attribute table
+        #     at init. Fetch this list with the "Export as code" button.
         hard_click: If True, clicking on a geometry triggers all overlapping geometries to be marked.
         splitted: If True, all rows will have a separate label and color.
         alpha: Opacity/transparency of the geometries.
@@ -1302,7 +1242,7 @@ class GeoExplorer:
         wms: dict[str, WmsLoader] | None = None,
         wms_layers_checked: dict[str, list[str]] | None = None,
         max_rows: int = 10_000,
-        selected_features: list[str] | None = None,
+        # selected_features: list[str] | None = None,
         hard_click: bool = False,
         splitted: bool = False,
         alpha: float = 0.6,
@@ -1347,8 +1287,7 @@ class GeoExplorer:
         self._max_unique_id_int: int = 0
         self._loaded_data_sizes: dict[str, int] = {}
         self._concatted_data: pl.DataFrame | None = None
-        self._deleted_categories = set()
-        self.selected_features = {}
+        self._selected_features = {}
         self._file_browser = FileBrowser(
             start_dir, file_system=file_system, favorites=favorites
         )
@@ -1640,14 +1579,6 @@ class GeoExplorer:
                                         },
                                     ),
                                     dbc.Row(
-                                        get_button_with_tooltip(
-                                            "Reload categories",
-                                            id="reload-categories",
-                                            n_clicks=0,
-                                            tooltip_text="Get back categories that have been X-ed out",
-                                        ),
-                                    ),
-                                    dbc.Row(
                                         id="colorpicker-container",
                                     ),
                                 ],
@@ -1823,11 +1754,11 @@ class GeoExplorer:
 
         self.app.layout = get_layout
 
-        for unique_id in selected_features if selected_features is not None else []:
-            i = int(float(unique_id))
-            path = list(self._loaded_data)[i]
-            properties, _ = self._get_selected_feature(unique_id, path, bounds=None)
-            self.selected_features[unique_id] = properties
+        # for unique_id in selected_features if selected_features is not None else []:
+        #     i = int(float(unique_id))
+        #     path = list(self._loaded_data)[i]
+        #     properties, _ = self._get_selected_feature(unique_id, path, bounds=None)
+        #     self._selected_features[unique_id] = properties
 
         self._register_callbacks()
 
@@ -1860,7 +1791,7 @@ class GeoExplorer:
             os.kill(os.getpid(), signal.SIGTERM)
         finally:
             print("\nExiting with configs:")
-            print(self._get_self_as_string_without_defaults())
+            print(self._get_self_as_string_except_defaults())
 
     def _register_callbacks(self) -> None:
 
@@ -1892,7 +1823,7 @@ class GeoExplorer:
                 ):
                     print(k, v)
 
-            txt = self._get_self_as_string_without_defaults()
+            txt = self._get_self_as_string_except_defaults()
             return html.Div(f"{txt}.run()"), True
 
         @callback(
@@ -1976,6 +1907,9 @@ class GeoExplorer:
                     dismissable=True,
                 )
             self.selected_files[selected_path] = True
+            if selected_path.endswith(".nc"):
+                self._nc[selected_path] = NetCDFConfig()
+
             return None
 
         @callback(
@@ -2095,7 +2029,6 @@ class GeoExplorer:
                 self.splitted = not self.splitted
                 self.column = None if not self.splitted else self.column
             if self.splitted:
-                self._deleted_categories = set()
                 return self.splitted, "split_index"
             return self.splitted, self.column
 
@@ -2462,30 +2395,6 @@ class GeoExplorer:
             )
 
         @callback(
-            Output("file-deleted", "children", allow_duplicate=True),
-            Output("alert3", "children", allow_duplicate=True),
-            Output("update-table", "data", allow_duplicate=True),
-            Output("color-container", "children", allow_duplicate=True),
-            Input({"type": "delete-cat-btn", "index": dash.ALL}, "n_clicks"),
-            State({"type": "delete-cat-btn", "index": dash.ALL}, "id"),
-            prevent_initial_call=True,
-        )
-        @time_method_call(_PROFILE_DICT)
-        def delete_category(n_clicks_list, delete_ids):
-            path_to_delete = get_index_if_clicks(n_clicks_list, delete_ids)
-            if path_to_delete is None:
-                return dash.no_update, dash.no_update, dash.no_update, dash.no_update
-            if not self.column:
-                return (
-                    *self._delete_file(n_clicks_list, delete_ids, delete_category=True),
-                    True,
-                    dash.no_update,
-                )
-            else:
-                self._deleted_categories.add(path_to_delete)
-                return None, None, True, dash.no_update
-
-        @callback(
             Output({"type": "query-view", "index": dash.MATCH}, "children"),
             Output({"type": "query-view", "index": dash.MATCH}, "is_open"),
             # Input("query-examples-button", "n_clicks"),
@@ -2663,17 +2572,6 @@ class GeoExplorer:
             )
 
         @callback(
-            Output("file-deleted", "children", allow_duplicate=True),
-            Input("reload-categories", "n_clicks"),
-            prevent_initial_call=True,
-        )
-        def reload_categories(n_clicks):
-            if not n_clicks:
-                return dash.no_update
-            self._deleted_categories = set()
-            return None
-
-        @callback(
             Output("splitter", "style"),
             Input("is_splitted", "data"),
             Input("column-dropdown", "value"),
@@ -2683,7 +2581,6 @@ class GeoExplorer:
             if column is None:
                 self.column = None
                 self.splitted = False
-                self._deleted_categories = set()
             if self.splitted and column == "split_index":
                 return _clicked_button_style()
             else:
@@ -2848,11 +2745,9 @@ class GeoExplorer:
             if not self.selected_files:
                 self.column = None
                 self.color_dict = {}
-                self._deleted_categories = set()
                 return html.Div(), None, False, None, 1
             elif column != self.column or triggered in ["force-categorical"]:
                 self.color_dict = {}
-                self._deleted_categories = set()
             elif not column and triggered is None:
                 column = self.column
             elif self._concatted_data is None:
@@ -2876,9 +2771,26 @@ class GeoExplorer:
                 self.color_dict,
             )
 
-            if self._nc and column is None and self._concatted_data is not None:
-                column = "value"
-                self.column = "value"
+            if (
+                self._nc
+                and column is None
+                and self._concatted_data is not None
+                and any(self._queries.get(path) for path in self._nc)
+            ):
+                print(self._concatted_data.collect().columns)
+                if "_color" in self._concatted_data.collect().columns:
+                    column = "_color"
+                    self.column = "_color"
+                    return (
+                        None,  # _get_colorpicker_container(color_dict),
+                        None,
+                        False,
+                        None,
+                        1,
+                    )
+                else:
+                    column = "value"
+                    self.column = "value"
 
             if not column or (
                 self._concatted_data is not None and column not in self._concatted_data
@@ -3118,57 +3030,61 @@ class GeoExplorer:
             bbox = shapely.box(*bounds)
             image_overlays = []
             for img_path, img_bounds in self._images.items():
+                print("\nhe9")
+                print(img_path)
+                print(img_bounds)
                 is_checked = self.selected_files[img_path]
                 if not is_checked:
                     continue
                 clipped_bounds = img_bounds.intersection(bbox)
                 if clipped_bounds.is_empty:
+                    print("empty")
+                    print(img_bounds)
+                    print(bbox)
                     continue
                 # with self.file_system.open(img_path) as file, rasterio.open(
                 #     file
                 # ) as src:
-                with rasterio.open(img_path) as src:
-                    bbox_in_img_crs = (
-                        GeoSeries([clipped_bounds], crs=4326)
-                        .to_crs(src.crs)
-                        .total_bounds
+                if Path(img_path).suffix.startswith(".nc"):
+                    arr = self._nc[img_path].to_numpy(
+                        self._loaded_data[img_path],
+                        clipped_bounds.bounds,
+                        self._queries[img_path],
                     )
-                    window = rasterio.windows.from_bounds(
-                        *bbox_in_img_crs, transform=src.transform
-                    )
-                    arr = src.read(
-                        indexes=(1,),
-                        window=window,
-                        **({"boundless": False, "masked": False}),
-                    )
-                    arr = arr[0]
-                    if "int" in str(arr.dtype).lower():
-                        vmin = np.iinfo(arr.dtype).min
-                        vmax = np.iinfo(arr.dtype).max
-                    else:
-                        vmin = np.finfo(arr.dtype).min
-                        vmax = np.finfo(arr.dtype).max
-                    minx, miny, maxx, maxy = clipped_bounds.bounds
+                else:
+                    arr = rasterio_to_numpy(img_path, clipped_bounds)
+                print(arr)
+                if arr is None:
+                    continue
 
-                    # hack: using folium because dash_leaflet doesn't accept np.array
-                    image_overlay = folium.raster_layers.ImageOverlay(
-                        arr,
-                        bounds=[[miny, minx], [maxy, maxx]],
-                        vmin=vmin,
-                        vmax=vmax,
-                    )
-                    img_name = Path(img_path).stem
-                    image_overlay = dl.ImageOverlay(
-                        url=image_overlay.url,
-                        bounds=[[miny, minx], [maxy, maxx]],
-                        opacity=self.alpha,
-                    )
-                    image_overlay = dl.Overlay(
-                        image_overlay,
-                        name=img_name,
-                        checked=is_checked,
-                    )
-                    image_overlays.append(image_overlay)
+                arr = fix_numpy_img_shape(arr)
+                if "int" in str(arr.dtype).lower():
+                    vmin = np.iinfo(arr.dtype).min
+                    vmax = np.iinfo(arr.dtype).max
+                else:
+                    vmin = np.finfo(arr.dtype).min
+                    vmax = np.finfo(arr.dtype).max
+                minx, miny, maxx, maxy = clipped_bounds.bounds
+
+                # hack: using folium because dash_leaflet doesn't accept np.array
+                image_overlay = folium.raster_layers.ImageOverlay(
+                    arr,
+                    bounds=[[miny, minx], [maxy, maxx]],
+                    vmin=vmin,
+                    vmax=vmax,
+                )
+                img_name = Path(img_path).stem
+                image_overlay = dl.ImageOverlay(
+                    url=image_overlay.url,
+                    bounds=[[miny, minx], [maxy, maxx]],
+                    opacity=self.alpha,
+                )
+                image_overlay = dl.Overlay(
+                    image_overlay,
+                    name=img_name,
+                    checked=is_checked,
+                )
+                image_overlays.append(image_overlay)
 
             return (
                 dl.LayersControl(
@@ -3239,18 +3155,18 @@ class GeoExplorer:
             triggered = dash.callback_context.triggered_id
             debug_print("display_clicked_feature_attributes", triggered)
             if triggered == "clear-table-clicked":
-                self.selected_features = {}
+                self._selected_features = {}
                 return [], [], None
             if (
                 triggered is None
                 or triggered == "update-table"
                 or (
-                    (self.selected_features and not features)
+                    (self._selected_features and not features)
                     or all(x is None for x in features)
                 )
             ):
-                clicked_ids = list(self.selected_features)
-                clicked_features = list(self.selected_features.values())
+                clicked_ids = list(self._selected_features)
+                clicked_features = list(self._selected_features.values())
                 return clicked_features, clicked_ids, None
 
             if not features or all(x is None for x in features):
@@ -3334,7 +3250,7 @@ class GeoExplorer:
                 if props["id"] not in clicked_ids:
                     clicked_features.append(props)
             clicked_ids = [x["id"] for x in clicked_features]
-            self.selected_features = dict(
+            self._selected_features = dict(
                 zip(clicked_ids, clicked_features, strict=True)
             )
             return clicked_features, clicked_ids, None
@@ -3809,9 +3725,9 @@ class GeoExplorer:
             parts = Path(path2).parts
             if not all(part in parts for part in Path(path).parts):
                 continue
-            for idx in list(self.selected_features):
+            for idx in list(self._selected_features):
                 if int(float(idx)) == i:
-                    self.selected_features.pop(idx)
+                    self._selected_features.pop(idx)
             del self._loaded_data[path2]
             deleted_files2.add(path2)
 
@@ -3827,15 +3743,15 @@ class GeoExplorer:
             self._loaded_data[path] = df.with_columns(
                 _unique_id=_get_unique_id(self._max_unique_id_int)
             )
-            for idx in list(self.selected_features):
+            for idx in list(self._selected_features):
                 if idx[0] != id_prev[0]:
                     continue
 
                 # rounding values to avoid floating point precicion problems
                 new_idx = f"{self._max_unique_id_int}.{idx[2:]}"
-                feature = self.selected_features.pop(idx)
+                feature = self._selected_features.pop(idx)
                 feature["id"] = new_idx
-                self.selected_features[new_idx] = feature
+                self._selected_features[new_idx] = feature
 
         return None, None
 
@@ -4061,71 +3977,33 @@ class GeoExplorer:
         for path in self.selected_files:
             path_parts = Path(path).parts
             for key in self._loaded_data:
-                if paths and (path not in paths and key not in paths) or key in dfs:
+                if (paths and (path not in paths and key not in paths)) or key in dfs:
                     continue
                 key_parts = Path(key).parts
                 if not all(part in key_parts for part in path_parts):
                     continue
                 df = self._loaded_data[key]
                 if isinstance(df, (Dataset | DataArray)):
-                    try:
-                        df = self._nc[path].to_geopandas(
-                            df, bounds, self._queries.get(key, None)
-                        )
-                    except Exception as e:
-                        alerts.add(str(e))
-                    if df is None:
-                        continue
-                    df, _ = _geopandas_to_polars(df, path=key)
-                    df = df.with_columns(
-                        _unique_id=_get_unique_id(list(self._nc).index(key))
-                    ).lazy()
-                    dfs[key] = df
                     continue
+                #     try:
+                #         df = self._nc[path].to_geopandas(
+                #             df, bounds, self._queries.get(key, None)
+                #         )
+                #     except Exception as e:
+                #         alerts.add(str(e))
+                #         continue
+                #     if df is None:
+                #         continue
+                #     print("n\\nhei")
+                #     print(df)
+                #     df, _ = _geopandas_to_polars(df, path=key)
+                #     df = df.with_columns(
+                #         _unique_id=_get_unique_id(list(self._nc).index(key))
+                #     ).lazy()
+                #     dfs[key] = df
+                #     continue
                 if bounds is not None:
                     df = filter_by_bounds(df, bounds)
-                if (
-                    self._deleted_categories
-                    and self.column
-                    and not self._force_categorical
-                    and self._has_column(key, self.column)
-                    and self._get_dtype(key, self.column).is_numeric()
-                ):
-                    try:
-                        error_mess = "Cannot remove categories from numeric columns. Use an SQL query instead"
-                        # make sure we only give one warning
-                        assert not any(
-                            x.children == error_mess for x in alerts if x is not None
-                        )
-                        alerts.add(
-                            dbc.Alert(
-                                error_mess,
-                                color="warning",
-                                dismissable=True,
-                                duration=5_000,
-                            )
-                        )
-                    except AssertionError:
-                        pass
-                elif self._deleted_categories and self.column in df:
-                    try:
-                        expression = (
-                            pl.col(self.column).is_in(list(self._deleted_categories))
-                            == False
-                        )
-                    except Exception as e:
-                        raise type(e)(
-                            f"{e}. {self.column=}, {self._deleted_categories=}"
-                        )
-                    if self.nan_label in self._deleted_categories:
-                        expression &= pl.col(self.column).is_not_null()
-                    df = df.filter(expression)
-                elif (
-                    self.nan_label in self._deleted_categories and self.column not in df
-                ):
-                    if self.splitted:
-                        df = get_split_index(df)
-                    continue
                 if _filter and self._queries.get(path, None) is not None:
                     df, alert = self._filter_data(df, self._queries[path], key)
                     alerts.add(alert)
@@ -4310,7 +4188,7 @@ class GeoExplorer:
         if isinstance(called, GeoDataFrame):
             called, _ = _geopandas_to_polars(called, path)
             called = called.with_columns(
-                _unique_id=_get_unique_id(list(self._loaded_data).index(path))
+                _unique_id=_get_unique_id(list(self._loaded_data).index(path) + 999)
             ).lazy()
             return called
         if isinstance(called, GeoSeries):
@@ -4322,7 +4200,7 @@ class GeoExplorer:
                 bounds,
                 path,
             ).with_columns(
-                _unique_id=_get_unique_id(list(self._loaded_data).index(path))
+                _unique_id=_get_unique_id(list(self._loaded_data).index(path) + 999)
             )
             return called
         if isinstance(called, pd.DataFrame):
@@ -4664,7 +4542,7 @@ class GeoExplorer:
         data["file_system"] = data["file_system"].__class__.__name__ + "()"
 
         if "selected_features" in data:
-            data["selected_features"] = list(self.selected_features)
+            data["selected_features"] = list(self._selected_features)
         return data
 
     def _get_self_as_string(self, data: dict[str, Any]) -> str:
@@ -4676,7 +4554,7 @@ class GeoExplorer:
         txt = ", ".join(f"{k}={maybe_to_string(k, v)}" for k, v in data.items())
         return f"{self.__class__.__name__}({txt})"
 
-    def _get_self_as_string_without_defaults(self):
+    def _get_self_as_string_except_defaults(self):
         data = self._get_self_as_dict()
         defaults = inspect.getfullargspec(self.__class__).kwonlydefaults
         data = {
@@ -4685,14 +4563,14 @@ class GeoExplorer:
         return self._get_self_as_string(data)
 
     def _reset(self):
-        self._max_unique_id_int = 0
+        self._max_unique_id_int = -1
         for path, df in self._loaded_data.items():
-            if df is None:
+            self._max_unique_id_int += 1
+            if df is None or isinstance(df, (Dataset, DataArray)):
                 continue
             self._loaded_data[path] = df.with_columns(
                 _unique_id=_get_unique_id(self._max_unique_id_int)
             )
-            self._max_unique_id_int += 1
 
     def __str__(self) -> str:
         """String representation."""
@@ -4727,3 +4605,26 @@ def get_numeric_colors(values_no_nans_unique, values_no_nans, cmap, k):
         f"{rounded_bins[-1]} - {round(max(values_no_nans), 1)}": colors_[-1],
     }
     return color_dict, bins
+
+
+def rasterio_to_numpy(img_path, bounds):
+    with rasterio.open(img_path) as src:
+        bbox_in_img_crs = GeoSeries([bounds], crs=4326).to_crs(src.crs).total_bounds
+        window = rasterio.windows.from_bounds(*bbox_in_img_crs, transform=src.transform)
+        return src.read(
+            # indexes=(1,),
+            window=window,
+            **({"boundless": False, "masked": False}),
+        )
+
+
+def fix_numpy_img_shape(arr: np.ndarray) -> np.ndarray:
+    if len(arr.shape) == 2:
+        return arr
+    if len(arr.shape) == 3 and arr.shape[0] == 1:
+        return arr[0]
+    elif len(arr.shape) == 3 and arr.shape[0] == 3:
+        # to 3d array in shape (x, y, 3)
+        return np.transpose(arr, (1, 2, 0))
+    else:
+        raise ValueError("Only single band or 3-band rasters are supported")
