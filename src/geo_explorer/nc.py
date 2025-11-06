@@ -32,7 +32,7 @@ from .utils import time_function_call
 from .utils import time_method_call
 
 
-class NetCDFConfig(abc.ABC):
+class NetCDFConfig:
     """Sets the configuration for reading NetCDF files and getting crs and bounds.
 
     Args:
@@ -50,13 +50,15 @@ class NetCDFConfig(abc.ABC):
         self.code_block = code_block
         self.time_dtype = time_dtype
 
-    @abstractmethod
     def get_crs(self, ds: Dataset) -> pyproj.CRS:
         attrs = [x for x in ds.attrs if "projection" in x.lower() or "crs" in x.lower()]
         return pyproj.CRS(ds[attrs[0]])
 
-    @abstractmethod
     def get_bounds(self, ds: Dataset) -> tuple[float, float, float, float]:
+        try:
+            return as_bounds(ds["bounds"])
+        except Exception:
+            pass
         attrs = [
             x
             for x in ds.attrs
@@ -67,18 +69,7 @@ class NetCDFConfig(abc.ABC):
             raise ValueError(f"Could not find bounds attribute in dataset: {ds}")
         elif len(attrs) == 1:
             bounds = next(iter(attrs))
-            if isinstance(bounds, str):
-                return shapely.wkt.loads(bounds).bounds
-            elif isinstance(bounds, bytes):
-                return shapely.wkb.loads(bounds).bounds
-            elif isinstance(bounds, (list, tuple)) and len(bounds) == 4:
-                return tuple(bounds)
-            try:
-                return tuple(bounds.bounds)
-            except AttributeError:
-                raise ValueError(
-                    f"Could not interpret bounds attribute in dataset: {ds}"
-                )
+            return as_bounds(bounds)
         try:
             minx = next(
                 iter(
@@ -161,6 +152,8 @@ class NetCDFConfig(abc.ABC):
             ):
                 xarr = xarr[self.rgb_bands].mean(dim="time")
             return np.array([getattr(xarr, band).values for band in self.rgb_bands])
+        if isinstance(xarr, np.ndarray):
+            return xarr
 
         return xarr.values
 
@@ -171,6 +164,15 @@ class NetCDFConfig(abc.ABC):
                 print("empty", attr, getattr(ds, attr).shape)
                 return True
         return False
+
+
+def as_bounds(bounds):
+    if isinstance(bounds, str):
+        return shapely.wkt.loads(bounds).bounds
+    elif isinstance(bounds, bytes):
+        return shapely.wkb.loads(bounds).bounds
+    elif isinstance(bounds, (list, tuple)) and len(bounds) == 4:
+        return tuple(bounds)
 
 
 class NBSNetCDFConfig(NetCDFConfig):

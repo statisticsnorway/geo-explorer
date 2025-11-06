@@ -177,6 +177,10 @@ def read_file(
         import xarray as xr
 
         ds = xr.open_dataset(path, engine="netcdf4")
+        try:
+            ds = ds.sortby("time")
+        except Exception:
+            pass
         return ds, {}
 
     if not path.endswith(".parquet") and FILE_SPLITTER_TXT not in path:
@@ -346,7 +350,7 @@ def _add_data_one_path(
     concatted_data,
     nan_color,
     nan_label,
-    alpha,
+    opacity,
     n_rows_per_path,
     columns: dict[str, set[str]],
     current_columns: set[str],
@@ -388,7 +392,7 @@ def _add_data_one_path(
                     "color": nan_color,
                     "fillColor": nan_color,
                     "weight": 1,
-                    "fillOpacity": alpha,
+                    "fillOpacity": opacity,
                 },
                 onEachFeature=ns("yellowIfHighlighted"),
                 pointToLayer=ns("pointToLayerCircle"),
@@ -404,7 +408,7 @@ def _add_data_one_path(
                 path,
                 column,
                 nan_color,
-                alpha,
+                opacity,
                 onEachFeature=ns("yellowIfHighlighted"),
                 pointToLayer=ns("pointToLayerCircle"),
                 hideout=dict(
@@ -426,7 +430,7 @@ def _add_data_one_path(
                     "color": color,
                     "fillColor": color,
                     "weight": 1,
-                    "fillOpacity": alpha,
+                    "fillOpacity": opacity,
                 },
                 onEachFeature=ns("yellowIfHighlighted"),
                 pointToLayer=ns("pointToLayerCircle"),
@@ -1039,7 +1043,7 @@ def _get_leaflet_overlay(data, path, **kwargs):
 
 
 @time_function_call(_PROFILE_DICT)
-def _get_multiple_leaflet_overlay(df, path, column, nan_color, alpha, **kwargs):
+def _get_multiple_leaflet_overlay(df, path, column, nan_color, opacity, **kwargs):
     values = df.select("_color").unique().collect()["_color"]
     return dl.Overlay(
         dl.LayerGroup(
@@ -1052,7 +1056,7 @@ def _get_multiple_leaflet_overlay(df, path, column, nan_color, alpha, **kwargs):
                         "color": color_,
                         "fillColor": color_,
                         "weight": 1,
-                        "fillOpacity": alpha,
+                        "fillOpacity": opacity,
                     },
                     id={
                         "type": "geojson",
@@ -1074,7 +1078,7 @@ def _get_multiple_leaflet_overlay(df, path, column, nan_color, alpha, **kwargs):
                             "color": nan_color,
                             "fillColor": nan_color,
                             "weight": 1,
-                            "fillOpacity": alpha,
+                            "fillOpacity": opacity,
                         },
                         id={
                             "type": "geojson",
@@ -1134,7 +1138,7 @@ class GeoExplorer:
         #     at init. Fetch this list with the "Export as code" button.
         hard_click: If True, clicking on a geometry triggers all overlapping geometries to be marked.
         splitted: If True, all rows will have a separate label and color.
-        alpha: Opacity/transparency of the geometries.
+        opacity: Opacity/transparency of the geometries.
         nan_color: Color for missing values. Defaults to a shade of gray.
         nan_label: Defaults to "Missing".
         max_read_size_per_callback: Defaults to 1e9 bytes (1 GB). Meaning max 1 GB is read at once, then the read
@@ -1245,7 +1249,7 @@ class GeoExplorer:
         # selected_features: list[str] | None = None,
         hard_click: bool = False,
         splitted: bool = False,
-        alpha: float = 0.6,
+        opacity: float = 0.6,
         nan_color: str = "#969696",
         nan_label: str = "Missing",
         max_read_size_per_callback: int = 1e9,
@@ -1278,7 +1282,7 @@ class GeoExplorer:
         self.splitted = splitted
         self.hard_click = hard_click
         self.max_rows = max_rows
-        self.alpha = alpha
+        self.opacity = opacity
         self._bounds_series = GeoSeries()
         self.selected_files: dict[str, int] = {}
         self._loaded_data: dict[str, pl.LazyFrame] = {}
@@ -1387,7 +1391,7 @@ class GeoExplorer:
                                                             tooltip_text="Get code to reproduce current view",
                                                         ),
                                                         dcc.Dropdown(
-                                                            value=self.alpha,
+                                                            value=self.opacity,
                                                             options=[
                                                                 {
                                                                     "label": f"opacity={round(x, 1)}",
@@ -1399,7 +1403,7 @@ class GeoExplorer:
                                                                     0.1, 1.1, 0.1
                                                                 )
                                                             ],
-                                                            id="alpha",
+                                                            id="opacity",
                                                             clearable=False,
                                                         ),
                                                         dbc.Modal(
@@ -2771,27 +2775,6 @@ class GeoExplorer:
                 self.color_dict,
             )
 
-            if (
-                self._nc
-                and column is None
-                and self._concatted_data is not None
-                and any(self._queries.get(path) for path in self._nc)
-            ):
-                print(self._concatted_data.collect().columns)
-                if "_color" in self._concatted_data.collect().columns:
-                    column = "_color"
-                    self.column = "_color"
-                    return (
-                        None,  # _get_colorpicker_container(color_dict),
-                        None,
-                        False,
-                        None,
-                        1,
-                    )
-                else:
-                    column = "value"
-                    self.column = "value"
-
             if not column or (
                 self._concatted_data is not None and column not in self._concatted_data
             ):
@@ -2937,7 +2920,7 @@ class GeoExplorer:
             Input("wms-added", "data"),
             Input("max_rows_value", "value"),
             Input("file-control-panel", "children"),
-            Input("alpha", "value"),
+            Input("opacity", "value"),
             Input({"type": "checked-btn", "index": dash.ALL}, "style"),
             Input(
                 {"type": "checked-btn-wms", "wms_name": dash.ALL, "tile": dash.ALL},
@@ -2958,7 +2941,7 @@ class GeoExplorer:
             max_rows_value,
             # data_was_changed,
             order_was_changed,
-            alpha,
+            opacity,
             checked_clicks,
             checked_wms_clicks,
             bounds,
@@ -2973,6 +2956,7 @@ class GeoExplorer:
                 f"{self.column=}",
             )
             t = perf_counter()
+            alerts = []
 
             if max_rows_value is not None:
                 self.max_rows = max_rows_value
@@ -3007,7 +2991,7 @@ class GeoExplorer:
                     is_numeric=is_numeric,
                     color_dict=color_dict,
                     bins=bins,
-                    alpha=alpha,
+                    opacity=opacity,
                     n_rows_per_path=n_rows_per_path,
                     columns=self._columns,
                     current_columns=current_columns,
@@ -3030,34 +3014,31 @@ class GeoExplorer:
             bbox = shapely.box(*bounds)
             image_overlays = []
             for img_path, img_bounds in self._images.items():
-                print("\nhe9")
-                print(img_path)
-                print(img_bounds)
                 is_checked = self.selected_files[img_path]
                 if not is_checked:
                     continue
                 clipped_bounds = img_bounds.intersection(bbox)
                 if clipped_bounds.is_empty:
-                    print("empty")
-                    print(img_bounds)
-                    print(bbox)
                     continue
-                # with self.file_system.open(img_path) as file, rasterio.open(
-                #     file
-                # ) as src:
                 if Path(img_path).suffix.startswith(".nc"):
-                    arr = self._nc[img_path].to_numpy(
-                        self._loaded_data[img_path],
-                        clipped_bounds.bounds,
-                        self._queries[img_path],
-                    )
+                    try:
+                        arr = self._nc[img_path].to_numpy(
+                            ds=self._loaded_data[img_path],
+                            bounds=clipped_bounds.bounds,
+                            code_block=self._queries[img_path],
+                        )
+                    except Exception as e:
+                        alerts.append(
+                            dbc.Alert(f"{type(e).__name__}: {e}", color="warning")
+                        )
                 else:
                     arr = rasterio_to_numpy(img_path, clipped_bounds)
-                print(arr)
                 if arr is None:
                     continue
 
                 arr = fix_numpy_img_shape(arr)
+                if np.isnan(arr).any() and not np.all(np.isnan(arr)):
+                    arr[np.isnan(arr)] = np.min(arr[~np.isnan(arr)])
                 if "int" in str(arr.dtype).lower():
                     vmin = np.iinfo(arr.dtype).min
                     vmax = np.iinfo(arr.dtype).max
@@ -3077,7 +3058,8 @@ class GeoExplorer:
                 image_overlay = dl.ImageOverlay(
                     url=image_overlay.url,
                     bounds=[[miny, minx], [maxy, maxx]],
-                    opacity=self.alpha,
+                    opacity=self.opacity,
+                    interactive=True,
                 )
                 image_overlay = dl.Overlay(
                     image_overlay,
@@ -3093,17 +3075,17 @@ class GeoExplorer:
                     + data
                     + image_overlays
                 ),
-                None,
+                alerts,
                 max_rows_component,
                 all_tiles_lists,
             )
 
         @callback(
-            Input("alpha", "value"),
+            Input("opacity", "value"),
             prevent_initial_call=True,
         )
-        def update_alpha(alpha):
-            self.alpha = alpha
+        def update_opacity(opacity):
+            self.opacity = opacity
 
         @callback(
             Output("clicked-features-title", "children"),
@@ -3761,19 +3743,10 @@ class GeoExplorer:
         bounds: list[list[float]],
     ) -> tuple[float, float, float, float]:
         if bounds is None and self._bounds is None:
-            print(
-                (
-                    sg.to_gdf(reversed(self.center), 4326)
-                    .to_crs(3035)
-                    .buffer(165_000 / (self.zoom**1.25))
-                    .to_crs(4326)
-                    .total_bounds
-                )
-            )
             return (
                 sg.to_gdf(reversed(self.center), 4326)
                 .to_crs(3035)
-                .buffer(165_000 / (self.zoom**1.25))
+                .buffer(100_000 / (self.zoom**1.5))
                 .to_crs(4326)
                 .total_bounds
             )
@@ -4460,8 +4433,6 @@ class GeoExplorer:
                 ),
             ]
         )[lambda x: ~x.index.duplicated()]
-
-        print(self._bounds_series)
 
     def _get_child_paths(self, paths):
         child_paths = {}
