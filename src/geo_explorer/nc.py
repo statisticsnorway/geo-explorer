@@ -102,7 +102,7 @@ class NetCDFConfig(abc.ABC):
             if "time" in set(xarr.dims) and (
                 not hasattr(xarr.time.values, "__len__") or len(xarr.time.values) > 1
             ):
-                xarr = xarr.mean(dim="time")
+                xarr = xarr[["B4", "B3", "B2"]].mean(dim="time")
             return np.array([xarr.B4.values, xarr.B3.values, xarr.B2.values])
 
         return xarr.values
