@@ -695,8 +695,8 @@ def _read_files(explorer, paths: list[str], mask=None, **kwargs) -> None:
         if isinstance(df, Dataset):
             explorer._loaded_data[path] = df
             img_bounds = GeoSeries(
-                [shapely.box(*explorer._nc[path].bounds_getter(df))],
-                crs=explorer._nc[path].crs_getter(df),
+                [shapely.box(*explorer._nc[path].get_bounds(df))],
+                crs=explorer._nc[path].get_crs(df),
             ).to_crs(4326)
 
             explorer._images[path] = next(iter(img_bounds))
@@ -3761,6 +3761,15 @@ class GeoExplorer:
         bounds: list[list[float]],
     ) -> tuple[float, float, float, float]:
         if bounds is None and self._bounds is None:
+            print(
+                (
+                    sg.to_gdf(reversed(self.center), 4326)
+                    .to_crs(3035)
+                    .buffer(165_000 / (self.zoom**1.25))
+                    .to_crs(4326)
+                    .total_bounds
+                )
+            )
             return (
                 sg.to_gdf(reversed(self.center), 4326)
                 .to_crs(3035)

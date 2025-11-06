@@ -1,6 +1,6 @@
 import abc
 from abc import abstractmethod
-from dataclasses import dataclass
+from typing import ClassVar
 from multiprocessing import cpu_count
 
 import joblib
@@ -32,7 +32,6 @@ from .utils import time_function_call
 from .utils import time_method_call
 
 
-@dataclass
 class NetCDFConfig(abc.ABC):
     """Sets the configuration for reading NetCDF files and getting crs and bounds.
 
@@ -41,23 +40,81 @@ class NetCDFConfig(abc.ABC):
             Note that the input Dataset must be references as 'ds' and the output must be assigned to 'xarr'.
     """
 
-    code_block: str | None = None
-    time_dtype: str = "datetime64[D]"
+    rgb_bands: ClassVar[list[str] | None] = None
+
+    def __init__(
+        self,
+        code_block: str | None = None,
+        time_dtype: str = "datetime64[D]",
+    ) -> None:
+        self.code_block = code_block
+        self.time_dtype = time_dtype
 
     @abstractmethod
-    def crs_getter(self, ds: Dataset):
+    def get_crs(self, ds: Dataset) -> pyproj.CRS:
         attrs = [x for x in ds.attrs if "projection" in x.lower() or "crs" in x.lower()]
         return pyproj.CRS(ds[attrs[0]])
 
     @abstractmethod
-    def bounds_getter(self, ds: Dataset):
+    def get_bounds(self, ds: Dataset) -> tuple[float, float, float, float]:
         attrs = [
             x
             for x in ds.attrs
             if ("bounds" in x.lower() or "bbox" in x.lower())
             and not ("projection" in x.lower() or "crs" in x.lower())
         ]
-        return pyproj.CRS(ds[attrs[0]])
+        if not attrs:
+            raise ValueError(f"Could not find bounds attribute in dataset: {ds}")
+        elif len(attrs) == 1:
+            bounds = next(iter(attrs))
+            if isinstance(bounds, str):
+                return shapely.wkt.loads(bounds).bounds
+            elif isinstance(bounds, bytes):
+                return shapely.wkb.loads(bounds).bounds
+            elif isinstance(bounds, (list, tuple)) and len(bounds) == 4:
+                return tuple(bounds)
+            try:
+                return tuple(bounds.bounds)
+            except AttributeError:
+                raise ValueError(
+                    f"Could not interpret bounds attribute in dataset: {ds}"
+                )
+        try:
+            minx = next(
+                iter(
+                    x
+                    for x in attrs
+                    if "west" in x.lower()
+                    or ("min" in x.lower() and ("lon" in x.lower() or "x" in x.lower()))
+                )
+            )
+            miny = next(
+                iter(
+                    x
+                    for x in attrs
+                    if "south" in x.lower()
+                    or ("min" in x.lower() and ("lat" in x.lower() or "y" in x.lower()))
+                )
+            )
+            maxx = next(
+                iter(
+                    x
+                    for x in attrs
+                    if "east" in x.lower()
+                    or ("max" in x.lower() and ("lon" in x.lower() or "x" in x.lower()))
+                )
+            )
+            maxy = next(
+                iter(
+                    x
+                    for x in attrs
+                    if "north" in x.lower()
+                    or ("max" in x.lower() and ("lat" in x.lower() or "y" in x.lower()))
+                )
+            )
+            return minx, miny, maxx, maxy
+        except StopIteration as e:
+            raise ValueError(f"Could not find bounds attribute in dataset: {ds}") from e
 
     @time_method_call(_PROFILE_DICT)
     def to_numpy(
@@ -70,8 +127,8 @@ class NetCDFConfig(abc.ABC):
         if code_block is None:
             return
 
-        crs = self.crs_getter(ds)
-        ds_bounds = self.bounds_getter(ds)
+        crs = self.get_crs(ds)
+        ds_bounds = self.get_bounds(ds)
 
         bbox_correct_crs = (
             GeoSeries([shapely.box(*bounds)], crs=4326).to_crs(crs).union_all()
@@ -102,60 +159,10 @@ class NetCDFConfig(abc.ABC):
             if "time" in set(xarr.dims) and (
                 not hasattr(xarr.time.values, "__len__") or len(xarr.time.values) > 1
             ):
-                xarr = xarr[["B4", "B3", "B2"]].mean(dim="time")
-            return np.array([xarr.B4.values, xarr.B3.values, xarr.B2.values])
+                xarr = xarr[self.rgb_bands].mean(dim="time")
+            return np.array([getattr(xarr, band).values for band in self.rgb_bands])
 
         return xarr.values
-
-    @time_method_call(_PROFILE_DICT)
-    def to_geopandas(
-        self,
-        ds,
-        bounds,
-        code_block: str | None,
-    ) -> GeoDataFrame | None:
-
-        if code_block is None:
-            return
-
-        crs = self.crs_getter(ds)
-        ds_bounds = self.bounds_getter(ds)
-
-        bbox_correct_crs = (
-            GeoSeries([shapely.box(*bounds)], crs=4326).to_crs(crs).union_all()
-        )
-        clipped_bbox = bbox_correct_crs.intersection(shapely.box(*ds_bounds))
-        minx, miny, maxx, maxy = clipped_bbox.bounds
-
-        ds = ds.sel(
-            x=slice(minx, maxx),
-            y=slice(maxy, miny),
-        )
-
-        if self.dataset_is_empty(ds):
-            return
-
-        ds["time"] = ds["time"].astype(self.time_dtype)
-
-        try:
-            xarr = eval(code_block)
-            if callable(xarr):
-                xarr = xarr(ds)
-        except SyntaxError:
-            loc = {}
-            exec(code_block, globals=globals() | {"ds": ds}, locals=loc)
-            xarr = loc["xarr"]
-
-        if not isinstance(xarr, (DataArray | Dataset)):
-            raise ValueError(
-                f"code block must return xarray DataArray or Dataset. Got {type(xarr)} from {code_block}"
-            )
-
-        df: GeoDataFrame = xarry_to_geopandas(
-            xarr, "value", bounds=clipped_bbox.bounds, crs=crs
-        )
-        print(df)
-        return df
 
     @staticmethod
     def dataset_is_empty(ds):
@@ -167,11 +174,11 @@ class NetCDFConfig(abc.ABC):
 
 
 class NBSNetCDFConfig(NetCDFConfig):
-    def crs_getter(self, ds):
+    def get_crs(self, ds: Dataset) -> pyproj.CRS:
         return pyproj.CRS(ds.UTM_projection.epsg_code)
 
-    def bounds_getter(self, ds):
-        return (
+    def get_bounds(self, ds: Dataset) -> tuple[float, float, float, float]:
+        return tuple(
             GeoSeries(
                 [
                     shapely.box(
@@ -189,104 +196,4 @@ class NBSNetCDFConfig(NetCDFConfig):
 
 
 class Sentinel2NBSNetCDFConfig(NBSNetCDFConfig):
-    rgb_bands = ["B4", "B3", "B2"]
-
-
-@time_function_call(_PROFILE_DICT)
-def xarry_to_geopandas(xarr, name: str, bounds, crs):
-    if isinstance(xarr, Dataset):
-
-        def scale_to_255(arr):
-            max_val = np.max(arr)
-            arr = np.clip(arr, 0, max_val)
-            return (arr / max_val * 255).astype(np.uint8)
-
-        def rgb_to_hex(r, g, b):
-            r = scale_to_255(r)
-            g = scale_to_255(g)
-            b = scale_to_255(b)
-            return np.vectorize(lambda r, g, b: f"#{r:02x}{g:02x}{b:02x}")(r, g, b)
-
-        rgb = rgb_to_hex(xarr.B4.values, xarr.B3.values, xarr.B2.values)
-        height, width = rgb.shape
-        transform = rasterio.transform.from_bounds(*bounds, width, height)
-        int_to_hex_mapper = dict(enumerate(np.unique(rgb)))
-
-        rgb_as_int = np.zeros_like(rgb)
-        for key, value in int_to_hex_mapper.items():
-            rgb_as_int[rgb == value] = key
-
-        df = GeoDataFrame(
-            pd.DataFrame(
-                _array_to_geojson(rgb_as_int, transform, processes=cpu_count()),
-                columns=[name, "geometry"],
-            ),
-            geometry="geometry",
-            crs=crs,
-        )[lambda df: (df[name].notna())]
-        df[name] = df[name].map(int_to_hex_mapper)
-        df["_color"] = df[name]
-        return df
-
-    if len(xarr.shape) == 2:
-        height, width = xarr.shape
-    elif len(xarr.shape) == 3:
-        if xarr.shape[0] != 1:
-            raise ValueError("0th dimension/axis must have 1 level")
-        height, width = xarr.shape[1:]
-    else:
-        raise ValueError(xarr.shape)
-    transform = rasterio.transform.from_bounds(*bounds, width, height)
-    return GeoDataFrame(
-        pd.DataFrame(
-            _array_to_geojson(xarr.values, transform, processes=cpu_count()),
-            columns=[name, "geometry"],
-        ),
-        geometry="geometry",
-        crs=crs,
-    )[lambda df: (df[name].notna())]
-
-
-@time_function_call(_PROFILE_DICT)
-def _array_to_geojson(
-    array: np.ndarray, transform: Affine, processes: int
-) -> list[tuple]:
-    if hasattr(array, "mask"):
-        if isinstance(array.mask, np.ndarray):
-            mask = array.mask == False
-        else:
-            mask = None
-        array = array.data
-    else:
-        mask = None
-
-    try:
-        return _array_to_geojson_loop(array, transform, mask, processes)
-    except ValueError:
-        try:
-            array = array.astype(np.float32)
-            return _array_to_geojson_loop(array, transform, mask, processes)
-
-        except Exception as err:
-            raise err.__class__(f"{array.shape}: {err}") from err
-
-
-@time_function_call(_PROFILE_DICT)
-def _array_to_geojson_loop(array, transform, mask, processes):
-    if processes == 1:
-        return [
-            (value, shape(geom))
-            for geom, value in features.shapes(array, transform=transform, mask=mask)
-        ]
-    else:
-        with joblib.Parallel(n_jobs=processes, backend="threading") as parallel:
-            return parallel(
-                joblib.delayed(_value_geom_pair)(value, geom)
-                for geom, value in features.shapes(
-                    array, transform=transform, mask=mask
-                )
-            )
-
-
-def _value_geom_pair(value, geom):
-    return (value, shape(geom))
+    rgb_bands: ClassVar[list[str]] = ["B4", "B3", "B2"]
