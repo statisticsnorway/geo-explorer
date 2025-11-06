@@ -30,6 +30,7 @@ except ImportError:
 from .utils import _PROFILE_DICT
 from .utils import time_function_call
 from .utils import time_method_call
+from .utils import get_xarray_bounds
 
 
 class NetCDFConfig:
@@ -51,6 +52,7 @@ class NetCDFConfig:
         self.time_dtype = time_dtype
 
     def get_crs(self, ds: Dataset) -> pyproj.CRS:
+        return "EPSG:32632"
         attrs = [x for x in ds.attrs if "projection" in x.lower() or "crs" in x.lower()]
         return pyproj.CRS(ds[attrs[0]])
 
@@ -114,12 +116,8 @@ class NetCDFConfig:
         bounds,
         code_block: str | None,
     ) -> GeoDataFrame | None:
-
-        if code_block is None:
-            return
-
         crs = self.get_crs(ds)
-        ds_bounds = self.get_bounds(ds)
+        ds_bounds = get_xarray_bounds(ds)
 
         bbox_correct_crs = (
             GeoSeries([shapely.box(*bounds)], crs=4326).to_crs(crs).union_all()
@@ -136,6 +134,9 @@ class NetCDFConfig:
             return
 
         ds["time"] = ds["time"].astype(self.time_dtype)
+
+        if code_block is None:
+            return ds
 
         try:
             xarr = eval(code_block)

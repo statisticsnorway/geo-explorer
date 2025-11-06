@@ -90,6 +90,7 @@ from .utils import _unclicked_button_style
 from .utils import debug_print
 from .utils import get_button_with_tooltip
 from .utils import time_function_call
+from .utils import get_xarray_bounds
 from .utils import time_method_call
 
 OFFWHITE: str = "#ebebeb"
@@ -699,10 +700,9 @@ def _read_files(explorer, paths: list[str], mask=None, **kwargs) -> None:
         if isinstance(df, Dataset):
             explorer._loaded_data[path] = df
             img_bounds = GeoSeries(
-                [shapely.box(*explorer._nc[path].get_bounds(df))],
+                [shapely.box(*get_xarray_bounds(df))],
                 crs=explorer._nc[path].get_crs(df),
             ).to_crs(4326)
-
             explorer._images[path] = next(iter(img_bounds))
 
             continue
@@ -3025,15 +3025,17 @@ class GeoExplorer:
                         arr = self._nc[img_path].to_numpy(
                             ds=self._loaded_data[img_path],
                             bounds=clipped_bounds.bounds,
-                            code_block=self._queries[img_path],
+                            code_block=self._queries.get(img_path),
                         )
                     except Exception as e:
                         alerts.append(
                             dbc.Alert(f"{type(e).__name__}: {e}", color="warning")
                         )
+                        continue
                 else:
                     arr = rasterio_to_numpy(img_path, clipped_bounds)
                 if arr is None:
+                    print("arr is None")
                     continue
 
                 arr = fix_numpy_img_shape(arr)
@@ -3967,23 +3969,6 @@ class GeoExplorer:
                 df = self._loaded_data[key]
                 if isinstance(df, (Dataset | DataArray)):
                     continue
-                #     try:
-                #         df = self._nc[path].to_geopandas(
-                #             df, bounds, self._queries.get(key, None)
-                #         )
-                #     except Exception as e:
-                #         alerts.add(str(e))
-                #         continue
-                #     if df is None:
-                #         continue
-                #     print("n\\nhei")
-                #     print(df)
-                #     df, _ = _geopandas_to_polars(df, path=key)
-                #     df = df.with_columns(
-                #         _unique_id=_get_unique_id(list(self._nc).index(key))
-                #     ).lazy()
-                #     dfs[key] = df
-                #     continue
                 if bounds is not None:
                     df = filter_by_bounds(df, bounds)
                 if _filter and self._queries.get(path, None) is not None:

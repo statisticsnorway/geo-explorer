@@ -87,6 +87,15 @@ if not DEBUG:
         return decorator
 
 
+def get_xarray_bounds(ds) -> tuple[float, float, float, float]:
+    return (
+        float(ds["x"].min().values),
+        float(ds["y"].min().values),
+        float(ds["x"].max().values),
+        float(ds["y"].max().values),
+    )
+
+
 def _standardize_path(path: str | Path) -> str:
     """Make sure delimiter is '/' and path ends without '/'."""
     return str(path).replace("\\", "/").replace(r"\"", "/")
