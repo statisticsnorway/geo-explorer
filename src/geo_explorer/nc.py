@@ -1,37 +1,27 @@
-import abc
-from abc import abstractmethod
 from typing import ClassVar
-from multiprocessing import cpu_count
 
-from shapely import Geometry
-import joblib
 import numpy as np
-import pandas as pd
 import pyproj
-import rasterio
 import shapely
-from affine import Affine
 from geopandas import GeoDataFrame
 from geopandas import GeoSeries
-from rasterio import features
-from shapely.geometry import shape
+import pandas as pd
 
 try:
     from xarray import DataArray
     from xarray import Dataset
 except ImportError:
 
-    class Dataset:
+    class DataArray:
         """Placeholder."""
 
-    class DataArray:
+    class Dataset:
         """Placeholder."""
 
 
 from .utils import _PROFILE_DICT
-from .utils import time_function_call
-from .utils import time_method_call
 from .utils import get_xarray_bounds
+from .utils import time_method_call
 
 
 class NetCDFConfig:
@@ -49,71 +39,45 @@ class NetCDFConfig:
         code_block: str | None = None,
         time_dtype: str = "datetime64[D]",
     ) -> None:
-        self.code_block = code_block
+        self._code_block = code_block
+        self.code_block  # trigger property
         self.time_dtype = time_dtype
+
+    @property
+    def code_block(self) -> str | None:
+        return self._code_block
+
+    @code_block.setter
+    def code_block(self, value: str | None):
+        if (
+            value
+            and "xarr=" not in value.replace(" ", "")
+            or "=ds" not in value.replace(" ", "")
+        ):
+            raise ValueError(
+                "'code_block' must be a piece of code that takes the xarray object 'ds' and defines the object 'xarr'"
+            )
+        self._code_block = value
 
     def get_crs(self, ds: Dataset) -> pyproj.CRS:
         attrs = [x for x in ds.attrs if "projection" in x.lower() or "crs" in x.lower()]
-        return pyproj.CRS(ds[attrs[0]])
-
-    def get_bounds(self, ds: Dataset) -> tuple[float, float, float, float]:
-        try:
-            return as_bounds(ds.attrs["bounds"])
-        except Exception:
-            pass
-        attrs = [
-            x
-            for x in ds.attrs
-            if ("bounds" in x.lower() or "bbox" in x.lower())
-            and not ("projection" in x.lower() or "crs" in x.lower())
-        ]
         if not attrs:
-            raise ValueError(f"Could not find bounds attribute in dataset: {ds}")
-        elif len(attrs) == 1:
-            bounds = next(iter(attrs))
-            return as_bounds(bounds)
-        try:
-            minx = next(
-                iter(
-                    x
-                    for x in attrs
-                    if "west" in x.lower()
-                    or ("min" in x.lower() and ("lon" in x.lower() or "x" in x.lower()))
-                )
-            )
-            miny = next(
-                iter(
-                    x
-                    for x in attrs
-                    if "south" in x.lower()
-                    or ("min" in x.lower() and ("lat" in x.lower() or "y" in x.lower()))
-                )
-            )
-            maxx = next(
-                iter(
-                    x
-                    for x in attrs
-                    if "east" in x.lower()
-                    or ("max" in x.lower() and ("lon" in x.lower() or "x" in x.lower()))
-                )
-            )
-            maxy = next(
-                iter(
-                    x
-                    for x in attrs
-                    if "north" in x.lower()
-                    or ("max" in x.lower() and ("lat" in x.lower() or "y" in x.lower()))
-                )
-            )
-            return minx, miny, maxx, maxy
-        except StopIteration as e:
-            raise ValueError(f"Could not find bounds attribute in dataset: {ds}") from e
+            raise ValueError(f"Could not find CRS attribute in dataset: {ds}")
+        for i, attr in enumerate(attrs):
+            try:
+                return pyproj.CRS(ds.attrs[attr])
+            except Exception as e:
+                if i == len(attrs) - 1:
+                    attrs_dict = {attr: ds.attrs[attr] for attr in attrs}
+                    raise ValueError(
+                        f"No valid CRS attribute found among {attrs_dict}"
+                    ) from e
 
     @time_method_call(_PROFILE_DICT)
     def to_numpy(
         self,
-        ds,
-        bounds,
+        ds: Dataset,
+        bounds: tuple[float, float, float, float],
         code_block: str | None,
     ) -> GeoDataFrame | None:
         crs = self.get_crs(ds)
@@ -130,13 +94,17 @@ class NetCDFConfig:
             y=slice(maxy, miny),
         )
 
-        if self.dataset_is_empty(ds):
-            return
+        if "time" in set(ds.dims).union(set(ds.coords)):
+            ds["time"] = ds["time"].astype(self.time_dtype)
 
-        ds["time"] = ds["time"].astype(self.time_dtype)
-
-        if code_block is None:
-            return ds
+        if not code_block and isinstance(ds, DataArray):
+            return ds.values
+        elif not code_block and isinstance(ds, Dataset):
+            # if max(len(ds[x]) for x in set(ds.coords).difference({"x", "y"})) in [0, 1]:
+            #     return ds
+            raise ValueError(
+                "code_block cannot be None for nc files with more than one dimension."
+            )
 
         try:
             xarr = eval(code_block)
@@ -153,57 +121,22 @@ class NetCDFConfig:
             ):
                 xarr = xarr[self.rgb_bands].mean(dim="time")
             return np.array([getattr(xarr, band).values for band in self.rgb_bands])
+
         if isinstance(xarr, np.ndarray):
             return xarr
 
         return xarr.values
-
-    @staticmethod
-    def dataset_is_empty(ds):
-        for attr in ds.coords:
-            if not any(getattr(ds, attr).shape):
-                print("empty", attr, getattr(ds, attr).shape)
-                return True
-        return False
-
-
-def as_bounds(
-    bounds: str | bytes | dict | Geometry,
-) -> tuple[float, float, float, float]:
-    if isinstance(bounds, str):
-        return shapely.wkt.loads(bounds).bounds
-    elif isinstance(bounds, bytes):
-        return shapely.wkb.loads(bounds).bounds
-    elif isinstance(bounds, (list, tuple)) and len(bounds) == 4:
-        return tuple(bounds)
-    try:
-        geom = shape(bounds)
-        return tuple(geom.bounds)
-    except Exception:
-        return tuple(geom.bounds)
 
 
 class NBSNetCDFConfig(NetCDFConfig):
     def get_crs(self, ds: Dataset) -> pyproj.CRS:
         return pyproj.CRS(ds.UTM_projection.epsg_code)
 
-    def get_bounds(self, ds: Dataset) -> tuple[float, float, float, float]:
-        return tuple(
-            GeoSeries(
-                [
-                    shapely.box(
-                        *[
-                            getattr(ds, f"geospatial_{x}")
-                            for x in ["lon_min", "lat_min", "lon_max", "lat_max"]
-                        ]
-                    )
-                ],
-                crs=ds.geospatial_bounds_crs,
-            )
-            .to_crs(pyproj.CRS(ds.UTM_projection.epsg_code))
-            .total_bounds
-        )
-
 
 class Sentinel2NBSNetCDFConfig(NBSNetCDFConfig):
     rgb_bands: ClassVar[list[str]] = ["B4", "B3", "B2"]
+
+
+def _pd():
+    """Function that makes sure 'pd' is not removed by 'ruff' fixes. Because pd is useful in code_block."""
+    pd
