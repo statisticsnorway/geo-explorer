@@ -20,6 +20,7 @@ from numbers import Number
 from pathlib import Path
 from pathlib import PurePath
 from time import perf_counter
+import traceback
 from typing import Any
 from typing import ClassVar
 
@@ -89,8 +90,8 @@ from .utils import _standardize_path
 from .utils import _unclicked_button_style
 from .utils import debug_print
 from .utils import get_button_with_tooltip
-from .utils import time_function_call
 from .utils import get_xarray_bounds
+from .utils import time_function_call
 from .utils import time_method_call
 
 OFFWHITE: str = "#ebebeb"
@@ -174,10 +175,13 @@ def read_file(
     path: str, file_system: AbstractFileSystem, **kwargs
 ) -> tuple[pl.LazyFrame, dict[str, pl.DataType]]:
 
-    if Path(path).suffix in [".nc", ".ncml"]:
+    if is_netcdf(path):
         import xarray as xr
 
-        ds = xr.open_dataset(path, engine="netcdf4")
+        try:
+            ds = xr.open_dataarray(path, engine="netcdf4")
+        except Exception:
+            ds = xr.open_dataset(path, engine="netcdf4")
         try:
             ds = ds.sortby("time")
         except Exception:
@@ -679,7 +683,10 @@ def _read_files(explorer, paths: list[str], mask=None, **kwargs) -> None:
         if mask is None
         or (
             path in bounds_set
-            and shapely.intersects(mask, explorer._bounds_series[path])
+            and (
+                pd.isna(explorer._bounds_series[path])
+                or shapely.intersects(mask, explorer._bounds_series[path])
+            )
         )
     ]
     if not paths:
@@ -697,13 +704,19 @@ def _read_files(explorer, paths: list[str], mask=None, **kwargs) -> None:
     for path, (df, dtypes) in zip(paths, more_data, strict=True):
         if df is None:
             continue
-        if isinstance(df, Dataset):
+        if isinstance(df, (Dataset | DataArray)):
             explorer._loaded_data[path] = df
             img_bounds = GeoSeries(
                 [shapely.box(*get_xarray_bounds(df))],
                 crs=explorer._nc[path].get_crs(df),
             ).to_crs(4326)
-            explorer._images[path] = next(iter(img_bounds))
+            # explorer._images[path] = next(iter(img_bounds))
+            explorer._bounds_series = pd.concat(
+                [
+                    GeoSeries({path: next(iter(img_bounds))}),
+                    explorer._bounds_series[lambda x: x.index != path],
+                ]
+            )
 
             continue
         explorer._loaded_data[path] = df.with_columns(
@@ -1729,10 +1742,12 @@ class GeoExplorer:
                     if key not in self._loaded_data:
                         continue
                     df = self._loaded_data[key]
+                    self._max_unique_id_int += 1
+                    if isinstance(df, (Dataset | DataArray)):
+                        continue
                     loaded_data_sorted[key] = df.with_columns(
                         _unique_id=_get_unique_id(self._max_unique_id_int)
                     ).drop("id", errors="ignore")
-                    self._max_unique_id_int += 1
             else:
                 x = _standardize_path(x)
                 df = self._loaded_data[x]
@@ -1937,6 +1952,8 @@ class GeoExplorer:
             checked_clicks,
             checked_ids,
         ):
+            if not len(self._bounds_series):
+                return dash.no_update, dash.no_update, dash.no_update
             t = perf_counter()
 
             triggered = dash.callback_context.triggered_id
@@ -1987,7 +2004,13 @@ class GeoExplorer:
                         img_bounds = GeoSeries(
                             [shapely.box(*src.bounds)], crs=src.crs
                         ).to_crs(4326)
-                        self._images[path] = next(iter(img_bounds))
+                        # self._images[path] = next(iter(img_bounds))
+                        self._bounds_series = pd.concat(
+                            [
+                                GeoSeries({path: next(iter(img_bounds))}),
+                                self._bounds_series[lambda x: x.index != path],
+                            ]
+                        )
 
             if len(missing) > 10:
                 to_read = 0
@@ -2950,7 +2973,7 @@ class GeoExplorer:
             bins,
         ):
             triggered = dash.callback_context.triggered_id
-            debug_print(
+            print(
                 "\nadd_data",
                 dash.callback_context.triggered_id,
                 len(self._loaded_data),
@@ -3013,11 +3036,15 @@ class GeoExplorer:
                 max_rows_component = _get_max_rows_displayed_component(self.max_rows)
 
             bbox = shapely.box(*bounds)
-            image_overlays = []
-            for img_path, img_bounds in self._images.items():
-                is_checked = self.selected_files[img_path]
-                if not is_checked:
+            images = {}
+            for img_path, is_checked in self.selected_files.items():
+                if not is_checked or not is_raster_file(img_path):
                     continue
+                # if img_path not in set(self._bounds_series.index) or pd.notna(
+                #     self._bounds_series.loc[img_path]
+                # ):
+                #     _read_files(self, [img_path], mask=bbox)
+                img_bounds = self._bounds_series.loc[img_path]
                 clipped_bounds = img_bounds.intersection(bbox)
                 if clipped_bounds.is_empty:
                     continue
@@ -3029,8 +3056,12 @@ class GeoExplorer:
                             code_block=self._queries.get(img_path),
                         )
                     except Exception as e:
+                        traceback.print_exc()
                         alerts.append(
-                            dbc.Alert(f"{type(e).__name__}: {e}", color="warning")
+                            dbc.Alert(
+                                f"{type(e).__name__}: {e}. (Traceback printed in terminal)",
+                                color="warning",
+                            )
                         )
                         continue
                 else:
@@ -3042,13 +3073,21 @@ class GeoExplorer:
                 arr = fix_numpy_img_shape(arr)
                 if np.isnan(arr).any() and not np.all(np.isnan(arr)):
                     arr[np.isnan(arr)] = np.min(arr[~np.isnan(arr)])
-                if "int" in str(arr.dtype).lower():
-                    vmin = np.iinfo(arr.dtype).min
-                    vmax = np.iinfo(arr.dtype).max
-                else:
-                    vmin = np.finfo(arr.dtype).min
-                    vmax = np.finfo(arr.dtype).max
-                minx, miny, maxx, maxy = clipped_bounds.bounds
+
+                images[img_path] = (arr, clipped_bounds)
+
+            if images:
+                # make sure all single-band images are normalized by same extremities
+                vmin = np.min([np.min(x[0]) for x in images.values()])
+                vmax = np.min([np.max(x[0]) for x in images.values()])
+
+            image_overlays = []
+            for img_path, (arr, bounds) in images.items():
+                # skip normalization for rgb images
+                if len(arr.shape) == 2:
+                    arr = (arr - vmin) / (vmax - vmin)
+
+                minx, miny, maxx, maxy = bounds.bounds
 
                 # hack: using folium because dash_leaflet doesn't accept np.array
                 image_overlay = folium.raster_layers.ImageOverlay(
@@ -3067,7 +3106,7 @@ class GeoExplorer:
                 image_overlay = dl.Overlay(
                     image_overlay,
                     name=img_name,
-                    checked=is_checked,
+                    checked=True,
                 )
                 image_overlays.append(image_overlay)
 
@@ -3721,22 +3760,23 @@ class GeoExplorer:
             lambda x: ~x.index.isin(deleted_files2)
         ]
 
-        self._max_unique_id_int = -1
-        for path, df in self._loaded_data.items():
-            self._max_unique_id_int += 1
-            id_prev = df.select(pl.col("_unique_id").first()).collect().item()
-            self._loaded_data[path] = df.with_columns(
-                _unique_id=_get_unique_id(self._max_unique_id_int)
-            )
-            for idx in list(self._selected_features):
-                if idx[0] != id_prev[0]:
-                    continue
+        self._reset()
+        # self._max_unique_id_int = -1
+        # for path, df in self._loaded_data.items():
+        #     self._max_unique_id_int += 1
+        #     id_prev = df.select(pl.col("_unique_id").first()).collect().item()
+        #     self._loaded_data[path] = df.with_columns(
+        #         _unique_id=_get_unique_id(self._max_unique_id_int)
+        #     )
+        #     for idx in list(self._selected_features):
+        #         if idx[0] != id_prev[0]:
+        #             continue
 
-                # rounding values to avoid floating point precicion problems
-                new_idx = f"{self._max_unique_id_int}.{idx[2:]}"
-                feature = self._selected_features.pop(idx)
-                feature["id"] = new_idx
-                self._selected_features[new_idx] = feature
+        #         # rounding values to avoid floating point precicion problems
+        #         new_idx = f"{self._max_unique_id_int}.{idx[2:]}"
+        #         feature = self._selected_features.pop(idx)
+        #         feature["id"] = new_idx
+        #         self._selected_features[new_idx] = feature
 
         return None, None
 
@@ -4532,11 +4572,20 @@ class GeoExplorer:
         self._max_unique_id_int = -1
         for path, df in self._loaded_data.items():
             self._max_unique_id_int += 1
-            if df is None or isinstance(df, (Dataset, DataArray)):
+            if df is None or isinstance(df, (Dataset | DataArray)):
                 continue
             self._loaded_data[path] = df.with_columns(
                 _unique_id=_get_unique_id(self._max_unique_id_int)
             )
+
+            for idx, feature in dict(self._selected_features).items():
+                if feature["__file_path"] != path:
+                    continue
+
+                new_idx = f"{self._max_unique_id_int}.{idx.split(".")[-1]}"
+                self._selected_features.pop(idx)
+                feature["id"] = new_idx
+                self._selected_features[new_idx] = feature
 
     def __str__(self) -> str:
         """String representation."""
@@ -4593,4 +4642,12 @@ def fix_numpy_img_shape(arr: np.ndarray) -> np.ndarray:
         # to 3d array in shape (x, y, 3)
         return np.transpose(arr, (1, 2, 0))
     else:
-        raise ValueError("Only single band or 3-band rasters are supported")
+        raise ValueError("Only single band or 3-band  (RGB) are supported")
+
+
+def is_raster_file(path: str) -> bool:
+    return any(Path(path).suffix.lower().startswith(x) for x in [".tif", ".nc"])
+
+
+def is_netcdf(path: str) -> bool:
+    return Path(path).suffix.lower().startswith(".nc")
