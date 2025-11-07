@@ -73,10 +73,8 @@ class NetCDFConfig(AbstractNetCDFConfig):
 
     @code_block.setter
     def code_block(self, value: str | None):
-        if (
-            value
-            and "xarr=" not in value.replace(" ", "")
-            or "=ds" not in value.replace(" ", "")
+        if value and (
+            "xarr=" not in value.replace(" ", "") or "=ds" not in value.replace(" ", "")
         ):
             raise ValueError(
                 "'code_block' must be a piece of code that takes the xarray object 'ds' and defines the object 'xarr'"
