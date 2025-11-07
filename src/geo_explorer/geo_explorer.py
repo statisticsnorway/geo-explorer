@@ -172,11 +172,14 @@ def _get_sql_query_with_col(
 
 @time_function_call(_PROFILE_DICT)
 def read_file(
-    path: str, file_system: AbstractFileSystem, **kwargs
+    i: int, path: str, file_system: AbstractFileSystem, **kwargs
 ) -> tuple[pl.LazyFrame, dict[str, pl.DataType]]:
 
     if is_netcdf(path):
         import xarray as xr
+
+        time.sleep(i * 5)
+        print("sleep ferdig")
 
         try:
             ds = xr.open_dataarray(path, engine="netcdf4")
@@ -697,7 +700,7 @@ def _read_files(explorer, paths: list[str], mask=None, **kwargs) -> None:
     with joblib.Parallel(len(paths), backend=backend) as parallel:
         more_data = parallel(
             joblib.delayed(explorer.__class__.read_func)(
-                path=path, file_system=file_system, **kwargs
+                i=i, path=path, file_system=file_system, **kwargs
             )
             for path in paths
         )
@@ -3040,10 +3043,10 @@ class GeoExplorer:
             for img_path, is_checked in self.selected_files.items():
                 if not is_checked or not is_raster_file(img_path):
                     continue
-                # if img_path not in set(self._bounds_series.index) or pd.notna(
-                #     self._bounds_series.loc[img_path]
-                # ):
-                #     _read_files(self, [img_path], mask=bbox)
+                if img_path not in set(self._bounds_series.index) or pd.notna(
+                    self._bounds_series.loc[img_path]
+                ):
+                    _read_files(self, [img_path], mask=bbox)
                 img_bounds = self._bounds_series.loc[img_path]
                 clipped_bounds = img_bounds.intersection(bbox)
                 if clipped_bounds.is_empty:
