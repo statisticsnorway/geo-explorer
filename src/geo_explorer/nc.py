@@ -3,6 +3,7 @@ from abc import abstractmethod
 from typing import ClassVar
 from multiprocessing import cpu_count
 
+from shapely import Geometry
 import joblib
 import numpy as np
 import pandas as pd
@@ -52,13 +53,12 @@ class NetCDFConfig:
         self.time_dtype = time_dtype
 
     def get_crs(self, ds: Dataset) -> pyproj.CRS:
-        return "EPSG:32632"
         attrs = [x for x in ds.attrs if "projection" in x.lower() or "crs" in x.lower()]
         return pyproj.CRS(ds[attrs[0]])
 
     def get_bounds(self, ds: Dataset) -> tuple[float, float, float, float]:
         try:
-            return as_bounds(ds["bounds"])
+            return as_bounds(ds.attrs["bounds"])
         except Exception:
             pass
         attrs = [
@@ -167,13 +167,20 @@ class NetCDFConfig:
         return False
 
 
-def as_bounds(bounds):
+def as_bounds(
+    bounds: str | bytes | dict | Geometry,
+) -> tuple[float, float, float, float]:
     if isinstance(bounds, str):
         return shapely.wkt.loads(bounds).bounds
     elif isinstance(bounds, bytes):
         return shapely.wkb.loads(bounds).bounds
     elif isinstance(bounds, (list, tuple)) and len(bounds) == 4:
         return tuple(bounds)
+    try:
+        geom = shape(bounds)
+        return tuple(geom.bounds)
+    except Exception:
+        return tuple(geom.bounds)
 
 
 class NBSNetCDFConfig(NetCDFConfig):

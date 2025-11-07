@@ -1668,7 +1668,8 @@ class GeoExplorer:
             for key, value in x.items():
                 key = _standardize_path(key)
                 if isinstance(value, NetCDFConfig):
-                    self.selected_files[key] = True
+                    # setting nc files as unchecked because they might be very large
+                    self.selected_files[key] = False
                     self._queries[key] = value.code_block
                     self._nc[key] = value
                     continue
