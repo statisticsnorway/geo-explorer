@@ -1,3 +1,4 @@
+import abc
 from typing import ClassVar
 
 import numpy as np
@@ -24,7 +25,35 @@ from .utils import get_xarray_bounds
 from .utils import time_method_call
 
 
-class NetCDFConfig:
+class AbstractNetCDFConfig(abc.ABC):
+    rgb_bands: ClassVar[list[str] | None] = None
+
+    @abc.abstractmethod
+    def __init__(self, code_block: str | None = None) -> None:
+        pass
+
+    @abc.abstractmethod
+    def get_crs(self, ds: Dataset) -> pyproj.CRS:
+        pass
+
+    @abc.abstractmethod
+    def to_numpy(
+        self,
+        ds: Dataset,
+        bounds: tuple[float, float, float, float],
+        code_block: str | None,
+    ) -> GeoDataFrame | None:
+        pass
+
+    def __str__(self) -> str:
+        code_block = f"'{self.code_block}'" if self.code_block else None
+        return f"{self.__class__.__name__}({code_block})"
+
+    def __repr__(self) -> str:
+        return str(self)
+
+
+class NetCDFConfig(AbstractNetCDFConfig):
     """Sets the configuration for reading NetCDF files and getting crs and bounds.
 
     Args:
@@ -34,14 +63,9 @@ class NetCDFConfig:
 
     rgb_bands: ClassVar[list[str] | None] = None
 
-    def __init__(
-        self,
-        code_block: str | None = None,
-        time_dtype: str = "datetime64[D]",
-    ) -> None:
+    def __init__(self, code_block: str | None = None) -> None:
         self._code_block = code_block
-        self.code_block  # trigger property
-        self.time_dtype = time_dtype
+        self.code_block = code_block  # trigger setter
 
     @property
     def code_block(self) -> str | None:
@@ -94,14 +118,9 @@ class NetCDFConfig:
             y=slice(maxy, miny),
         )
 
-        if "time" in set(ds.dims).union(set(ds.coords)):
-            ds["time"] = ds["time"].astype(self.time_dtype)
-
         if not code_block and isinstance(ds, DataArray):
             return ds.values
         elif not code_block and isinstance(ds, Dataset):
-            # if max(len(ds[x]) for x in set(ds.coords).difference({"x", "y"})) in [0, 1]:
-            #     return ds
             raise ValueError(
                 "code_block cannot be None for nc files with more than one dimension."
             )

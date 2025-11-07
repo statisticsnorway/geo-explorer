@@ -178,8 +178,8 @@ def read_file(
     if is_netcdf(path):
         import xarray as xr
 
+        # need to sleep some seconds when multiple ncml files from url
         time.sleep(i * 5)
-        print("sleep ferdig")
 
         try:
             ds = xr.open_dataarray(path, engine="netcdf4")
@@ -702,7 +702,7 @@ def _read_files(explorer, paths: list[str], mask=None, **kwargs) -> None:
             joblib.delayed(explorer.__class__.read_func)(
                 i=i, path=path, file_system=file_system, **kwargs
             )
-            for path in paths
+            for i, path in enumerate(paths)
         )
     for path, (df, dtypes) in zip(paths, more_data, strict=True):
         if df is None:
@@ -3100,6 +3100,7 @@ class GeoExplorer:
                     vmax=vmax,
                 )
                 img_name = Path(img_path).stem
+                print(img_name)
                 image_overlay = dl.ImageOverlay(
                     url=image_overlay.url,
                     bounds=[[miny, minx], [maxy, maxx]],
@@ -4535,10 +4536,19 @@ class GeoExplorer:
             data.pop("wms_layers_checked")
 
         if self.selected_files:
+
+            def as_nc_if_nc(path, query):
+                if self._nc.get(path):
+                    return self._nc[path].__class__(query)
+                return query
+
             data = {
                 "data": {
-                    key: _unformat_query(self._queries.get(key, "")) or None
-                    for key in reversed(data.pop("selected_files", []))
+                    path: as_nc_if_nc(
+                        path, _unformat_query(self._queries.get(path, ""))
+                    )
+                    or None
+                    for path in reversed(data.pop("selected_files", []))
                 },
                 **data,
             }
