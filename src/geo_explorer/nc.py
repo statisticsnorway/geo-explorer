@@ -1,5 +1,6 @@
 import abc
 from typing import ClassVar
+from typing import Callable
 
 import numpy as np
 import pyproj
@@ -27,9 +28,13 @@ from .utils import time_method_call
 
 class AbstractNetCDFConfig(abc.ABC):
     rgb_bands: ClassVar[list[str] | None] = None
+    reducer: ClassVar[Callable | None] = None
 
     @abc.abstractmethod
-    def __init__(self, code_block: str | None = None) -> None:
+    def __init__(
+        self,
+        code_block: str | None = None,
+    ) -> None:
         pass
 
     @abc.abstractmethod
@@ -61,7 +66,8 @@ class NetCDFConfig(AbstractNetCDFConfig):
             Note that the input Dataset must be references as 'ds' and the output must be assigned to 'xarr'.
     """
 
-    rgb_bands: ClassVar[list[str] | None] = None
+    rgb_bands: ClassVar[list[str]] = ["B4", "B3", "B2"]
+    reducer: ClassVar[Callable] = np.median
 
     def __init__(self, code_block: str | None = None) -> None:
         self._code_block = code_block
@@ -118,25 +124,28 @@ class NetCDFConfig(AbstractNetCDFConfig):
 
         if not code_block and isinstance(ds, DataArray):
             return ds.values
-        elif not code_block and isinstance(ds, Dataset):
-            raise ValueError(
-                "code_block cannot be None for nc files with more than one dimension."
-            )
 
-        try:
-            xarr = eval(code_block)
-            if callable(xarr):
-                xarr = xarr(ds)
-        except SyntaxError:
-            loc = {}
-            exec(code_block, globals=globals() | {"ds": ds}, locals=loc)
-            xarr = loc["xarr"]
+        if code_block:
+            try:
+                xarr = eval(code_block)
+                if callable(xarr):
+                    xarr = xarr(ds)
+            except SyntaxError:
+                loc = {}
+                exec(code_block, globals=globals() | {"ds": ds}, locals=loc)
+                xarr = loc["xarr"]
+        else:
+            xarr = ds
 
         if isinstance(xarr, Dataset):
             if "time" in set(xarr.dims) and (
                 not hasattr(xarr.time.values, "__len__") or len(xarr.time.values) > 1
             ):
-                xarr = xarr[self.rgb_bands].mean(dim="time")
+                if self.reducer is None:
+                    raise ValueError(
+                        "Must set class variable 'reducer', or reduce Dataset's time dimension in 'code_block'"
+                    )
+                xarr = xarr[self.rgb_bands].reduce(self.reducer, dim="time")
             return np.array([getattr(xarr, band).values for band in self.rgb_bands])
 
         if isinstance(xarr, np.ndarray):
