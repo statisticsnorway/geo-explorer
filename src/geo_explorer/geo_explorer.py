@@ -3070,24 +3070,19 @@ class GeoExplorer:
                     clipped_bounds = img_bounds.intersection(bbox)
                     if clipped_bounds.is_empty:
                         continue
-                    if is_netcdf(img_path):
-                        try:
-                            arr = self._nc[selected_path].to_numpy(
-                                ds=self._loaded_data[img_path],
-                                bounds=clipped_bounds.bounds,
-                                code_block=self._queries.get(img_path),
+                    try:
+                        arr = self._open_img_path_as_numpy(
+                            img_path, selected_path, clipped_bounds
+                        )
+                    except Exception as e:
+                        traceback.print_exc()
+                        alerts.append(
+                            dbc.Alert(
+                                f"{type(e).__name__}: {e}. (Traceback printed in terminal)",
+                                color="warning",
                             )
-                        except Exception as e:
-                            traceback.print_exc()
-                            alerts.append(
-                                dbc.Alert(
-                                    f"{type(e).__name__}: {e}. (Traceback printed in terminal)",
-                                    color="warning",
-                                )
-                            )
-                            continue
-                    else:
-                        arr = rasterio_to_numpy(img_path, clipped_bounds)
+                        )
+                        continue
                     if arr is None:
                         print("arr is None")
                         continue
@@ -3124,6 +3119,7 @@ class GeoExplorer:
                     bounds=[[miny, minx], [maxy, maxx]],
                     opacity=self.opacity,
                     interactive=True,
+                    id={"type": "image", "index": img_path},
                 )
                 image_overlay = dl.Overlay(
                     image_overlay,
@@ -3173,6 +3169,31 @@ class GeoExplorer:
                 f"All features (n={len(features)})"
                 " (note that for partitioned files, only partitions in bounds are loaded)",
             )
+
+        @callback(
+            Output("click-output", "children"),
+            Input({"type": "image", "index": dash.ALL}, "clickData"),
+            State({"type": "image", "index": dash.ALL}, "n_clicks"),
+            State({"type": "image", "index": dash.ALL}, "id"),
+            State("debounced_bounds", "value"),
+        )
+        def display_click(latlng, n_clicks, ids, bounds):
+            img_path = get_index_if_clicks(n_clicks, ids)
+            selected_path = next(iter(x for x in self.selected_files if x in img_path))
+            if not img_path or not latlng:
+                return
+            latlng = latlng[0]["latlng"]
+            lat, lng = latlng["lat"], latlng["lng"]
+            point = Point(int(lng), int(lat))
+
+            img_bounds = self._bounds_series.loc[img_path]
+            bbox = shapely.box(*self._nested_bounds_to_bounds(bounds))
+            clipped_bounds = img_bounds.intersection(bbox)
+            arr = self._open_img_path_as_xarray(img_path, selected_path, clipped_bounds)
+            crs = self._nc[selected_path].get_crs(arr, img_path)
+            point_correct_crs = GeoSeries([point], crs=4326).to_crs(crs).union_all()
+            x, y = point_correct_crs.x, point_correct_crs.y
+            arr = arr.sel(x=x, y=y, method="nearest")
 
         @callback(
             Output("clicked-features", "data"),
@@ -3929,6 +3950,26 @@ class GeoExplorer:
             name = _get_stem_from_parent(path)
         return name
 
+    def _open_img_path_as_numpy(self, img_path, selected_path, clipped_bounds):
+        if is_netcdf(img_path):
+            return self._nc[selected_path].to_numpy(
+                ds=self._loaded_data[img_path],
+                bounds=clipped_bounds.bounds,
+                code_block=self._queries.get(img_path),
+            )
+        else:
+            return rasterio_to_numpy(img_path, clipped_bounds)
+
+    def _open_img_path_as_xarray(self, img_path, selected_path, clipped_bounds):
+        if is_netcdf(img_path):
+            return self._nc[selected_path].filter_ds(
+                ds=self._loaded_data[img_path],
+                bounds=clipped_bounds.bounds,
+                code_block=self._queries.get(img_path),
+            )
+        else:
+            return rasterio_to_xarray(img_path, clipped_bounds)
+
     @property
     def _columns(self) -> dict[str, set[str]]:
         return {path: set(dtypes) for path, dtypes in self._dtypes.items()} | {
@@ -4662,6 +4703,12 @@ def rasterio_to_numpy(img_path, bounds):
             window=window,
             **({"boundless": False, "masked": False}),
         )
+
+
+def rasterio_to_xarray(img_path, bounds):
+    import xarray as xr
+
+    return xr.open_dataarray(img_path)
 
 
 def fix_numpy_img_shape(arr: np.ndarray) -> np.ndarray:

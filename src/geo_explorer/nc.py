@@ -59,13 +59,13 @@ class AbstractImageConfig(abc.ABC):
         pass
 
     @time_method_call(_PROFILE_DICT)
-    def to_numpy(
+    def filter_ds(
         self,
         ds: Dataset,
         bounds: tuple[float, float, float, float],
         code_block: str | None,
     ) -> GeoDataFrame | None:
-        crs = self.get_crs(ds)
+        crs = self.get_crs(ds, None)
         ds_bounds = get_xarray_bounds(ds)
 
         bbox_correct_crs = (
@@ -79,8 +79,8 @@ class AbstractImageConfig(abc.ABC):
             y=slice(maxy, miny),
         )
 
-        if not code_block and isinstance(ds, DataArray):
-            return ds.values
+        if not code_block:
+            return ds
 
         if code_block:
             try:
@@ -91,9 +91,17 @@ class AbstractImageConfig(abc.ABC):
                 loc = {}
                 exec(code_block, globals=globals() | {"ds": ds}, locals=loc)
                 xarr = loc["xarr"]
-        else:
-            xarr = ds
 
+        return xarr
+
+    @time_method_call(_PROFILE_DICT)
+    def to_numpy(
+        self,
+        ds: Dataset,
+        bounds: tuple[float, float, float, float],
+        code_block: str | None,
+    ) -> GeoDataFrame | None:
+        xarr = self.filter_ds(ds, bounds, code_block)
         if isinstance(xarr, Dataset):
             if "time" in set(xarr.dims) and (
                 not hasattr(xarr.time.values, "__len__") or len(xarr.time.values) > 1
@@ -160,7 +168,7 @@ class NetCDFConfig(AbstractImageConfig):
 
 
 class NBSNetCDFConfig(NetCDFConfig):
-    def get_crs(self, ds: Dataset) -> pyproj.CRS:
+    def get_crs(self, ds: Dataset, path: str) -> pyproj.CRS:
         return pyproj.CRS(ds.UTM_projection.epsg_code)
 
 
