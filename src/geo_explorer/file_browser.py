@@ -22,7 +22,7 @@ from .utils import get_button_with_tooltip
 
 
 class FileBrowser:
-    file_types: ClassVar[list[str]] = [".parquet", ".tif", ".tiff", ".nc"]
+    file_formats: ClassVar[list[str]] = [".parquet", ".tif", ".tiff", ".nc"]
 
     def __init__(
         self,
@@ -419,7 +419,7 @@ class FileBrowser:
 
         def is_dir_or_is_partitioned_parquet(x) -> bool:
             return x["type"] == "directory" or any(
-                x["name"].endswith(txt) for txt in self.file_types
+                x["name"].endswith(txt) for txt in self.file_formats
             )
 
         paths = [
@@ -483,6 +483,7 @@ class FileBrowser:
                     x["size"],
                     isdir,
                     path,
+                    self.file_formats,
                     file_system,
                 )
                 for x, isdir in zip(paths, isdir_list, strict=True)
@@ -492,16 +493,19 @@ class FileBrowser:
         )
 
 
-def _get_file_list_row(path, timestamp, size, isdir: bool, current_path, file_system):
+def _get_file_list_row(
+    path, timestamp, size, isdir: bool, current_path, file_formats, file_system
+):
     path = _standardize_path(path)
     timestamp = str(timestamp)[:19]
     mb = str(round(size / 1_000_000, 2))
-    is_loadable = not isdir or (
-        path.endswith(".parquet")
+    is_loadable = not isdir or any(
+        path.endswith(file_format)
         or all(
-            x.endswith(".parquet") or _standardize_path(x) == path
+            x.endswith(file_format) or _standardize_path(x) == path
             for x in file_system.ls(path)
         )
+        for file_format in file_formats
     )
     if is_loadable:
         button = html.Button(

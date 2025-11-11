@@ -83,6 +83,7 @@ except ImportError:
 from .file_browser import FileBrowser
 from .fs import LocalFileSystem
 from .nc import NetCDFConfig
+from .nc import GeoTIFFConfig
 from .utils import _PROFILE_DICT
 from .utils import DEBUG
 from .utils import _clicked_button_style
@@ -175,20 +176,22 @@ def read_file(
     i: int, path: str, file_system: AbstractFileSystem, **kwargs
 ) -> tuple[pl.LazyFrame, dict[str, pl.DataType]]:
 
-    if is_netcdf(path):
+    if is_raster_file(path):
         import xarray as xr
 
-        # need to sleep some seconds when multiple ncml files from url
-        time.sleep(i * 5)
+        if path.endswith(".ncml"):
+            # need to sleep some seconds when multiple ncml files from url
+            time.sleep(i * 5)
 
         try:
-            ds = xr.open_dataarray(path, engine="netcdf4")
+            ds = xr.open_dataarray(path)
         except Exception:
-            ds = xr.open_dataset(path, engine="netcdf4")
+            ds = xr.open_dataset(path)
         try:
             ds = ds.sortby("time")
         except Exception:
             pass
+
         return ds, {}
 
     if not path.endswith(".parquet") and FILE_SPLITTER_TXT not in path:
@@ -704,29 +707,29 @@ def _read_files(explorer, paths: list[str], mask=None, **kwargs) -> None:
             )
             for i, path in enumerate(paths)
         )
-    for path, (df, dtypes) in zip(paths, more_data, strict=True):
-        if df is None:
-            continue
-        if isinstance(df, (Dataset | DataArray)):
-            explorer._loaded_data[path] = df
-            img_bounds = GeoSeries(
-                [shapely.box(*get_xarray_bounds(df))],
-                crs=explorer._nc[path].get_crs(df),
-            ).to_crs(4326)
-            # explorer._images[path] = next(iter(img_bounds))
-            explorer._bounds_series = pd.concat(
-                [
-                    GeoSeries({path: next(iter(img_bounds))}),
-                    explorer._bounds_series[lambda x: x.index != path],
-                ]
-            )
+    for selected_path in explorer.selected_files:
+        for path, (df, dtypes) in zip(paths, more_data, strict=True):
+            if selected_path not in path or df is None:
+                continue
+            if isinstance(df, (Dataset | DataArray)):
+                explorer._loaded_data[path] = df
+                img_bounds = GeoSeries(
+                    [shapely.box(*get_xarray_bounds(df))],
+                    crs=explorer._nc[selected_path].get_crs(df, path),
+                ).to_crs(4326)
+                explorer._bounds_series = pd.concat(
+                    [
+                        GeoSeries({path: next(iter(img_bounds))}),
+                        explorer._bounds_series[lambda x: x.index != path],
+                    ]
+                )
 
-            continue
-        explorer._loaded_data[path] = df.with_columns(
-            _unique_id=_get_unique_id(explorer._max_unique_id_int)
-        ).drop("id", strict=False)
-        explorer._dtypes[path] = dtypes | {"area": pl.Float64()}
-        explorer._max_unique_id_int += 1
+                continue
+            explorer._loaded_data[path] = df.with_columns(
+                _unique_id=_get_unique_id(explorer._max_unique_id_int)
+            ).drop("id", strict=False)
+            explorer._dtypes[path] = dtypes | {"area": pl.Float64()}
+            explorer._max_unique_id_int += 1
 
 
 def _random_color(min_diff: int = 50) -> str:
@@ -1930,9 +1933,20 @@ class GeoExplorer:
                     dismissable=True,
                 )
             self.selected_files[selected_path] = True
-            if selected_path.endswith(".nc"):
+            if is_netcdf(selected_path) or all(
+                is_netcdf(x)
+                for x in self._bounds_series[
+                    self._bounds_series.index.str.contains(selected_path)
+                ].index
+            ):
                 self._nc[selected_path] = NetCDFConfig()
-
+            elif is_raster_file(selected_path) or all(
+                is_raster_file(x)
+                for x in self._bounds_series[
+                    self._bounds_series.index.str.contains(selected_path)
+                ].index
+            ):
+                self._nc[selected_path] = GeoTIFFConfig()
             return None
 
         @callback(
@@ -1999,21 +2013,21 @@ class GeoExplorer:
                 disabled = True
                 return new_data_read, missing, disabled
 
-            for path in list(missing):
-                if any(path.lower().endswith(txt) for txt in [".tif", ".tiff"]):
+            for selected_path in self.selected_files:
+                for path in list(missing):
+                    if selected_path not in path or not any(
+                        path.lower().endswith(txt) for txt in [".tif", ".tiff"]
+                    ):
+                        continue
+                    self._bounds_series = pd.concat(
+                        [
+                            GeoSeries(
+                                {path: self._nc[selected_path].get_bounds(None, path)}
+                            ),
+                            self._bounds_series[lambda x: x.index != path],
+                        ]
+                    )
                     missing.pop(missing.index(path))
-                    # with self.file_system.open(path) as file, rasterio.open(
-                    with rasterio.open(path) as src:
-                        img_bounds = GeoSeries(
-                            [shapely.box(*src.bounds)], crs=src.crs
-                        ).to_crs(4326)
-                        # self._images[path] = next(iter(img_bounds))
-                        self._bounds_series = pd.concat(
-                            [
-                                GeoSeries({path: next(iter(img_bounds))}),
-                                self._bounds_series[lambda x: x.index != path],
-                            ]
-                        )
 
             if len(missing) > 10:
                 to_read = 0
@@ -3040,44 +3054,49 @@ class GeoExplorer:
 
             bbox = shapely.box(*bounds)
             images = {}
-            for img_path, is_checked in self.selected_files.items():
-                if not is_checked or not is_raster_file(img_path):
+            for selected_path, is_checked in self.selected_files.items():
+                if not is_checked:
                     continue
-                if img_path not in set(self._bounds_series.index) or pd.notna(
-                    self._bounds_series.loc[img_path]
+                for img_path in set(self._loaded_data_sizes).union(
+                    set(self._loaded_data)
                 ):
-                    _read_files(self, [img_path], mask=bbox)
-                img_bounds = self._bounds_series.loc[img_path]
-                clipped_bounds = img_bounds.intersection(bbox)
-                if clipped_bounds.is_empty:
-                    continue
-                if Path(img_path).suffix.startswith(".nc"):
-                    try:
-                        arr = self._nc[img_path].to_numpy(
-                            ds=self._loaded_data[img_path],
-                            bounds=clipped_bounds.bounds,
-                            code_block=self._queries.get(img_path),
-                        )
-                    except Exception as e:
-                        traceback.print_exc()
-                        alerts.append(
-                            dbc.Alert(
-                                f"{type(e).__name__}: {e}. (Traceback printed in terminal)",
-                                color="warning",
-                            )
-                        )
+                    if not is_raster_file(img_path):
                         continue
-                else:
-                    arr = rasterio_to_numpy(img_path, clipped_bounds)
-                if arr is None:
-                    print("arr is None")
-                    continue
+                    if img_path not in set(self._bounds_series.index) or pd.notna(
+                        self._bounds_series.loc[img_path]
+                    ):
+                        _read_files(self, [img_path], mask=bbox)
+                    img_bounds = self._bounds_series.loc[img_path]
+                    clipped_bounds = img_bounds.intersection(bbox)
+                    if clipped_bounds.is_empty:
+                        continue
+                    if is_netcdf(img_path):
+                        try:
+                            arr = self._nc[selected_path].to_numpy(
+                                ds=self._loaded_data[img_path],
+                                bounds=clipped_bounds.bounds,
+                                code_block=self._queries.get(img_path),
+                            )
+                        except Exception as e:
+                            traceback.print_exc()
+                            alerts.append(
+                                dbc.Alert(
+                                    f"{type(e).__name__}: {e}. (Traceback printed in terminal)",
+                                    color="warning",
+                                )
+                            )
+                            continue
+                    else:
+                        arr = rasterio_to_numpy(img_path, clipped_bounds)
+                    if arr is None:
+                        print("arr is None")
+                        continue
 
-                arr = fix_numpy_img_shape(arr)
-                if np.isnan(arr).any() and not np.all(np.isnan(arr)):
-                    arr[np.isnan(arr)] = np.min(arr[~np.isnan(arr)])
+                    arr = fix_numpy_img_shape(arr)
+                    if np.isnan(arr).any() and not np.all(np.isnan(arr)):
+                        arr[np.isnan(arr)] = np.min(arr[~np.isnan(arr)])
 
-                images[img_path] = (arr, clipped_bounds)
+                    images[img_path] = (arr, clipped_bounds)
 
             if images:
                 # make sure all single-band images are normalized by same extremities
@@ -3100,7 +3119,6 @@ class GeoExplorer:
                     vmax=vmax,
                 )
                 img_name = Path(img_path).stem
-                print(img_name)
                 image_overlay = dl.ImageOverlay(
                     url=image_overlay.url,
                     bounds=[[miny, minx], [maxy, maxx]],
@@ -4537,14 +4555,14 @@ class GeoExplorer:
 
         if self.selected_files:
 
-            def as_nc_if_nc(path, query):
+            def as_nc_config_if_nc(path, query):
                 if self._nc.get(path):
                     return self._nc[path].__class__(query)
                 return query
 
             data = {
                 "data": {
-                    path: as_nc_if_nc(
+                    path: as_nc_config_if_nc(
                         path, _unformat_query(self._queries.get(path, ""))
                     )
                     or None

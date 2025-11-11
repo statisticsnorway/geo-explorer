@@ -8,6 +8,8 @@ import shapely
 from geopandas import GeoDataFrame
 from geopandas import GeoSeries
 import pandas as pd
+import rasterio
+from shapely.geometry import Polygon
 
 try:
     from xarray import DataArray
@@ -26,48 +28,9 @@ from .utils import get_xarray_bounds
 from .utils import time_method_call
 
 
-class AbstractNetCDFConfig(abc.ABC):
+class AbstractImageConfig(abc.ABC):
     rgb_bands: ClassVar[list[str] | None] = None
     reducer: ClassVar[Callable | None] = None
-
-    @abc.abstractmethod
-    def __init__(
-        self,
-        code_block: str | None = None,
-    ) -> None:
-        pass
-
-    @abc.abstractmethod
-    def get_crs(self, ds: Dataset) -> pyproj.CRS:
-        pass
-
-    @abc.abstractmethod
-    def to_numpy(
-        self,
-        ds: Dataset,
-        bounds: tuple[float, float, float, float],
-        code_block: str | None,
-    ) -> GeoDataFrame | None:
-        pass
-
-    def __str__(self) -> str:
-        code_block = f"'{self.code_block}'" if self.code_block else None
-        return f"{self.__class__.__name__}({code_block})"
-
-    def __repr__(self) -> str:
-        return str(self)
-
-
-class NetCDFConfig(AbstractNetCDFConfig):
-    """Sets the configuration for reading NetCDF files and getting crs and bounds.
-
-    Args:
-        code_block: String of Python code that takes an xarray.Dataset (ds) and returns an xarray.DataArray (xarr).
-            Note that the input Dataset must be references as 'ds' and the output must be assigned to 'xarr'.
-    """
-
-    rgb_bands: ClassVar[list[str]] = ["B4", "B3", "B2"]
-    reducer: ClassVar[Callable] = np.median
 
     def __init__(self, code_block: str | None = None) -> None:
         self._code_block = code_block
@@ -87,19 +50,13 @@ class NetCDFConfig(AbstractNetCDFConfig):
             )
         self._code_block = value
 
-    def get_crs(self, ds: Dataset) -> pyproj.CRS:
-        attrs = [x for x in ds.attrs if "projection" in x.lower() or "crs" in x.lower()]
-        if not attrs:
-            raise ValueError(f"Could not find CRS attribute in dataset: {ds}")
-        for i, attr in enumerate(attrs):
-            try:
-                return pyproj.CRS(ds.attrs[attr])
-            except Exception as e:
-                if i == len(attrs) - 1:
-                    attrs_dict = {attr: ds.attrs[attr] for attr in attrs}
-                    raise ValueError(
-                        f"No valid CRS attribute found among {attrs_dict}"
-                    ) from e
+    @abc.abstractmethod
+    def get_crs(self, ds: Dataset, path: str) -> pyproj.CRS:
+        pass
+
+    @abc.abstractmethod
+    def get_bounds(self, ds: Dataset, path: str) -> Polygon:
+        pass
 
     @time_method_call(_PROFILE_DICT)
     def to_numpy(
@@ -152,6 +109,54 @@ class NetCDFConfig(AbstractNetCDFConfig):
             return xarr
 
         return xarr.values
+
+    def __str__(self) -> str:
+        code_block = f"'{self.code_block}'" if self.code_block else None
+        return f"{self.__class__.__name__}({code_block})"
+
+    def __repr__(self) -> str:
+        return str(self)
+
+
+class GeoTIFFConfig(AbstractImageConfig):
+    def get_crs(self, ds, path):
+        with rasterio.open(path) as src:
+            return src.crs
+
+    def get_bounds(self, ds, path) -> Polygon:
+        with rasterio.open(path) as src:
+            return next(
+                iter(GeoSeries([shapely.box(*src.bounds)], crs=src.crs).to_crs(4326))
+            )
+
+
+class NetCDFConfig(AbstractImageConfig):
+    """Sets the configuration for reading NetCDF files and getting crs and bounds.
+
+    Args:
+        code_block: String of Python code that takes an xarray.Dataset (ds) and returns an xarray.DataArray (xarr).
+            Note that the input Dataset must be references as 'ds' and the output must be assigned to 'xarr'.
+    """
+
+    rgb_bands: ClassVar[list[str]] = ["B4", "B3", "B2"]
+    reducer: ClassVar[Callable] = np.median
+
+    def get_bounds(self, ds, path) -> Polygon:
+        return get_xarray_bounds(ds)
+
+    def get_crs(self, ds: Dataset, path: str) -> pyproj.CRS:
+        attrs = [x for x in ds.attrs if "projection" in x.lower() or "crs" in x.lower()]
+        if not attrs:
+            raise ValueError(f"Could not find CRS attribute in dataset: {ds}")
+        for i, attr in enumerate(attrs):
+            try:
+                return pyproj.CRS(ds.attrs[attr])
+            except Exception as e:
+                if i == len(attrs) - 1:
+                    attrs_dict = {attr: ds.attrs[attr] for attr in attrs}
+                    raise ValueError(
+                        f"No valid CRS attribute found among {attrs_dict}"
+                    ) from e
 
 
 class NBSNetCDFConfig(NetCDFConfig):
