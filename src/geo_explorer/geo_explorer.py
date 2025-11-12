@@ -1022,7 +1022,7 @@ def _unformat_query(query: str | None) -> str:
     """Remove newlines and multiple whitespaces from SQL query."""
     if query is None:
         return None
-    query = query.replace("\n", " ").strip()
+    query = query.replace("\n", "; ").strip().strip(";").strip()
     while "  " in query:
         query = query.replace("  ", " ")
     return query
@@ -1319,6 +1319,7 @@ class GeoExplorer:
         self._force_categorical = False
         self._is_recursing = False
         self._nc = {}
+        self._px_plot_conf = {}
 
         if is_jupyter():
             service_prefix = os.environ["JUPYTERHUB_SERVICE_PREFIX"].strip("/")
@@ -1351,7 +1352,7 @@ class GeoExplorer:
             return dbc.Container(
                 [
                     dcc.Location(id="url"),
-                    dbc.Row(html.Div(id="alert")),
+                    dbc.Row(html.Div(id="add-data-alert")),
                     dbc.Row(html.Div(id="alert3")),
                     dbc.Row(html.Div(id="alert4")),
                     dbc.Row(html.Div(id="new-file-added")),
@@ -1529,6 +1530,36 @@ class GeoExplorer:
                                         ],
                                         id="numeric-options",
                                         style={"display": "none"},
+                                    ),
+                                    dbc.Row(
+                                        [
+                                            dbc.Col(
+                                                [
+                                                    dbc.Row(
+                                                        [
+                                                            dbc.Col(width=10),
+                                                            dbc.Col(
+                                                                get_button_with_tooltip(
+                                                                    "✖",
+                                                                    id="close-image-btn",
+                                                                    tooltip_text="Remove plot",
+                                                                    style={
+                                                                        "display": "none"
+                                                                    },
+                                                                ),
+                                                                width=2,
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    dbc.Row(
+                                                        html.Div(
+                                                            id="image-plot",
+                                                            style={"display": "none"},
+                                                        )
+                                                    ),
+                                                ]
+                                            ),
+                                        ]
                                     ),
                                     dbc.Row(
                                         [
@@ -1854,7 +1885,7 @@ class GeoExplorer:
 
         @callback(
             Output("buffer-tip", "children"),
-            Input("alert", "children"),
+            Input("add-data-alert", "children"),
             State("map", "zoom"),
         )
         def maybe_tip_about_buffer(_, zoom):
@@ -2941,7 +2972,7 @@ class GeoExplorer:
 
         @callback(
             Output("loading", "children", allow_duplicate=True),
-            Input("alert", "children"),
+            Input("add-data-alert", "children"),
             prevent_initial_call=True,
         )
         def update_loading(_):
@@ -2951,7 +2982,7 @@ class GeoExplorer:
 
         @callback(
             Output("lc", "children"),
-            Output("alert", "children"),
+            Output("add-data-alert", "children"),
             Output("max_rows", "children"),
             Output({"type": "wms-list", "index": dash.ALL}, "children"),
             Input("colors-are-updated", "data"),
@@ -3054,13 +3085,14 @@ class GeoExplorer:
 
             bbox = shapely.box(*bounds)
             images = {}
+            self._current_xarrays = {}
             for selected_path, is_checked in self.selected_files.items():
                 if not is_checked:
                     continue
                 for img_path in set(self._loaded_data_sizes).union(
                     set(self._loaded_data)
                 ):
-                    if not is_raster_file(img_path):
+                    if selected_path not in img_path or not is_raster_file(img_path):
                         continue
                     if img_path not in set(self._bounds_series.index) or pd.notna(
                         self._bounds_series.loc[img_path]
@@ -3071,7 +3103,7 @@ class GeoExplorer:
                     if clipped_bounds.is_empty:
                         continue
                     try:
-                        arr = self._open_img_path_as_numpy(
+                        ds = self._open_img_path_as_xarray(
                             img_path, selected_path, clipped_bounds
                         )
                     except Exception as e:
@@ -3083,10 +3115,11 @@ class GeoExplorer:
                             )
                         )
                         continue
-                    if arr is None:
-                        print("arr is None")
+                    if ds is None:
                         continue
-
+                    print(ds)
+                    self._current_xarrays[img_path] = ds
+                    arr = self._nc[selected_path].to_numpy(ds)
                     arr = fix_numpy_img_shape(arr)
                     if np.isnan(arr).any() and not np.all(np.isnan(arr)):
                         arr[np.isnan(arr)] = np.min(arr[~np.isnan(arr)])
@@ -3171,29 +3204,54 @@ class GeoExplorer:
             )
 
         @callback(
-            Output("click-output", "children"),
+            Output("image-plot", "children", allow_duplicate=True),
+            Output("image-plot", "style", allow_duplicate=True),
+            Output("close-image-btn", "style", allow_duplicate=True),
+            Input("add-data-alert", "children"),
             Input({"type": "image", "index": dash.ALL}, "clickData"),
             State({"type": "image", "index": dash.ALL}, "n_clicks"),
             State({"type": "image", "index": dash.ALL}, "id"),
-            State("debounced_bounds", "value"),
+            State("image-plot", "style"),
+            prevent_initial_call=True,
         )
-        def display_click(latlng, n_clicks, ids, bounds):
+        def display_pixel_plot(data_added, latlng, n_clicks, ids, plot_style):
             img_path = get_index_if_clicks(n_clicks, ids)
-            selected_path = next(iter(x for x in self.selected_files if x in img_path))
-            if not img_path or not latlng:
-                return
-            latlng = latlng[0]["latlng"]
-            lat, lng = latlng["lat"], latlng["lng"]
-            point = Point(int(lng), int(lat))
-
-            img_bounds = self._bounds_series.loc[img_path]
-            bbox = shapely.box(*self._nested_bounds_to_bounds(bounds))
-            clipped_bounds = img_bounds.intersection(bbox)
-            arr = self._open_img_path_as_xarray(img_path, selected_path, clipped_bounds)
-            crs = self._nc[selected_path].get_crs(arr, img_path)
-            point_correct_crs = GeoSeries([point], crs=4326).to_crs(crs).union_all()
+            query_updated: bool = not plot_style and self._px_plot_conf
+            if (not img_path or not latlng or not any(latlng)) and not query_updated:
+                return dash.no_update, dash.no_update, dash.no_update
+            elif query_updated:
+                selected_path = self._px_plot_conf["selected_path"]
+                img_path = self._px_plot_conf["img_path"]
+                point_correct_crs = self._px_plot_conf["point_correct_crs"]
+            else:
+                selected_path = next(
+                    iter(x for x in self.selected_files if x in img_path)
+                )
+                latlng = next(iter(x for x in latlng if x))["latlng"]
+                lat, lng = latlng["lat"], latlng["lng"]
+                point = Point(float(lng), float(lat))
+                crs = self._nc[selected_path].get_crs(
+                    self._loaded_data[img_path], img_path
+                )
+                point_correct_crs = GeoSeries([point], crs=4326).to_crs(crs).union_all()
+                self._px_plot_conf["selected_path"] = selected_path
+                self._px_plot_conf["img_path"] = img_path
+                self._px_plot_conf["point_correct_crs"] = point_correct_crs
             x, y = point_correct_crs.x, point_correct_crs.y
-            arr = arr.sel(x=x, y=y, method="nearest")
+            ds = self._current_xarrays[img_path].copy().sel(x=x, y=y, method="nearest")
+            return dcc.Graph(figure=pixel_value_scatter(ds)), None, None
+
+        @callback(
+            Output("image-plot", "children", allow_duplicate=True),
+            Output("image-plot", "style", allow_duplicate=True),
+            Output("close-image-btn", "style", allow_duplicate=True),
+            Input("close-image-btn", "n_clicks"),
+            prevent_initial_call=True,
+        )
+        def remove_pixel_plot(n_clicks):
+            if n_clicks:
+                return None, {"display": "none"}, {"display": "none"}
+            return dash.no_update, dash.no_update, dash.no_update
 
         @callback(
             Output("clicked-features", "data"),
@@ -3950,16 +4008,6 @@ class GeoExplorer:
             name = _get_stem_from_parent(path)
         return name
 
-    def _open_img_path_as_numpy(self, img_path, selected_path, clipped_bounds):
-        if is_netcdf(img_path):
-            return self._nc[selected_path].to_numpy(
-                ds=self._loaded_data[img_path],
-                bounds=clipped_bounds.bounds,
-                code_block=self._queries.get(img_path),
-            )
-        else:
-            return rasterio_to_numpy(img_path, clipped_bounds)
-
     def _open_img_path_as_xarray(self, img_path, selected_path, clipped_bounds):
         if is_netcdf(img_path):
             return self._nc[selected_path].filter_ds(
@@ -4694,21 +4742,112 @@ def get_numeric_colors(values_no_nans_unique, values_no_nans, cmap, k):
     return color_dict, bins
 
 
-def rasterio_to_numpy(img_path, bounds):
+def rasterio_to_numpy(
+    img_path, bbox, return_attrs: list[str] | None = None
+) -> np.ndarray | tuple[Any]:
     with rasterio.open(img_path) as src:
-        bbox_in_img_crs = GeoSeries([bounds], crs=4326).to_crs(src.crs).total_bounds
-        window = rasterio.windows.from_bounds(*bbox_in_img_crs, transform=src.transform)
-        return src.read(
-            # indexes=(1,),
-            window=window,
-            **({"boundless": False, "masked": False}),
+        bounds_in_img_crs = GeoSeries([bbox], crs=4326).to_crs(src.crs).total_bounds
+        window = rasterio.windows.from_bounds(
+            *bounds_in_img_crs, transform=src.transform
         )
+        arr = src.read(window=window, boundless=False, masked=False)
+        if not return_attrs:
+            return arr
+        return (arr, *[getattr(src, attr) for attr in return_attrs])
 
 
-def rasterio_to_xarray(img_path, bounds):
+def rasterio_to_xarray(img_path, bbox):
     import xarray as xr
+    from rioxarray.rioxarray import _generate_spatial_coords
 
-    return xr.open_dataarray(img_path)
+    arr, crs, descriptions = rasterio_to_numpy(
+        img_path, bbox, return_attrs=["crs", "descriptions"]
+    )
+
+    if len(arr.shape) == 2:
+        height, width = arr.shape
+    elif len(arr.shape) == 3:
+        height, width = arr.shape[1:]
+    else:
+        raise ValueError(arr.shape)
+
+    transform = rasterio.transform.from_bounds(*bbox.bounds, width, height)
+    coords = _generate_spatial_coords(transform, width, height)
+
+    if len(arr.shape) == 2:
+        return xr.DataArray(
+            arr,
+            coords=coords,
+            dims=["y", "x"],
+            attrs={"crs": crs},
+        )
+    if len(descriptions) != arr.shape[0]:
+        descriptions = range(arr.shape[0])
+    return xr.Dataset(
+        {
+            desc: xr.DataArray(
+                arr[i],
+                coords=coords,
+                dims=["y", "x"],
+                attrs={"crs": crs},
+                name=desc,
+            )
+            for i, desc in enumerate(descriptions)
+        }
+    )
+
+
+def as_sized_array(arr: np.ndarray) -> np.ndarray:
+    try:
+        len(arr)
+        return arr
+    except TypeError:
+        return np.array([arr])
+
+
+def pixel_value_scatter(ds: Dataset | DataArray):
+    import plotly.express as px
+
+    try:
+        xs = as_sized_array(ds["time"].values)
+        assert isinstance(xs, np.ndarray)
+        x = "time"
+    except Exception:
+        x = "index"
+
+    def get_df(ds, var):
+        if isinstance(ds, DataArray):
+            values = ds.values
+        else:
+            values = ds[var].values
+        values = as_sized_array(values)
+        if x == "index":
+            these_xs = np.arange(len(values))
+        else:
+            these_xs = xs
+        data = pd.DataFrame({"value": values, x: these_xs})
+        data["color"] = var
+        return data
+
+    if isinstance(ds, Dataset):
+        data = []
+        for var in ds.data_vars:
+            try:
+                data.append(get_df(ds, var))
+            except Exception:
+                pass
+        data = pd.concat(data)
+    elif isinstance(ds, DataArray):
+        data = get_df(ds, ds.name)
+    if len(data["color"].unique()) == 1 and data["color"].notna().all():
+        colname = next(iter(data["color"]))
+        data = data.rename(columns={"value": colname}, errors="raise")
+    else:
+        colname = "value"
+    fig = px.scatter(data, y=colname, x=x, color="color")
+    fig.update_traces(marker_size=10)
+    fig.update_layout(margin=dict(l=0, r=0, t=30, b=20))
+    return fig
 
 
 def fix_numpy_img_shape(arr: np.ndarray) -> np.ndarray:

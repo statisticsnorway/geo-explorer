@@ -30,7 +30,7 @@ from .utils import time_method_call
 
 class AbstractImageConfig(abc.ABC):
     rgb_bands: ClassVar[list[str] | None] = None
-    reducer: ClassVar[Callable | None] = None
+    reducer: ClassVar[str | None] = None
 
     def __init__(self, code_block: str | None = None) -> None:
         self._code_block = code_block
@@ -95,23 +95,27 @@ class AbstractImageConfig(abc.ABC):
         return xarr
 
     @time_method_call(_PROFILE_DICT)
-    def to_numpy(
-        self,
-        ds: Dataset,
-        bounds: tuple[float, float, float, float],
-        code_block: str | None,
-    ) -> GeoDataFrame | None:
-        xarr = self.filter_ds(ds, bounds, code_block)
-        if isinstance(xarr, Dataset):
-            if "time" in set(xarr.dims) and (
-                not hasattr(xarr.time.values, "__len__") or len(xarr.time.values) > 1
-            ):
-                if self.reducer is None:
-                    raise ValueError(
-                        "Must set class variable 'reducer', or reduce Dataset's time dimension in 'code_block'"
-                    )
-                xarr = xarr[self.rgb_bands].reduce(self.reducer, dim="time")
-            return np.array([getattr(xarr, band).values for band in self.rgb_bands])
+    def to_numpy(self, xarr: Dataset | DataArray) -> GeoDataFrame | None:
+        if isinstance(xarr, Dataset) and len(xarr.data_vars) == 1:
+            xarr = xarr[next(iter(xarr.data_vars))]
+        elif isinstance(xarr, Dataset):
+            try:
+                xarr = xarr[self.rgb_bands]
+            except Exception:
+                pass
+
+        if "time" in set(xarr.dims) and (
+            not hasattr(xarr["time"].values, "__len__") or len(xarr["time"].values) > 1
+        ):
+            if self.reducer is None:
+                xarr = xarr.isel(time=0)
+            else:
+                xarr = getattr(xarr, self.reducer)(dim="time")
+
+        if isinstance(xarr, Dataset) and self.rgb_bands:
+            return np.array([xarr[band].values for band in self.rgb_bands])
+        elif isinstance(xarr, Dataset):
+            return np.array([xarr[var].values for var in xarr.data_vars])
 
         if isinstance(xarr, np.ndarray):
             return xarr
@@ -147,7 +151,6 @@ class NetCDFConfig(AbstractImageConfig):
     """
 
     rgb_bands: ClassVar[list[str]] = ["B4", "B3", "B2"]
-    reducer: ClassVar[Callable] = np.median
 
     def get_bounds(self, ds, path) -> Polygon:
         return get_xarray_bounds(ds)
