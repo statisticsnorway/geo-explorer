@@ -42,10 +42,12 @@ class AbstractImageConfig(abc.ABC):
     @code_block.setter
     def code_block(self, value: str | None):
         if value and (
-            "xarr=" not in value.replace(" ", "") or "=ds" not in value.replace(" ", "")
+            "xarr=" not in value.replace(" ", "")
+            or not any(txt in value.replace(" ", "") for txt in ("=ds", "(ds"))
         ):
             raise ValueError(
-                "'code_block' must be a piece of code that takes the xarray object 'ds' and defines the object 'xarr'"
+                "'code_block' must be a piece of code that takes the xarray object 'ds' and defines the object 'xarr'. "
+                f"Got '{value}'"
             )
         self._code_block = value
 
@@ -54,7 +56,7 @@ class AbstractImageConfig(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def get_bounds(self, ds: Dataset, path: str) -> Polygon:
+    def get_bounds(self, ds: Dataset, path: str) -> tuple[float, float, float, float]:
         pass
 
     @time_method_call(_PROFILE_DICT)
@@ -78,20 +80,7 @@ class AbstractImageConfig(abc.ABC):
             y=slice(maxy, miny),
         )
 
-        if not code_block:
-            return ds
-
-        if code_block:
-            try:
-                xarr = eval(code_block)
-                if callable(xarr):
-                    xarr = xarr(ds)
-            except SyntaxError:
-                loc = {}
-                exec(code_block, globals=globals() | {"ds": ds}, locals=loc)
-                xarr = loc["xarr"]
-
-        return xarr
+        return _run_code_block(ds, code_block)
 
     @time_method_call(_PROFILE_DICT)
     def to_numpy(self, xarr: Dataset | DataArray) -> GeoDataFrame | None:
@@ -129,15 +118,42 @@ class AbstractImageConfig(abc.ABC):
         return str(self)
 
 
+def _run_code_block(
+    ds: DataArray | Dataset, code_block: str | None
+) -> Dataset | DataArray:
+    if not code_block:
+        return ds
+
+    try:
+        xarr = eval(code_block)
+        if callable(xarr):
+            xarr = xarr(ds)
+    except SyntaxError:
+        loc = {}
+        exec(code_block, globals=globals() | {"ds": ds}, locals=loc)
+        xarr = loc["xarr"]
+
+    if isinstance(xarr, np.ndarray) and isinstance(ds, DataArray):
+        ds.values = xarr
+        return ds
+    elif isinstance(xarr, np.ndarray) and isinstance(ds, Dataset):
+        raise ValueError(
+            "Cannot return np.ndarray from 'code_block' if ds is xarray.Dataset."
+        )
+    return xarr
+
+
 class GeoTIFFConfig(AbstractImageConfig):
     def get_crs(self, ds, path):
         with rasterio.open(path) as src:
             return src.crs
 
-    def get_bounds(self, ds, path) -> Polygon:
+    def get_bounds(self, ds, path) -> tuple[float, float, float, float]:
         with rasterio.open(path) as src:
-            return next(
-                iter(GeoSeries([shapely.box(*src.bounds)], crs=src.crs).to_crs(4326))
+            return tuple(
+                GeoSeries([shapely.box(*src.bounds)], crs=src.crs)
+                .to_crs(4326)
+                .total_bounds
             )
 
 
@@ -151,7 +167,7 @@ class NetCDFConfig(AbstractImageConfig):
 
     rgb_bands: ClassVar[list[str]] = ["B4", "B3", "B2"]
 
-    def get_bounds(self, ds, path) -> Polygon:
+    def get_bounds(self, ds, path) -> tuple[float, float, float, float]:
         return get_xarray_bounds(ds)
 
     def get_crs(self, ds: Dataset, path: str) -> pyproj.CRS:

@@ -84,6 +84,7 @@ from .file_browser import FileBrowser
 from .fs import LocalFileSystem
 from .nc import GeoTIFFConfig
 from .nc import NetCDFConfig
+from .nc import _run_code_block
 from .utils import _PROFILE_DICT
 from .utils import DEBUG
 from .utils import _clicked_button_style
@@ -681,17 +682,17 @@ def _get_unique_id(i: float) -> pl.Expr:
 def _read_files(explorer, paths: list[str], mask=None, **kwargs) -> None:
     if not paths:
         return
-    bounds_set = set(explorer._bounds_series.index)
+    bbox_set = set(explorer._bbox_series.index)
 
     paths = [
         path
         for path in paths
         if mask is None
         or (
-            path in bounds_set
+            path in bbox_set
             and (
-                pd.isna(explorer._bounds_series[path])
-                or shapely.intersects(mask, explorer._bounds_series[path])
+                pd.isna(explorer._bbox_series[path])
+                or shapely.intersects(mask, explorer._bbox_series[path])
             )
         )
     ]
@@ -713,14 +714,14 @@ def _read_files(explorer, paths: list[str], mask=None, **kwargs) -> None:
                 continue
             if isinstance(df, (Dataset | DataArray)):
                 explorer._loaded_data[path] = df
-                img_bounds = GeoSeries(
+                img_bbox = GeoSeries(
                     [shapely.box(*get_xarray_bounds(df))],
                     crs=explorer._nc[selected_path].get_crs(df, path),
                 ).to_crs(4326)
-                explorer._bounds_series = pd.concat(
+                explorer._bbox_series = pd.concat(
                     [
-                        GeoSeries({path: next(iter(img_bounds))}),
-                        explorer._bounds_series[lambda x: x.index != path],
+                        GeoSeries({path: next(iter(img_bbox))}),
+                        explorer._bbox_series[lambda x: x.index != path],
                     ]
                 )
 
@@ -755,7 +756,7 @@ def _get_stem_from_parent(path):
     return f"{parent_name}/{name}"
 
 
-def _try_to_get_bounds_else_none(
+def _try_to_get_bbox_else_none(
     path, file_system
 ) -> tuple[tuple[float] | None, str | None]:
     try:
@@ -767,15 +768,15 @@ def _try_to_get_bounds_else_none(
             return None, None
 
 
-def _get_bounds_series_as_4326(paths, file_system):
-    # bounds_series = sg.get_bounds_series(paths, file_system=file_system)
-    # return bounds_series.to_crs(4326)
+def _get_bbox_series_as_4326(paths, file_system):
+    # bbox_series = sg.get_bbox_series(paths, file_system=file_system)
+    # return bbox_series.to_crs(4326)
 
-    func = partial(_try_to_get_bounds_else_none, file_system=file_system)
+    func = partial(_try_to_get_bbox_else_none, file_system=file_system)
     with ThreadPoolExecutor() as executor:
-        bounds_and_crs = list(executor.map(func, paths))
+        bbox_and_crs = list(executor.map(func, paths))
 
-    crss = {json.dumps(x[1]) for x in bounds_and_crs}
+    crss = {json.dumps(x[1]) for x in bbox_and_crs}
     crss = {
         crs
         for crs in crss
@@ -787,7 +788,7 @@ def _get_bounds_series_as_4326(paths, file_system):
     return GeoSeries(
         [
             shapely.box(*bbox[0]) if bbox[0] is not None else None
-            for bbox in bounds_and_crs
+            for bbox in bbox_and_crs
         ],
         index=paths,
         crs=crs,
@@ -1302,7 +1303,7 @@ class GeoExplorer:
         self.hard_click = hard_click
         self.max_rows = max_rows
         self.opacity = opacity
-        self._bounds_series = GeoSeries()
+        self._bbox_series = GeoSeries()
         self.selected_files: dict[str, int] = {}
         self._loaded_data: dict[str, pl.LazyFrame] = {}
         self._images: dict[str, Polygon] = {}
@@ -1704,7 +1705,7 @@ class GeoExplorer:
             )
 
         error_mess = "'data' must be a list of file paths or a dict of GeoDataFrames."
-        bounds_series_dict = {}
+        bbox_series_dict = {}
         if isinstance(data, dict):
             data = [data]
 
@@ -1730,7 +1731,7 @@ class GeoExplorer:
                     self._queries[key] = value
                     continue
                 value, dtypes = _geopandas_to_polars(value, key)
-                bounds_series_dict[key] = shapely.box(
+                bbox_series_dict[key] = shapely.box(
                     float(value["minx"].min()),
                     float(value["miny"].min()),
                     float(value["maxx"].max()),
@@ -1741,11 +1742,11 @@ class GeoExplorer:
                 self.selected_files[key] = True
 
         self.selected_files = dict(reversed(self.selected_files.items()))
-        self._bounds_series = GeoSeries(bounds_series_dict)
+        self._bbox_series = GeoSeries(bbox_series_dict)
 
         # storing bounds here before file paths are loaded. To avoid setting center as the entire map bounds if large data
-        if len(self._bounds_series):
-            minx, miny, maxx, maxy = self._bounds_series.total_bounds
+        if len(self._bbox_series):
+            minx, miny, maxx, maxy = self._bbox_series.total_bounds
         else:
             minx, miny, maxx, maxy = None, None, None, None
 
@@ -1756,7 +1757,7 @@ class GeoExplorer:
             self._register_callbacks()
             return
 
-        self._append_to_bounds_series(
+        self._append_to_bbox_series(
             [x for x in self.selected_files if x not in self._loaded_data]
         )
 
@@ -1954,7 +1955,7 @@ class GeoExplorer:
             if selected_path in self.selected_files or not n_clicks:
                 return dash.no_update
             try:
-                self._append_to_bounds_series([selected_path])
+                self._append_to_bbox_series([selected_path])
             except Exception as e:
                 if DEBUG:
                     raise e
@@ -1966,15 +1967,15 @@ class GeoExplorer:
             self.selected_files[selected_path] = True
             if is_netcdf(selected_path) or all(
                 is_netcdf(x)
-                for x in self._bounds_series[
-                    self._bounds_series.index.str.contains(selected_path)
+                for x in self._bbox_series[
+                    self._bbox_series.index.str.contains(selected_path)
                 ].index
             ):
                 self._nc[selected_path] = NetCDFConfig()
             elif is_raster_file(selected_path) or all(
                 is_raster_file(x)
-                for x in self._bounds_series[
-                    self._bounds_series.index.str.contains(selected_path)
+                for x in self._bbox_series[
+                    self._bbox_series.index.str.contains(selected_path)
                 ].index
             ):
                 self._nc[selected_path] = GeoTIFFConfig()
@@ -2000,7 +2001,7 @@ class GeoExplorer:
             checked_clicks,
             checked_ids,
         ):
-            if not len(self._bounds_series):
+            if not len(self._bbox_series):
                 return dash.no_update, dash.no_update, dash.no_update
             t = perf_counter()
 
@@ -2018,9 +2019,9 @@ class GeoExplorer:
 
             if triggered != "missing":
                 box = shapely.box(*self._nested_bounds_to_bounds(bounds))
-                files_in_bounds = set(sg.sfilter(self._bounds_series, box).index)
+                files_in_bounds = set(sg.sfilter(self._bbox_series, box).index)
                 non_geodata = set(
-                    self._bounds_series[lambda x: (x.isna()) | (x.is_empty)].index
+                    self._bbox_series[lambda x: (x.isna()) | (x.is_empty)].index
                 )
                 files_in_bounds |= non_geodata
 
@@ -2050,12 +2051,16 @@ class GeoExplorer:
                         path.lower().endswith(txt) for txt in [".tif", ".tiff"]
                     ):
                         continue
-                    self._bounds_series = pd.concat(
+                    self._bbox_series = pd.concat(
                         [
                             GeoSeries(
-                                {path: self._nc[selected_path].get_bounds(None, path)}
+                                {
+                                    path: shapely.box(
+                                        *self._nc[selected_path].get_bounds(None, path)
+                                    )
+                                }
                             ),
-                            self._bounds_series[lambda x: x.index != path],
+                            self._bbox_series[lambda x: x.index != path],
                         ]
                     )
                     missing.pop(missing.index(path))
@@ -3094,12 +3099,12 @@ class GeoExplorer:
                 ):
                     if selected_path not in img_path or not is_raster_file(img_path):
                         continue
-                    if img_path not in set(self._bounds_series.index) or pd.notna(
-                        self._bounds_series.loc[img_path]
+                    if img_path not in set(self._bbox_series.index) or pd.notna(
+                        self._bbox_series.loc[img_path]
                     ):
                         _read_files(self, [img_path], mask=bbox)
-                    img_bounds = self._bounds_series.loc[img_path]
-                    clipped_bounds = img_bounds.intersection(bbox)
+                    img_bbox = self._bbox_series.loc[img_path]
+                    clipped_bounds = img_bbox.intersection(bbox)
                     if clipped_bounds.is_empty:
                         continue
                     try:
@@ -3117,7 +3122,6 @@ class GeoExplorer:
                         continue
                     if ds is None:
                         continue
-                    print(ds)
                     self._current_xarrays[img_path] = ds
                     arr = self._nc[selected_path].to_numpy(ds)
                     arr = fix_numpy_img_shape(arr)
@@ -3216,7 +3220,11 @@ class GeoExplorer:
         )
         def display_pixel_plot(data_added, latlng, n_clicks, ids, plot_style):
             img_path = get_index_if_clicks(n_clicks, ids)
-            query_updated: bool = not plot_style and self._px_plot_conf
+            query_updated: bool = bool(
+                (not plot_style)
+                and (not latlng or not any(latlng))
+                and self._px_plot_conf
+            )
             if (not img_path or not latlng or not any(latlng)) and not query_updated:
                 return dash.no_update, dash.no_update, dash.no_update
             elif query_updated:
@@ -3227,8 +3235,9 @@ class GeoExplorer:
                 selected_path = next(
                     iter(x for x in self.selected_files if x in img_path)
                 )
-                latlng = next(iter(x for x in latlng if x))["latlng"]
-                lat, lng = latlng["lat"], latlng["lng"]
+                i = [x["index"] for x in ids].index(img_path)
+                latlng2 = latlng[i]["latlng"]
+                lat, lng = latlng2["lat"], latlng2["lng"]
                 point = Point(float(lng), float(lat))
                 crs = self._nc[selected_path].get_crs(
                     self._loaded_data[img_path], img_path
@@ -3238,7 +3247,15 @@ class GeoExplorer:
                 self._px_plot_conf["img_path"] = img_path
                 self._px_plot_conf["point_correct_crs"] = point_correct_crs
             x, y = point_correct_crs.x, point_correct_crs.y
-            ds = self._current_xarrays[img_path].copy().sel(x=x, y=y, method="nearest")
+            try:
+                ds = (
+                    self._current_xarrays[img_path]
+                    .copy()
+                    .sel(x=x, y=y, method="nearest")
+                )
+            except KeyError:
+                # dataset is probably unchecked
+                return None, {"display": "none"}, {"display": "none"}
             return dcc.Graph(figure=pixel_value_scatter(ds)), None, None
 
         @callback(
@@ -3444,7 +3461,7 @@ class GeoExplorer:
                     self,
                     [
                         x
-                        for x in self._bounds_series[
+                        for x in self._bbox_series[
                             lambda x: x.index.str.contains(clicked_path)
                         ].index
                         if x not in self._loaded_data
@@ -3857,9 +3874,7 @@ class GeoExplorer:
             deleted_files2.add(path2)
 
         debug_print(f"{deleted_files2=}")
-        self._bounds_series = self._bounds_series[
-            lambda x: ~x.index.isin(deleted_files2)
-        ]
+        self._bbox_series = self._bbox_series[lambda x: ~x.index.isin(deleted_files2)]
 
         self._reset()
         # self._max_unique_id_int = -1
@@ -4013,10 +4028,12 @@ class GeoExplorer:
             return self._nc[selected_path].filter_ds(
                 ds=self._loaded_data[img_path],
                 bounds=clipped_bounds.bounds,
-                code_block=self._queries.get(img_path),
+                code_block=self._queries.get(selected_path),
             )
         else:
-            return rasterio_to_xarray(img_path, clipped_bounds)
+            return rasterio_to_xarray(
+                img_path, clipped_bounds, code_block=self._queries.get(selected_path)
+            )
 
     @property
     def _columns(self) -> dict[str, set[str]]:
@@ -4543,14 +4560,14 @@ class GeoExplorer:
 
         self.wms[wms_name] = constructor(**(current_kwargs | kwargs))
 
-    def _append_to_bounds_series(self, paths, recurse: bool = True) -> None:
+    def _append_to_bbox_series(self, paths, recurse: bool = True) -> None:
         try:
             child_paths = self._get_child_paths(paths)
             self._loaded_data_sizes |= child_paths
             paths_with_meta, paths_without_meta = (
                 self._get_paths_with_and_without_metadata(list(child_paths))
             )
-            more_bounds = _get_bounds_series_as_4326(
+            more_bounds = _get_bbox_series_as_4326(
                 paths_with_meta,
                 file_system=self.file_system,
             )
@@ -4559,10 +4576,10 @@ class GeoExplorer:
                 raise e
             # reload file system to avoid cached reading of files that don't exist any more
             self.file_system = self.file_system.__class__()
-            return self._append_to_bounds_series(paths, recurse=False)
-        self._bounds_series = pd.concat(
+            return self._append_to_bbox_series(paths, recurse=False)
+        self._bbox_series = pd.concat(
             [
-                self._bounds_series,
+                self._bbox_series,
                 more_bounds,
                 pd.Series(
                     [None for _ in range(len(paths_without_meta))],
@@ -4602,12 +4619,12 @@ class GeoExplorer:
             for i in range(n):
                 new_path = path + f"{FILE_SPLITTER_TXT}{rows_to_read}-{i}"
                 out_paths[new_path] = size / n
-                more_bounds.append(GeoSeries({new_path: self._bounds_series.loc[path]}))
+                more_bounds.append(GeoSeries({new_path: self._bbox_series.loc[path]}))
             new_path = path + f"{FILE_SPLITTER_TXT}{rows_to_read}-{n}"
             out_paths[new_path] = size / n
-            more_bounds.append(GeoSeries({new_path: self._bounds_series.loc[path]}))
+            more_bounds.append(GeoSeries({new_path: self._bbox_series.loc[path]}))
 
-        self._bounds_series = pd.concat([self._bounds_series] + more_bounds)
+        self._bbox_series = pd.concat([self._bbox_series] + more_bounds)
 
         if len(out_paths) > 1:
             out_paths.pop(_standardize_path(path), None)
@@ -4756,45 +4773,58 @@ def rasterio_to_numpy(
         return (arr, *[getattr(src, attr) for attr in return_attrs])
 
 
-def rasterio_to_xarray(img_path, bbox):
+def rasterio_to_xarray(img_path, bbox, code_block):
     import xarray as xr
     from rioxarray.rioxarray import _generate_spatial_coords
 
     arr, crs, descriptions = rasterio_to_numpy(
         img_path, bbox, return_attrs=["crs", "descriptions"]
     )
+    bounds_in_img_crs = GeoSeries([bbox], crs=4326).to_crs(crs).total_bounds
+
+    if not all(arr.shape):
+        return xr.DataArray(
+            arr,
+            dims=["y", "x"],
+            attrs={"crs": crs},
+        )
 
     if len(arr.shape) == 2:
+        height, width = arr.shape
+    elif len(arr.shape) == 3 and arr.shape[0] == 1:
+        arr = arr[0]
         height, width = arr.shape
     elif len(arr.shape) == 3:
         height, width = arr.shape[1:]
     else:
         raise ValueError(arr.shape)
 
-    transform = rasterio.transform.from_bounds(*bbox.bounds, width, height)
+    transform = rasterio.transform.from_bounds(*bounds_in_img_crs, width, height)
     coords = _generate_spatial_coords(transform, width, height)
 
     if len(arr.shape) == 2:
-        return xr.DataArray(
+        ds = xr.DataArray(
             arr,
             coords=coords,
             dims=["y", "x"],
             attrs={"crs": crs},
         )
-    if len(descriptions) != arr.shape[0]:
-        descriptions = range(arr.shape[0])
-    return xr.Dataset(
-        {
-            desc: xr.DataArray(
-                arr[i],
-                coords=coords,
-                dims=["y", "x"],
-                attrs={"crs": crs},
-                name=desc,
-            )
-            for i, desc in enumerate(descriptions)
-        }
-    )
+    else:
+        if len(descriptions) != arr.shape[0]:
+            descriptions = range(arr.shape[0])
+        ds = xr.Dataset(
+            {
+                desc: xr.DataArray(
+                    arr[i],
+                    coords=coords,
+                    dims=["y", "x"],
+                    attrs={"crs": crs},
+                    name=desc,
+                )
+                for i, desc in enumerate(descriptions)
+            }
+        )
+    return _run_code_block(ds, code_block)
 
 
 def as_sized_array(arr: np.ndarray) -> np.ndarray:
