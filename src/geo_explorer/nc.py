@@ -1,14 +1,13 @@
 import abc
 from typing import ClassVar
-from typing import Callable
 
 import numpy as np
+import pandas as pd
 import pyproj
+import rasterio
 import shapely
 from geopandas import GeoDataFrame
 from geopandas import GeoSeries
-import pandas as pd
-import rasterio
 from shapely.geometry import Polygon
 
 try:

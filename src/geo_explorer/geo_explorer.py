@@ -11,6 +11,7 @@ import re
 import signal
 import sys
 import time
+import traceback
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
@@ -20,7 +21,6 @@ from numbers import Number
 from pathlib import Path
 from pathlib import PurePath
 from time import perf_counter
-import traceback
 from typing import Any
 from typing import ClassVar
 
@@ -82,8 +82,8 @@ except ImportError:
 
 from .file_browser import FileBrowser
 from .fs import LocalFileSystem
-from .nc import NetCDFConfig
 from .nc import GeoTIFFConfig
+from .nc import NetCDFConfig
 from .utils import _PROFILE_DICT
 from .utils import DEBUG
 from .utils import _clicked_button_style
