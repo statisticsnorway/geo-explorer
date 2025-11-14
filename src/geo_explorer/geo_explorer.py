@@ -3026,7 +3026,7 @@ class GeoExplorer:
             bins,
         ):
             triggered = dash.callback_context.triggered_id
-            print(
+            debug_print(
                 "\nadd_data",
                 dash.callback_context.triggered_id,
                 len(self._loaded_data),

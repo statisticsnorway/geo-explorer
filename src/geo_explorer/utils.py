@@ -9,7 +9,7 @@ from dash import html
 _PROFILE_DICT = {}
 
 
-DEBUG: bool = 1
+DEBUG: bool = False
 
 
 def debug_print(*args):
