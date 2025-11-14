@@ -130,7 +130,7 @@ def _run_code_block(
             xarr = xarr(ds)
     except SyntaxError:
         loc = {}
-        exec(code_block, globals=globals() | {"ds": ds}, locals=loc)
+        exec(code_block, globals() | {"ds": ds}, loc)
         xarr = loc["xarr"]
 
     if isinstance(xarr, np.ndarray) and isinstance(ds, DataArray):
