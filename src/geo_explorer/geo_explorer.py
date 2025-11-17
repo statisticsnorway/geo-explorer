@@ -39,7 +39,6 @@ import pandas as pd
 import polars as pl
 import pyarrow
 import pyarrow.parquet as pq
-import rasterio
 import sgis as sg
 import shapely
 from dash import Dash
@@ -82,9 +81,8 @@ except ImportError:
 
 from .file_browser import FileBrowser
 from .fs import LocalFileSystem
-from .nc import GeoTIFFConfig
-from .nc import NetCDFConfig
-from .nc import _run_code_block
+from .img import GeoTIFFConfig
+from .img import NetCDFConfig
 from .utils import _PROFILE_DICT
 from .utils import DEBUG
 from .utils import _clicked_button_style
@@ -1721,14 +1719,13 @@ class GeoExplorer:
                 if isinstance(value, NetCDFConfig):
                     # setting nc files as unchecked because they might be very large
                     self.selected_files[key] = False
-                    self._queries[key] = value.code_block
-                    self._nc[key] = value
+                    self.set_query(key, value.code_block)
                     continue
                 if value is not None and not isinstance(value, (GeoDataFrame | str)):
                     raise ValueError(error_mess)
                 elif not isinstance(value, GeoDataFrame):
                     self.selected_files[key] = True
-                    self._queries[key] = value
+                    self.set_query(key, value)
                     continue
                 value, dtypes = _geopandas_to_polars(value, key)
                 bbox_series_dict[key] = shapely.box(
@@ -2157,7 +2154,7 @@ class GeoExplorer:
                 and query.startswith("pl.col")
             ):
                 query = f"{old_query}, {query}"
-            self._queries[path] = query
+            self.set_query(path, query)
             return query
 
         @callback(
@@ -3104,12 +3101,15 @@ class GeoExplorer:
                     ):
                         _read_files(self, [img_path], mask=bbox)
                     img_bbox = self._bbox_series.loc[img_path]
-                    clipped_bounds = img_bbox.intersection(bbox)
-                    if clipped_bounds.is_empty:
+                    clipped_bbox = img_bbox.intersection(bbox)
+                    if clipped_bbox.is_empty:
                         continue
                     try:
-                        ds = self._open_img_path_as_xarray(
-                            img_path, selected_path, clipped_bounds
+                        self._nc[selected_path].validate_code_block()
+                        ds = self._nc[selected_path].filter_ds(
+                            ds=self._loaded_data[img_path],
+                            bounds=clipped_bbox.bounds,
+                            path=img_path,
                         )
                     except Exception as e:
                         traceback.print_exc()
@@ -3128,7 +3128,7 @@ class GeoExplorer:
                     if np.isnan(arr).any() and not np.all(np.isnan(arr)):
                         arr[np.isnan(arr)] = np.min(arr[~np.isnan(arr)])
 
-                    images[img_path] = (arr, clipped_bounds)
+                    images[img_path] = (arr, clipped_bbox)
 
             if images:
                 # make sure all single-band images are normalized by same extremities
@@ -4000,7 +4000,7 @@ class GeoExplorer:
                 if query == self._queries.get(path):
                     continue
                 self._check_for_circular_queries(query, path)
-                self._queries[path] = query
+                self.set_query(path, query)
             except RecursionError as e:
                 out_alerts.append(
                     dbc.Alert(
@@ -4016,6 +4016,11 @@ class GeoExplorer:
             return out_alerts
         return None
 
+    def set_query(self, key: str, value: str | None) -> None:
+        self._queries[key] = value
+        if key in self._nc:
+            self._nc[key].code_block = value
+
     @time_method_call(_PROFILE_DICT)
     def _get_unique_stem(self, path) -> str:
         name = _get_stem(path)
@@ -4023,19 +4028,6 @@ class GeoExplorer:
             name = _get_stem_from_parent(path)
         return name
 
-    def _open_img_path_as_xarray(self, img_path, selected_path, clipped_bounds):
-        if is_netcdf(img_path):
-            return self._nc[selected_path].filter_ds(
-                ds=self._loaded_data[img_path],
-                bounds=clipped_bounds.bounds,
-                code_block=self._queries.get(selected_path),
-            )
-        else:
-            return rasterio_to_xarray(
-                img_path, clipped_bounds, code_block=self._queries.get(selected_path)
-            )
-
-    @property
     def _columns(self) -> dict[str, set[str]]:
         return {path: set(dtypes) for path, dtypes in self._dtypes.items()} | {
             path: {"value"} for path in self._nc
@@ -4757,74 +4749,6 @@ def get_numeric_colors(values_no_nans_unique, values_no_nans, cmap, k):
         f"{rounded_bins[-1]} - {round(max(values_no_nans), 1)}": colors_[-1],
     }
     return color_dict, bins
-
-
-def rasterio_to_numpy(
-    img_path, bbox, return_attrs: list[str] | None = None
-) -> np.ndarray | tuple[Any]:
-    with rasterio.open(img_path) as src:
-        bounds_in_img_crs = GeoSeries([bbox], crs=4326).to_crs(src.crs).total_bounds
-        window = rasterio.windows.from_bounds(
-            *bounds_in_img_crs, transform=src.transform
-        )
-        arr = src.read(window=window, boundless=False, masked=False)
-        if not return_attrs:
-            return arr
-        return (arr, *[getattr(src, attr) for attr in return_attrs])
-
-
-def rasterio_to_xarray(img_path, bbox, code_block):
-    import xarray as xr
-    from rioxarray.rioxarray import _generate_spatial_coords
-
-    arr, crs, descriptions = rasterio_to_numpy(
-        img_path, bbox, return_attrs=["crs", "descriptions"]
-    )
-    bounds_in_img_crs = GeoSeries([bbox], crs=4326).to_crs(crs).total_bounds
-
-    if not all(arr.shape):
-        return xr.DataArray(
-            arr,
-            dims=["y", "x"],
-            attrs={"crs": crs},
-        )
-
-    if len(arr.shape) == 2:
-        height, width = arr.shape
-    elif len(arr.shape) == 3 and arr.shape[0] == 1:
-        arr = arr[0]
-        height, width = arr.shape
-    elif len(arr.shape) == 3:
-        height, width = arr.shape[1:]
-    else:
-        raise ValueError(arr.shape)
-
-    transform = rasterio.transform.from_bounds(*bounds_in_img_crs, width, height)
-    coords = _generate_spatial_coords(transform, width, height)
-
-    if len(arr.shape) == 2:
-        ds = xr.DataArray(
-            arr,
-            coords=coords,
-            dims=["y", "x"],
-            attrs={"crs": crs},
-        )
-    else:
-        if len(descriptions) != arr.shape[0]:
-            descriptions = range(arr.shape[0])
-        ds = xr.Dataset(
-            {
-                desc: xr.DataArray(
-                    arr[i],
-                    coords=coords,
-                    dims=["y", "x"],
-                    attrs={"crs": crs},
-                    name=desc,
-                )
-                for i, desc in enumerate(descriptions)
-            }
-        )
-    return _run_code_block(ds, code_block)
 
 
 def as_sized_array(arr: np.ndarray) -> np.ndarray:
