@@ -19,6 +19,9 @@ from .utils import _clicked_button_style
 from .utils import _standardize_path
 from .utils import _unclicked_button_style
 from .utils import get_button_with_tooltip
+from .utils import time_function_call
+from .utils import time_method_call
+from .utils import _PROFILE_DICT
 
 
 class FileBrowser:
@@ -29,15 +32,18 @@ class FileBrowser:
         start_dir: str,
         favorites: list[str] | None = None,
         file_system: AbstractFileSystem | None = None,
+        sum_partition_sizes: bool = True,
     ) -> None:
         self.start_dir = _standardize_path(start_dir)
         self.file_system = file_system
         self.favorites = (
             [_standardize_path(x) for x in favorites] if favorites is not None else []
         )
+        self.sum_partition_sizes = sum_partition_sizes
         self._history = [self.start_dir]
         self._register_callbacks()
 
+    @time_method_call(_PROFILE_DICT)
     def get_file_browser_components(self, width: str = "140vh") -> list[Component]:
         return [
             dbc.Row(
@@ -295,6 +301,7 @@ class FileBrowser:
             State("file-list", "children"),
             State("file-data-dict", "data"),
         )
+        @time_method_call(_PROFILE_DICT)
         def update_file_list(
             path,
             search_word,
@@ -350,6 +357,7 @@ class FileBrowser:
 
             return (file_data_dict, file_list, alert, sort_by_clicks, self._history[1:])
 
+    @time_method_call(_PROFILE_DICT)
     def _list_dir(
         self,
         path: str,
@@ -386,11 +394,13 @@ class FileBrowser:
 
         if (recursive or 0) % 2 == 0:
 
+            @time_function_call(_PROFILE_DICT)
             def _ls(path):
                 return file_system.ls(path, detail=True)
 
         else:
 
+            @time_function_call(_PROFILE_DICT)
             def _ls(path):
                 path = str(Path(path) / "**")
                 return _try_glob(path, file_system)
@@ -417,7 +427,7 @@ class FileBrowser:
         if isinstance(paths, dict):
             paths = list(paths.values())
 
-        def is_dir_or_is_partitioned_parquet(x) -> bool:
+        def is_dir_or_relevant_file_format(x) -> bool:
             return x["type"] == "directory" or any(
                 x["name"].endswith(txt) for txt in self.file_formats
             )
@@ -427,52 +437,15 @@ class FileBrowser:
             for x in paths
             if isinstance(x, dict)
             and _contains(x["name"])
-            and is_dir_or_is_partitioned_parquet(x)
+            and is_dir_or_relevant_file_format(x)
             and Path(path).parts != Path(x["name"]).parts
         ]
 
         paths.sort(key=lambda x: x["name"])
         isdir_list = [x["type"] == "directory" for x in paths]
 
-        partitioned = {
-            i: x
-            for i, x in enumerate(paths)
-            if x["type"] == "directory"
-            and any(
-                str(x).endswith(".parquet")
-                for x in (x["name"], *Path(x["name"]).parents)
-            )
-        }
-
-        def get_summed_size_and_latest_timestamp_in_subdirs(
-            x,
-        ) -> tuple[float, datetime.datetime]:
-            file_info = _try_glob(str(Path(x["name"]) / "**/*.parquet"), file_system)
-
-            if isinstance(file_info, dict):
-                file_info = list(file_info.values())
-
-            file_info = [
-                x for x in file_info if isinstance(x, dict) and x["type"] != "directory"
-            ]
-            if not file_info:
-                return 0, str(datetime.datetime.fromtimestamp(0))
-            return sum(x["size"] for x in file_info), max(
-                x["updated"] for x in file_info
-            )
-
-        with ThreadPoolExecutor() as executor:
-            summed_size_ant_time = list(
-                executor.map(
-                    get_summed_size_and_latest_timestamp_in_subdirs,
-                    partitioned.values(),
-                )
-            )
-            for i, (size, timestamp) in zip(
-                partitioned, summed_size_ant_time, strict=True
-            ):
-                paths[i]["size"] = size
-                paths[i]["updated"] = timestamp
+        if self.sum_partition_sizes:
+            self._sum_partition_sizes(paths, file_system)
 
         return (
             paths,
@@ -492,7 +465,48 @@ class FileBrowser:
             None,
         )
 
+    def _sum_partition_sizes(self, paths, file_system):
+        partitioned = {
+            i: x
+            for i, x in enumerate(paths)
+            if x["type"] == "directory"
+            and any(
+                str(x).endswith(".parquet")
+                for x in (x["name"], *Path(x["name"]).parents)
+            )
+        }
 
+        @time_function_call(_PROFILE_DICT)
+        def get_summed_size_and_latest_timestamp_in_subdirs(
+            x,
+        ) -> tuple[float, datetime.datetime]:
+            file_info = _try_glob(str(Path(x["name"]) / "**/*.parquet"), file_system)
+
+            if isinstance(file_info, dict):
+                file_info = list(file_info.values())
+
+            file_info = [
+                x for x in file_info if isinstance(x, dict) and x["type"] != "directory"
+            ]
+            if not file_info:
+                return 0, str(datetime.datetime.fromtimestamp(0))
+            return sum(x["size"] for x in file_info), max(
+                x["updated"] for x in file_info
+            )
+
+        with ThreadPoolExecutor() as executor:
+            summed_size_ant_time = executor.map(
+                get_summed_size_and_latest_timestamp_in_subdirs,
+                partitioned.values(),
+            )
+            for i, (size, timestamp) in zip(
+                partitioned, summed_size_ant_time, strict=True
+            ):
+                paths[i]["size"] = size
+                paths[i]["updated"] = timestamp
+
+
+@time_function_call(_PROFILE_DICT)
 def _get_file_list_row(
     path, timestamp, size, isdir: bool, current_path, file_formats, file_system
 ):
@@ -564,6 +578,7 @@ def _get_file_list_row(
     )
 
 
+@time_function_call(_PROFILE_DICT)
 def _try_glob(path, file_system):
     try:
         return file_system.glob(path, detail=True, recursive=True)

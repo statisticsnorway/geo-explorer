@@ -82,10 +82,24 @@ class AbstractImageConfig(abc.ABC):
             print("Note: selecting first DataArray in time dimension.")
             xarr = xarr.isel(time=0)
 
-        if isinstance(xarr, Dataset) and self.rgb_bands:
-            return np.array([xarr[band].values for band in self.rgb_bands])
-        elif isinstance(xarr, Dataset):
-            return np.array([xarr[var].values for var in xarr.data_vars])
+        if isinstance(xarr, Dataset):
+            try:
+                return np.array([xarr[band].values for band in self.rgb_bands])
+            except Exception:
+                pass
+            if len(xarr.data_vars) == 3:
+                try:
+                    return np.array([xarr[band].values for band in xarr.data_vars])
+                except Exception:
+                    pass
+            arrs = []
+            for var in xarr.data_vars:
+                arr = xarr[var].values
+                if len(arr.shape) == 2:
+                    arrs.append(arr)
+                if len(arr.shape) == 3:
+                    arrs.append(arr[0])
+            return arrs[np.argmax([arr.shape for arr in arrs])]
 
         if isinstance(xarr, np.ndarray):
             return xarr
@@ -93,14 +107,15 @@ class AbstractImageConfig(abc.ABC):
         return xarr.values
 
     def validate_code_block(self) -> None:
-        if self.code_block is None:
+        if not self.code_block:
             return
         try:
             assert "ds" in self.code_block
             eval(self.code_block)
         except NameError:
-            # allow valid single line python
             return
+        except SyntaxError:
+            pass
         if "xarr=" not in self.code_block.replace(" ", "") or not any(
             txt in self.code_block.replace(" ", "") for txt in ("=ds", "(ds")
         ):
@@ -153,15 +168,30 @@ class NetCDFConfig(AbstractImageConfig):
         return get_xarray_bounds(ds)
 
     def get_crs(self, ds: Dataset, path: str) -> pyproj.CRS:
-        attrs = [x for x in ds.attrs if "projection" in x.lower() or "crs" in x.lower()]
+        attrs = [
+            x
+            for x in set(ds.attrs).union(
+                set(ds.data_vars if isinstance(ds, Dataset) else set())
+            )
+            if "projection" in x.lower() or "crs" in x.lower()
+        ]
         if not attrs:
-            raise ValueError(f"Could not find CRS attribute in dataset: {ds}")
+            raise ValueError(f"Could not find CRS attribute/data_var in dataset: {ds}")
+
+        def getattr_xarray(ds, attr):
+            x = ds.attrs.get(attr, ds.get(attr))
+            if isinstance(x, DataArray):
+                return pyproj.CRS(str(x.values))
+            elif x is not None:
+                return pyproj.CRS(x)
+            raise ValueError(f"Could not find CRS attribute/data_var in dataset: {ds}")
+
         for i, attr in enumerate(attrs):
             try:
-                return pyproj.CRS(ds.attrs[attr])
+                return getattr_xarray(ds, attr)
             except Exception as e:
                 if i == len(attrs) - 1:
-                    attrs_dict = {attr: ds.attrs[attr] for attr in attrs}
+                    attrs_dict = {attr: ds.attrs.get(attr, ds[attr]) for attr in attrs}
                     raise ValueError(
                         f"No valid CRS attribute found among {attrs_dict}"
                     ) from e
