@@ -87,7 +87,36 @@ if not DEBUG:
         return decorator
 
 
+def get_xarray_resolution(ds) -> int:
+    minx, miny, maxx, maxy = _get_raw_xarray_bounds(ds)
+    diffx = maxx - minx
+    diffy = maxy - miny
+    try:
+        resx = diffx / (ds.sizes["x"] - 1)
+        resy = diffy / (ds.sizes["y"] - 1)
+    except ZeroDivisionError:
+        raise ValueError(
+            f"Cannot calculate resolution for Dataset with {diffx=}, {diffy=}, {ds.sizes['x']=}, {ds.sizes['y']=}"
+        )
+    if resx != resy:
+        raise ValueError(
+            f"x and y resolution differ: resx={resx}, resy={resy} for Dataset: {ds}"
+        )
+    return resx
+
+
 def get_xarray_bounds(ds) -> tuple[float, float, float, float]:
+    res = get_xarray_resolution(ds)
+    minx, miny, maxx, maxy = _get_raw_xarray_bounds(ds)
+    return (
+        minx - res / 2,
+        miny - res / 2,
+        maxx + res / 2,
+        maxy + res / 2,
+    )
+
+
+def _get_raw_xarray_bounds(ds) -> tuple[float, float, float, float]:
     return (
         float(ds["x"].min().values),
         float(ds["y"].min().values),

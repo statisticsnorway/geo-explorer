@@ -39,7 +39,6 @@ import pandas as pd
 import polars as pl
 import pyarrow
 import pyarrow.parquet as pq
-import rasterio
 import sgis as sg
 import shapely
 from dash import Dash
@@ -82,9 +81,9 @@ except ImportError:
 
 from .file_browser import FileBrowser
 from .fs import LocalFileSystem
-from .nc import GeoTIFFConfig
-from .nc import NetCDFConfig
-from .nc import _run_code_block
+from .img import GeoTIFFConfig
+from .img import AbstractImageConfig
+from .img import NetCDFConfig
 from .utils import _PROFILE_DICT
 from .utils import DEBUG
 from .utils import _clicked_button_style
@@ -1257,7 +1256,9 @@ class GeoExplorer:
         port: int = 8050,
         file_system: AbstractFileSystem | None = None,
         data: (
-            dict[str, str | GeoDataFrame | NetCDFConfig] | list[str | dict] | None
+            dict[str, str | GeoDataFrame | AbstractImageConfig]
+            | list[str | dict]
+            | None
         ) = None,
         column: str | None = None,
         color_dict: dict | None = None,
@@ -1273,6 +1274,7 @@ class GeoExplorer:
         nan_color: str = "#969696",
         nan_label: str = "Missing",
         max_read_size_per_callback: int = 1e9,
+        sum_partition_sizes: bool = True,
         **kwargs,
     ) -> None:
         """Initialiser."""
@@ -1313,7 +1315,10 @@ class GeoExplorer:
         self._concatted_data: pl.DataFrame | None = None
         self._selected_features = {}
         self._file_browser = FileBrowser(
-            start_dir, file_system=file_system, favorites=favorites
+            start_dir,
+            file_system=file_system,
+            favorites=favorites,
+            sum_partition_sizes=sum_partition_sizes,
         )
         self._current_table_view = None
         self.max_read_size_per_callback = max_read_size_per_callback
@@ -1718,17 +1723,25 @@ class GeoExplorer:
                 raise ValueError(error_mess)
             for key, value in x.items():
                 key = _standardize_path(key)
-                if isinstance(value, NetCDFConfig):
-                    # setting nc files as unchecked because they might be very large
-                    self.selected_files[key] = False
-                    self._queries[key] = value.code_block
+                if isinstance(value, AbstractImageConfig):
                     self._nc[key] = value
+                    # setting image files as unchecked because they might be very large
+                    self.selected_files[key] = False
+                    self.set_query(key, value.code_block)
+                    child_paths = self._get_child_paths([key]) or [key]
+                    try:
+                        bbox_series_dict |= {
+                            x: shapely.box(*self._nc[key].get_bounds(None, x))
+                            for x in child_paths
+                        }
+                    except Exception:
+                        pass
                     continue
                 if value is not None and not isinstance(value, (GeoDataFrame | str)):
                     raise ValueError(error_mess)
                 elif not isinstance(value, GeoDataFrame):
                     self.selected_files[key] = True
-                    self._queries[key] = value
+                    self.set_query(key, value)
                     continue
                 value, dtypes = _geopandas_to_polars(value, key)
                 bbox_series_dict[key] = shapely.box(
@@ -1785,13 +1798,13 @@ class GeoExplorer:
                         continue
                     loaded_data_sorted[key] = df.with_columns(
                         _unique_id=_get_unique_id(self._max_unique_id_int)
-                    ).drop("id", errors="ignore")
+                    ).drop("id", strict=False)
             else:
                 x = _standardize_path(x)
                 df = self._loaded_data[x]
                 loaded_data_sorted[x] = df.with_columns(
                     _unique_id=_get_unique_id(self._max_unique_id_int)
-                ).drop("id", errors="ignore")
+                ).drop("id", strict=False)
                 self._max_unique_id_int += 1
 
         self._loaded_data = loaded_data_sorted
@@ -2157,7 +2170,7 @@ class GeoExplorer:
                 and query.startswith("pl.col")
             ):
                 query = f"{old_query}, {query}"
-            self._queries[path] = query
+            self.set_query(path, query)
             return query
 
         @callback(
@@ -3070,7 +3083,7 @@ class GeoExplorer:
                     bins=bins,
                     opacity=opacity,
                     n_rows_per_path=n_rows_per_path,
-                    columns=self._columns,
+                    columns=self._columns(),
                     current_columns=current_columns,
                 )
                 results = [
@@ -3104,15 +3117,21 @@ class GeoExplorer:
                     ):
                         _read_files(self, [img_path], mask=bbox)
                     img_bbox = self._bbox_series.loc[img_path]
-                    clipped_bounds = img_bbox.intersection(bbox)
-                    if clipped_bounds.is_empty:
+                    clipped_bbox = img_bbox.intersection(bbox)
+                    if clipped_bbox.is_empty:
                         continue
                     try:
-                        ds = self._open_img_path_as_xarray(
-                            img_path, selected_path, clipped_bounds
+                        self._nc[selected_path].validate_code_block()
+                        ds = self._nc[selected_path].filter_ds(
+                            ds=self._loaded_data[img_path],
+                            bounds=clipped_bbox.bounds,
+                            path=img_path,
                         )
                     except Exception as e:
                         traceback.print_exc()
+                        print(
+                            "\nNote: the above was a print of the error traceback from invalid query of dataset"
+                        )
                         alerts.append(
                             dbc.Alert(
                                 f"{type(e).__name__}: {e}. (Traceback printed in terminal)",
@@ -3128,7 +3147,7 @@ class GeoExplorer:
                     if np.isnan(arr).any() and not np.all(np.isnan(arr)):
                         arr[np.isnan(arr)] = np.min(arr[~np.isnan(arr)])
 
-                    images[img_path] = (arr, clipped_bounds)
+                    images[img_path] = (arr, clipped_bbox)
 
             if images:
                 # make sure all single-band images are normalized by same extremities
@@ -3861,7 +3880,6 @@ class GeoExplorer:
                 deleted_files.add(path)
                 break
 
-        assert len(deleted_files) == 1, deleted_files
         deleted_files2 = set()
         for i, path2 in enumerate(list(self._loaded_data)):
             parts = Path(path2).parts
@@ -4000,7 +4018,7 @@ class GeoExplorer:
                 if query == self._queries.get(path):
                     continue
                 self._check_for_circular_queries(query, path)
-                self._queries[path] = query
+                self.set_query(path, query)
             except RecursionError as e:
                 out_alerts.append(
                     dbc.Alert(
@@ -4016,6 +4034,11 @@ class GeoExplorer:
             return out_alerts
         return None
 
+    def set_query(self, key: str, value: str | None) -> None:
+        self._queries[key] = value
+        if key in self._nc:
+            self._nc[key].code_block = value
+
     @time_method_call(_PROFILE_DICT)
     def _get_unique_stem(self, path) -> str:
         name = _get_stem(path)
@@ -4023,19 +4046,6 @@ class GeoExplorer:
             name = _get_stem_from_parent(path)
         return name
 
-    def _open_img_path_as_xarray(self, img_path, selected_path, clipped_bounds):
-        if is_netcdf(img_path):
-            return self._nc[selected_path].filter_ds(
-                ds=self._loaded_data[img_path],
-                bounds=clipped_bounds.bounds,
-                code_block=self._queries.get(selected_path),
-            )
-        else:
-            return rasterio_to_xarray(
-                img_path, clipped_bounds, code_block=self._queries.get(selected_path)
-            )
-
-    @property
     def _columns(self) -> dict[str, set[str]]:
         return {path: set(dtypes) for path, dtypes in self._dtypes.items()} | {
             path: {"value"} for path in self._nc
@@ -4757,74 +4767,6 @@ def get_numeric_colors(values_no_nans_unique, values_no_nans, cmap, k):
         f"{rounded_bins[-1]} - {round(max(values_no_nans), 1)}": colors_[-1],
     }
     return color_dict, bins
-
-
-def rasterio_to_numpy(
-    img_path, bbox, return_attrs: list[str] | None = None
-) -> np.ndarray | tuple[Any]:
-    with rasterio.open(img_path) as src:
-        bounds_in_img_crs = GeoSeries([bbox], crs=4326).to_crs(src.crs).total_bounds
-        window = rasterio.windows.from_bounds(
-            *bounds_in_img_crs, transform=src.transform
-        )
-        arr = src.read(window=window, boundless=False, masked=False)
-        if not return_attrs:
-            return arr
-        return (arr, *[getattr(src, attr) for attr in return_attrs])
-
-
-def rasterio_to_xarray(img_path, bbox, code_block):
-    import xarray as xr
-    from rioxarray.rioxarray import _generate_spatial_coords
-
-    arr, crs, descriptions = rasterio_to_numpy(
-        img_path, bbox, return_attrs=["crs", "descriptions"]
-    )
-    bounds_in_img_crs = GeoSeries([bbox], crs=4326).to_crs(crs).total_bounds
-
-    if not all(arr.shape):
-        return xr.DataArray(
-            arr,
-            dims=["y", "x"],
-            attrs={"crs": crs},
-        )
-
-    if len(arr.shape) == 2:
-        height, width = arr.shape
-    elif len(arr.shape) == 3 and arr.shape[0] == 1:
-        arr = arr[0]
-        height, width = arr.shape
-    elif len(arr.shape) == 3:
-        height, width = arr.shape[1:]
-    else:
-        raise ValueError(arr.shape)
-
-    transform = rasterio.transform.from_bounds(*bounds_in_img_crs, width, height)
-    coords = _generate_spatial_coords(transform, width, height)
-
-    if len(arr.shape) == 2:
-        ds = xr.DataArray(
-            arr,
-            coords=coords,
-            dims=["y", "x"],
-            attrs={"crs": crs},
-        )
-    else:
-        if len(descriptions) != arr.shape[0]:
-            descriptions = range(arr.shape[0])
-        ds = xr.Dataset(
-            {
-                desc: xr.DataArray(
-                    arr[i],
-                    coords=coords,
-                    dims=["y", "x"],
-                    attrs={"crs": crs},
-                    name=desc,
-                )
-                for i, desc in enumerate(descriptions)
-            }
-        )
-    return _run_code_block(ds, code_block)
 
 
 def as_sized_array(arr: np.ndarray) -> np.ndarray:
