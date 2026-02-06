@@ -25,6 +25,7 @@ from typing import Any
 from typing import ClassVar
 
 import dash
+import pyproj
 import dash_bootstrap_components as dbc
 import dash_leaflet as dl
 import folium
@@ -686,12 +687,15 @@ def _read_files(explorer, paths: list[str], mask=None, **kwargs) -> None:
     paths = [
         path
         for path in paths
-        if mask is None
-        or (
-            path in bbox_set
-            and (
-                pd.isna(explorer._bbox_series[path])
-                or shapely.intersects(mask, explorer._bbox_series[path])
+        if explorer._loaded_data_sizes[path] > 0
+        and (
+            mask is None
+            or (
+                path in bbox_set
+                and (
+                    pd.isna(explorer._bbox_series[path])
+                    or shapely.intersects(mask, explorer._bbox_series[path])
+                )
             )
         )
     ]
@@ -768,30 +772,55 @@ def _try_to_get_bbox_else_none(
 
 
 def _get_bbox_series_as_4326(paths, file_system):
-    # bbox_series = sg.get_bbox_series(paths, file_system=file_system)
-    # return bbox_series.to_crs(4326)
-
     func = partial(_try_to_get_bbox_else_none, file_system=file_system)
     with ThreadPoolExecutor() as executor:
         bbox_and_crs = list(executor.map(func, paths))
 
-    crss = {json.dumps(x[1]) for x in bbox_and_crs}
-    crss = {
-        crs
-        for crs in crss
-        if not any(str(crs).lower() == txt for txt in ["none", "null"])
-    }
+    bbox_and_crs = [(bbox, json.dumps(crs)) for bbox, crs in bbox_and_crs]
+    bbox_and_crs = [
+        (
+            bbox,
+            (
+                pyproj.CRS(crs).to_string()
+                if not any(crs.lower() == txt for txt in ["none", "null"])
+                else None
+            ),
+        )
+        for bbox, crs in bbox_and_crs
+    ]
+    crss = {crs for (_, crs) in bbox_and_crs}
     if not crss:
         return GeoSeries([None for _ in range(len(paths))], index=paths)
-    crs = get_common_crs(crss)
-    return GeoSeries(
-        [
-            shapely.box(*bbox[0]) if bbox[0] is not None else None
-            for bbox in bbox_and_crs
-        ],
-        index=paths,
-        crs=crs,
-    ).to_crs(4326)
+    missing = GeoSeries(
+        {
+            path: Polygon()
+            for path, (bbox, _) in zip(paths, bbox_and_crs, strict=True)
+            if bbox is None
+        }
+    )
+    paths_bbox_and_crs = {
+        path: (bbox, crs)
+        for path, (bbox, crs) in zip(paths, bbox_and_crs, strict=True)
+        if bbox is not None
+    }
+    crs_with_paths = {}
+    geoms = shapely.box(
+        [bbox[0] for (bbox, _) in paths_bbox_and_crs.values()],
+        [bbox[1] for (bbox, _) in paths_bbox_and_crs.values()],
+        [bbox[2] for (bbox, _) in paths_bbox_and_crs.values()],
+        [bbox[3] for (bbox, _) in paths_bbox_and_crs.values()],
+    )
+    for crs in crss:
+        crs_with_paths[crs] = {
+            path: geoms[i]
+            for i, (path, (bbox, this_crs)) in enumerate(paths_bbox_and_crs.items())
+            if this_crs == crs and bbox is not None
+        }
+    no_crs = GeoSeries(crs_with_paths.pop(None, {}), crs=4326)
+    return pd.concat(
+        [GeoSeries(data, crs=crs).to_crs(4326) for crs, data in crs_with_paths.items()]
+        + [missing, no_crs]
+    )
 
 
 def get_index(values: list[Any], ids: list[Any], index: Any):
@@ -2844,7 +2873,7 @@ class GeoExplorer:
                 self.color_dict = {}
             elif not column and triggered is None:
                 column = self.column
-            elif self._concatted_data is None:
+            if self._concatted_data is None:
                 return (
                     [],
                     None,
@@ -3151,6 +3180,7 @@ class GeoExplorer:
 
             if images:
                 # make sure all single-band images are normalized by same extremities
+                debug_print(images)
                 vmin = np.min([np.min(x[0]) for x in images.values()])
                 vmax = np.min([np.max(x[0]) for x in images.values()])
 

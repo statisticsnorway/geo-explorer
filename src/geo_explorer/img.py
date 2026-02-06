@@ -59,11 +59,9 @@ class AbstractImageConfig(abc.ABC):
         clipped_bbox = bbox_correct_crs.intersection(shapely.box(*ds_bounds))
         minx, miny, maxx, maxy = clipped_bbox.bounds
 
-        ds = ds.sel(
-            x=slice(minx, maxx),
-            y=slice(maxy, miny),
-        )
-
+        x = "x" if "x" in list(ds.coords) else "X"
+        y = "y" if "y" in list(ds.coords) else "Y"
+        ds = ds.sel(**{x: slice(minx, maxx), y: slice(maxy, miny)})
         return self._run_code_block(ds)
 
     @time_method_call(_PROFILE_DICT)
@@ -173,7 +171,7 @@ class NetCDFConfig(AbstractImageConfig):
             for x in set(ds.attrs).union(
                 set(ds.data_vars if isinstance(ds, Dataset) else set())
             )
-            if "projection" in x.lower() or "crs" in x.lower()
+            if "projection" in x.lower() or "crs" in x.lower() or "utm" in x.lower()
         ]
         if not attrs:
             raise ValueError(f"Could not find CRS attribute/data_var in dataset: {ds}")
@@ -181,7 +179,10 @@ class NetCDFConfig(AbstractImageConfig):
         def getattr_xarray(ds, attr):
             x = ds.attrs.get(attr, ds.get(attr))
             if isinstance(x, DataArray):
-                return pyproj.CRS(str(x.values))
+                try:
+                    return pyproj.CRS(str(x.attrs["proj4"]))
+                except Exception:
+                    return pyproj.CRS(str(x.values))
             elif x is not None:
                 return pyproj.CRS(x)
             raise ValueError(f"Could not find CRS attribute/data_var in dataset: {ds}")
