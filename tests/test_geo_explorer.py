@@ -157,6 +157,36 @@ def not_test_geo_explorer_dapla():
 
 if __name__ == "__main__":
 
+    import pandas as pd
+    import geopandas as gpd
+
+    kommuner = gpd.read_file(
+        "C:/users/ort/OneDrive - Statistisk sentralbyrå/data/Basisdata_0000_Norge_25833_Kommune_GeoJSON.geojson"
+    )
+    stat = pd.read_excel("c:/users/ort/downloads/06447_20260114-113917.xlsx")
+    stat["komm_nr"] = stat["komm"].astype(str).str[:4]
+    stat["totalt"] = stat.drop(columns=["komm", "komm_nr"]).sum(axis=1)
+    stat = (
+        kommuner[["kommunenummer", "geometry"]]
+        .rename(columns={"kommunenummer": "komm_nr"})
+        .merge(stat, on="komm_nr", how="inner")
+    )
+    GeoExplorer(
+        start_dir="C:/users/ort/OneDrive - Statistisk sentralbyrå/data",
+        favorites=[
+            "C:/users/ort/OneDrive - Statistisk sentralbyrå/data",
+            "C:/users/ort",
+        ],
+        data={
+            "stat": stat,
+        },
+        zoom=13,
+        center=(59.91740845, 10.71394454),
+        file_system=LocalFileSystem(),
+        port=None,
+        zoomDelta=0.5,
+    ).run(debug=True)
+    quit()
     if any("dapla" in key.lower() for key in os.environ):
         not_test_geo_explorer_dapla()
     else:

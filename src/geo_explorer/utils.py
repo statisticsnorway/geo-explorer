@@ -91,9 +91,11 @@ def get_xarray_resolution(ds) -> int:
     minx, miny, maxx, maxy = _get_raw_xarray_bounds(ds)
     diffx = maxx - minx
     diffy = maxy - miny
+    x = "x" if "x" in list(ds.coords) else "X"
+    y = "y" if "y" in list(ds.coords) else "Y"
     try:
-        resx = diffx / (ds.sizes["x"] - 1)
-        resy = diffy / (ds.sizes["y"] - 1)
+        resx = diffx / (ds.sizes[x] - 1)
+        resy = diffy / (ds.sizes[y] - 1)
     except ZeroDivisionError:
         raise ValueError(
             f"Cannot calculate resolution for Dataset with {diffx=}, {diffy=}, {ds.sizes['x']=}, {ds.sizes['y']=}"
@@ -117,11 +119,13 @@ def get_xarray_bounds(ds) -> tuple[float, float, float, float]:
 
 
 def _get_raw_xarray_bounds(ds) -> tuple[float, float, float, float]:
+    x = "x" if "x" in list(ds.coords) else "X"
+    y = "y" if "y" in list(ds.coords) else "Y"
     return (
-        float(ds["x"].min().values),
-        float(ds["y"].min().values),
-        float(ds["x"].max().values),
-        float(ds["y"].max().values),
+        float(ds[x].min().values),
+        float(ds[y].min().values),
+        float(ds[x].max().values),
+        float(ds[y].max().values),
     )
 
 
