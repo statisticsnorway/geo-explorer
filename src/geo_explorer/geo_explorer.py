@@ -1262,6 +1262,22 @@ class GeoExplorer:
             name="Norge i bilder",
             checked=False,
         ),
+        "Google maps": dl.BaseLayer(
+            dl.TileLayer(
+                url="https://mt0.google.com/vt/lyrs=m&hl=en&x={x}&y={y}&z={z}",
+                attribution="© Google",
+            ),
+            name="Google maps",
+            checked=False,
+        ),
+        "Google hybrid": dl.BaseLayer(
+            dl.TileLayer(
+                url="https://mt0.google.com/vt/lyrs=y&hl=en&x={x}&y={y}&z={z}",
+                attribution="© Google",
+            ),
+            name="Google hybrid",
+            checked=False,
+        ),
     }
     _map_children: ClassVar[list[Component]] = [
         dl.ScaleControl(position="bottomleft"),
