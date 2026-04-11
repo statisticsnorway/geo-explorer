@@ -771,33 +771,30 @@ def _try_to_get_bbox_else_none(
             return None, None
 
 
+@time_function_call(_PROFILE_DICT)
 def _get_bbox_series_as_4326(paths, file_system):
     func = partial(_try_to_get_bbox_else_none, file_system=file_system)
     with ThreadPoolExecutor() as executor:
-        bbox_and_crs = list(executor.map(func, paths))
+        bbox_and_crs = executor.map(func, paths)
 
-    bbox_and_crs = [(bbox, json.dumps(crs)) for bbox, crs in bbox_and_crs]
-    bbox_and_crs = [
-        (
-            bbox,
-            (
-                pyproj.CRS(crs).to_string()
-                if not any(crs.lower() == txt for txt in ["none", "null"])
-                else None
-            ),
-        )
-        for bbox, crs in bbox_and_crs
-    ]
+    def try_to_get_crs(crs):
+        try:
+            return pyproj.CRS(crs).to_string()
+        except Exception:
+            return None
+
+    bbox_and_crs = [(bbox, try_to_get_crs(crs)) for bbox, crs in bbox_and_crs]
     crss = {crs for (_, crs) in bbox_and_crs}
     if not crss:
         return GeoSeries([None for _ in range(len(paths))], index=paths)
     missing = GeoSeries(
         {
-            path: Polygon()
+            path: None
             for path, (bbox, _) in zip(paths, bbox_and_crs, strict=True)
             if bbox is None
         }
     )
+    missing[:] = Polygon()
     paths_bbox_and_crs = {
         path: (bbox, crs)
         for path, (bbox, crs) in zip(paths, bbox_and_crs, strict=True)
@@ -1278,6 +1275,14 @@ class GeoExplorer:
             name="Google hybrid",
             checked=False,
         ),
+        "Google satellite": dl.BaseLayer(
+            dl.TileLayer(
+                url="https://mt0.google.com/vt/lyrs=s&hl=en&x={x}&y={y}&z={z}",
+                attribution="© Google",
+            ),
+            name="Google satellite",
+            checked=False,
+        ),
     }
     _map_children: ClassVar[list[Component]] = [
         dl.ScaleControl(position="bottomleft"),
@@ -1292,6 +1297,9 @@ class GeoExplorer:
     ]
 
     read_func: ClassVar[Callable] = read_file
+
+    # number of paths to check for bbox in metadata per round
+    _max_bboxes_to_read: ClassVar[int] = 2000
 
     def __init__(
         self,
@@ -2059,6 +2067,11 @@ class GeoExplorer:
             checked_clicks,
             checked_ids,
         ):
+            if set(self._loaded_data_sizes).difference(set(self._bbox_series.index)):
+                self._append_to_bbox_series(
+                    [path for path, show in self.selected_files.items() if show],
+                    recurse=False,
+                )
             if not len(self._bbox_series):
                 return dash.no_update, dash.no_update, dash.no_update
             t = perf_counter()
@@ -3403,7 +3416,12 @@ class GeoExplorer:
             try:
                 path = list(self._loaded_data)[i]
             except IndexError as e:
-                raise type(e)(f"{e}: {i=}, {self._loaded_data.keys()=}")
+                try:
+                    i -= 999
+                    path = self._run_or_reset(lambda x: list(x._loaded_data)[i])
+                except IndexError as e2:
+                    debug_print(locals())
+                    raise type(e)(f"{e}: {i=}, {self._loaded_data.keys()=}") from e2
             bounds = self._nested_bounds_to_bounds(bounds)
             feature, geometry = self._get_selected_feature(
                 unique_id, path, bounds=bounds
@@ -3939,27 +3957,10 @@ class GeoExplorer:
 
         debug_print(f"{deleted_files2=}")
         self._bbox_series = self._bbox_series[lambda x: ~x.index.isin(deleted_files2)]
-
         self._reset()
-        # self._max_unique_id_int = -1
-        # for path, df in self._loaded_data.items():
-        #     self._max_unique_id_int += 1
-        #     id_prev = df.select(pl.col("_unique_id").first()).collect().item()
-        #     self._loaded_data[path] = df.with_columns(
-        #         _unique_id=_get_unique_id(self._max_unique_id_int)
-        #     )
-        #     for idx in list(self._selected_features):
-        #         if idx[0] != id_prev[0]:
-        #             continue
-
-        #         # rounding values to avoid floating point precicion problems
-        #         new_idx = f"{self._max_unique_id_int}.{idx[2:]}"
-        #         feature = self._selected_features.pop(idx)
-        #         feature["id"] = new_idx
-        #         self._selected_features[new_idx] = feature
-
         return None, None
 
+    @run_or_reset
     @time_method_call(_PROFILE_DICT)
     def _nested_bounds_to_bounds(
         self,
@@ -4055,6 +4056,7 @@ class GeoExplorer:
                 f"Recursion error: Circular joins on {path} and {path}",
             )
 
+    @run_or_reset
     @time_method_call(_PROFILE_DICT)
     def _update_query(self, queries: list[str | None], ids):
         out_alerts = []
@@ -4616,15 +4618,21 @@ class GeoExplorer:
 
         self.wms[wms_name] = constructor(**(current_kwargs | kwargs))
 
+    @time_method_call(_PROFILE_DICT)
     def _append_to_bbox_series(self, paths, recurse: bool = True) -> None:
         try:
             child_paths = self._get_child_paths(paths)
+            # remove existing
+            bboxes = set(self._bbox_series.index)
+            child_paths = {
+                path: size for path, size in child_paths.items() if path not in bboxes
+            }
             self._loaded_data_sizes |= child_paths
             paths_with_meta, paths_without_meta = (
                 self._get_paths_with_and_without_metadata(list(child_paths))
             )
             more_bounds = _get_bbox_series_as_4326(
-                paths_with_meta,
+                paths_with_meta[: self._max_bboxes_to_read],
                 file_system=self.file_system,
             )
         except Exception as e:
@@ -4644,6 +4652,7 @@ class GeoExplorer:
             ]
         )[lambda x: ~x.index.duplicated()]
 
+    @time_method_call(_PROFILE_DICT)
     def _get_child_paths(self, paths):
         child_paths = {}
         for path in paths:
@@ -4689,6 +4698,7 @@ class GeoExplorer:
             return out_paths
         return {_standardize_path(path): self.file_system.info(path)["size"]}
 
+    @time_method_call(_PROFILE_DICT)
     def _get_paths_with_and_without_metadata(self, paths):
         filt = [
             any(path.endswith(f".{txt}") for txt in self._file_formats_with_metadata)
@@ -4761,6 +4771,13 @@ class GeoExplorer:
         } | self._kwargs
         return self._get_self_as_string(data)
 
+    def _run_or_reset(self, func: Callable):
+        try:
+            return func(self)
+        except Exception:
+            self._reset()
+        return func(self)
+
     def _reset(self):
         self._max_unique_id_int = -1
         for path, df in self._loaded_data.items():
@@ -4772,7 +4789,7 @@ class GeoExplorer:
             )
 
             for idx, feature in dict(self._selected_features).items():
-                if feature["__file_path"] != path:
+                if feature.get("__file_path") != path:
                     continue
 
                 new_idx = f"{self._max_unique_id_int}.{idx.split(".")[-1]}"
