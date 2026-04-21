@@ -4512,7 +4512,7 @@ class GeoExplorer:
                 wms_layers.append(
                     dl.Overlay(
                         dl.WMSTileLayer(
-                            url=wms_obj.url,
+                            url=wms_obj.get_url,
                             layers=tile,
                             format="image/png",
                             transparent=True,
