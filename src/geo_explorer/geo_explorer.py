@@ -723,11 +723,10 @@ def _read_files(explorer, paths: list[str], mask=None, **kwargs) -> None:
                 ).to_crs(4326)
                 explorer._bbox_series = pd.concat(
                     [
-                        GeoSeries({path: next(iter(img_bbox))}),
+                        GeoSeries({path: next(iter(img_bbox))}, crs=4326),
                         explorer._bbox_series[lambda x: x.index != path],
                     ]
                 )
-
                 continue
             explorer._loaded_data[path] = df.with_columns(
                 _unique_id=_get_unique_id(explorer._max_unique_id_int)
@@ -786,13 +785,14 @@ def _get_bbox_series_as_4326(paths, file_system):
     bbox_and_crs = [(bbox, try_to_get_crs(crs)) for bbox, crs in bbox_and_crs]
     crss = {crs for (_, crs) in bbox_and_crs}
     if not crss:
-        return GeoSeries([None for _ in range(len(paths))], index=paths)
+        return GeoSeries([None for _ in range(len(paths))], crs=4326, index=paths)
     missing = GeoSeries(
         {
             path: None
             for path, (bbox, _) in zip(paths, bbox_and_crs, strict=True)
             if bbox is None
-        }
+        },
+        crs=4326,
     )
     missing[:] = Polygon()
     paths_bbox_and_crs = {
@@ -814,9 +814,15 @@ def _get_bbox_series_as_4326(paths, file_system):
             if this_crs == crs and bbox is not None
         }
     no_crs = GeoSeries(crs_with_paths.pop(None, {}), crs=4326)
-    return pd.concat(
-        [GeoSeries(data, crs=crs).to_crs(4326) for crs, data in crs_with_paths.items()]
-        + [missing, no_crs]
+    return GeoSeries(
+        pd.concat(
+            [
+                GeoSeries(data, crs=crs).to_crs(4326)
+                for crs, data in crs_with_paths.items()
+            ]
+            + [missing, no_crs]
+        ),
+        crs=4326,
     )
 
 
@@ -1358,7 +1364,7 @@ class GeoExplorer:
         self.hard_click = hard_click
         self.max_rows = max_rows
         self.opacity = opacity
-        self._bbox_series = GeoSeries()
+        self._bbox_series = GeoSeries(crs=4326)
         self.selected_files: dict[str, int] = {}
         self._loaded_data: dict[str, pl.LazyFrame] = {}
         self._images: dict[str, Polygon] = {}
@@ -1808,7 +1814,7 @@ class GeoExplorer:
                 self.selected_files[key] = True
 
         self.selected_files = dict(reversed(self.selected_files.items()))
-        self._bbox_series = GeoSeries(bbox_series_dict)
+        self._bbox_series = GeoSeries(bbox_series_dict, crs=4326)
 
         # storing bounds here before file paths are loaded. To avoid setting center as the entire map bounds if large data
         if len(self._bbox_series):
@@ -2129,7 +2135,8 @@ class GeoExplorer:
                                     path: shapely.box(
                                         *self._nc[selected_path].get_bounds(None, path)
                                     )
-                                }
+                                },
+                                crs=4326,
                             ),
                             self._bbox_series[lambda x: x.index != path],
                         ]
@@ -4641,16 +4648,19 @@ class GeoExplorer:
             # reload file system to avoid cached reading of files that don't exist any more
             self.file_system = self.file_system.__class__()
             return self._append_to_bbox_series(paths, recurse=False)
-        self._bbox_series = pd.concat(
-            [
-                self._bbox_series,
-                more_bounds,
-                pd.Series(
-                    [None for _ in range(len(paths_without_meta))],
-                    index=paths_without_meta,
-                ),
-            ]
-        )[lambda x: ~x.index.duplicated()]
+        self._bbox_series = GeoSeries(
+            pd.concat(
+                [
+                    self._bbox_series,
+                    more_bounds,
+                    pd.Series(
+                        [None for _ in range(len(paths_without_meta))],
+                        index=paths_without_meta,
+                    ),
+                ]
+            )[lambda x: ~x.index.duplicated()],
+            crs=4326,
+        )
 
     @time_method_call(_PROFILE_DICT)
     def _get_child_paths(self, paths):
@@ -4684,10 +4694,14 @@ class GeoExplorer:
             for i in range(n):
                 new_path = path + f"{FILE_SPLITTER_TXT}{rows_to_read}-{i}"
                 out_paths[new_path] = size / n
-                more_bounds.append(GeoSeries({new_path: self._bbox_series.loc[path]}))
+                more_bounds.append(
+                    GeoSeries({new_path: self._bbox_series.loc[path]}, crs=4326)
+                )
             new_path = path + f"{FILE_SPLITTER_TXT}{rows_to_read}-{n}"
             out_paths[new_path] = size / n
-            more_bounds.append(GeoSeries({new_path: self._bbox_series.loc[path]}))
+            more_bounds.append(
+                GeoSeries({new_path: self._bbox_series.loc[path]}, crs=4326)
+            )
 
         self._bbox_series = pd.concat([self._bbox_series] + more_bounds)
 
