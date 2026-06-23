@@ -14,6 +14,7 @@ from dash import dcc
 from dash import html
 from dash.development.base_component import Component
 from fsspec.spec import AbstractFileSystem
+from upath import UPath
 
 from .utils import _clicked_button_style
 from .utils import _standardize_path
@@ -279,7 +280,7 @@ class FileBrowser:
             if triggered == "current-path":
                 return current_path
             if triggered == "up-button":
-                return str(Path(current_path).parent)
+                return str(UPath(current_path).parent)
             elif not any(load_parquet) or not triggered:
                 return dash.no_update
             selected_path = triggered["index"]
@@ -396,13 +397,16 @@ class FileBrowser:
 
             @time_function_call(_PROFILE_DICT)
             def _ls(path):
-                return file_system.ls(path, detail=True)
+                paths = file_system.ls(path, detail=True)
+                if isinstance(paths, list):
+                    paths = {x["name"]: x for x in paths}
+                return _maybe_add_protocol(path, paths)
 
         else:
 
             @time_function_call(_PROFILE_DICT)
             def _ls(path):
-                path = str(Path(path) / "**")
+                path = str(UPath(path) / "**")
                 return _try_glob(path, file_system)
 
         try:
@@ -472,7 +476,7 @@ class FileBrowser:
             if x["type"] == "directory"
             and any(
                 str(x).endswith(".parquet")
-                for x in (x["name"], *Path(x["name"]).parents)
+                for x in (x["name"], *UPath(x["name"]).parents)
             )
         }
 
@@ -480,7 +484,7 @@ class FileBrowser:
         def get_summed_size_and_latest_timestamp_in_subdirs(
             x,
         ) -> tuple[float, datetime.datetime]:
-            file_info = _try_glob(str(Path(x["name"]) / "**/*.parquet"), file_system)
+            file_info = _try_glob(str(UPath(x["name"]) / "**/*.parquet"), file_system)
 
             if isinstance(file_info, dict):
                 file_info = list(file_info.values())
@@ -516,7 +520,9 @@ def _get_file_list_row(
     is_loadable = not isdir or any(
         path.endswith(file_format)
         or all(
-            x.endswith(file_format) or _standardize_path(x) == path
+            x.endswith(file_format)
+            or _standardize_path(x) == path
+            or x.endswith(".json")
             for x in file_system.ls(path)
         )
         for file_format in file_formats
@@ -581,6 +587,18 @@ def _get_file_list_row(
 @time_function_call(_PROFILE_DICT)
 def _try_glob(path, file_system):
     try:
-        return file_system.glob(path, detail=True, recursive=True)
+        paths = file_system.glob(path, detail=True, recursive=True)
     except Exception:
-        return file_system.glob(path, detail=True)
+        paths = file_system.glob(path, detail=True)
+    return _maybe_add_protocol(path, paths)
+
+
+def _maybe_add_protocol(path, paths):
+    if not (protocol := UPath(path).protocol):
+        return paths
+
+    return {
+        f"{protocol}://" + path.replace(f"{protocol}://", ""): x
+        | {"name": f"{protocol}://" + path.replace(f"{protocol}://", "")}
+        for path, x in paths.items()
+    }
