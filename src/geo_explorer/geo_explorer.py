@@ -1924,7 +1924,7 @@ class GeoExplorer:
         """Run the app."""
         if is_jupyter():
             kwargs["jupyter_server_url"] = str(
-                UPathos.environ["JUPYTERHUB_HTTP_REFERER"])
+                UPath(os.environ["JUPYTERHUB_HTTP_REFERER"])
                 / os.environ["JUPYTERHUB_SERVICE_PREFIX"].strip("/")
             )
             display_url = f"{kwargs['jupyter_server_url']}/proxy/{self.port}/"
@@ -4705,7 +4705,7 @@ class GeoExplorer:
         child_paths = {
             _standardize_path(child_path): x["size"]
             for child_path, x in self.file_system.glob(
-                str(UPathpath) / child_pattern), detail=True
+                str(UPath(path) / child_pattern), detail=True
             ).items()
         }
         if protocol := UPath(path).protocol:
