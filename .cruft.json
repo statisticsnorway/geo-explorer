@@ -1,7 +1,7 @@
 {
   "template": "https://github.com/statisticsnorway/ssb-project-template-stat",
-  "commit": "68d17c290773001faa81d2955521dd8b8164b64f",
-  "checkout": "1.1.0",
+  "commit": "f4e65906f8ee96999928837c117bc62a604c753c",
+  "checkout": null,
   "context": {
     "cookiecutter": {
       "full_name": "ort",
