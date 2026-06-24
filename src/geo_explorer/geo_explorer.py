@@ -13,6 +13,7 @@ import sys
 import time
 import traceback
 from collections.abc import Callable
+from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from functools import wraps
@@ -67,6 +68,7 @@ from shapely import Geometry
 from shapely.errors import GEOSException
 from shapely.geometry import Point
 from shapely.geometry import Polygon
+from upath import UPath
 
 try:
     from xarray import DataArray
@@ -174,9 +176,13 @@ def _get_sql_query_with_col(
 
 @time_function_call(_PROFILE_DICT)
 def read_file(
-    i: int, path: str, file_system: AbstractFileSystem, **kwargs
+    i: int,
+    path: str,
+    file_system: AbstractFileSystem,
+    mask: Geometry | None = None,
+    **kwargs,
 ) -> tuple[pl.LazyFrame, dict[str, pl.DataType]]:
-
+    # TODO: remove default value for mask and instead read with mask directly for partitioned files?
     if is_raster_file(path):
         import xarray as xr
 
@@ -223,7 +229,7 @@ def read_file(
                 ]
             ):
                 return None, None
-            df = sg.read_geopandas(path, file_system=file_system, **kwargs)
+            df = sg.read_geopandas(path, file_system=file_system, mask=mask, **kwargs)
             df, dtypes = _geopandas_to_polars(df, path)
             return df.lazy(), dtypes
     rows = path.split(FILE_SPLITTER_TXT)[-1]
@@ -459,14 +465,16 @@ def _fix_colors(df, column, bins, is_numeric, color_dict, nan_color, nan_label):
         return df
     if not is_numeric:
         return df.with_columns(
-            _color=pl.col(column).replace(
+            _color=pl.col(column)
+            .cast(pl.Utf8)
+            .replace(
                 {
                     value: color
                     for value, color in color_dict.items()
                     if value != nan_label
                 },
                 default=pl.lit(nan_color),
-                return_dtype=pl.String(),
+                return_dtype=pl.Utf8,
             )
         )
     elif bins is None:
@@ -619,7 +627,9 @@ def _prepare_df(df: pl.LazyFrame, path, metadata, dtypes) -> pl.LazyFrame:
 
 
 @time_function_call(_PROFILE_DICT)
-def _geopandas_to_polars(df: GeoDataFrame, path) -> pl.DataFrame:
+def _geopandas_to_polars(
+    df: GeoDataFrame, path
+) -> tuple[pl.DataFrame, dict[str, pl.DataType]]:
     geometries, areas, bounds = _get_area_and_bounds(geometries=df.geometry.values)
     df = df.drop(columns=df.geometry.name)
     df = pl.from_pandas(df)
@@ -630,7 +640,9 @@ def _geopandas_to_polars(df: GeoDataFrame, path) -> pl.DataFrame:
 
 
 @time_function_call(_PROFILE_DICT)
-def _pandas_to_polars(df: pd.DataFrame, path) -> pl.DataFrame:
+def _pandas_to_polars(
+    df: pd.DataFrame, path
+) -> tuple[pl.DataFrame, dict[str, pl.DataType]]:
     df = pl.from_pandas(df)
     dtypes = dict(zip(df.columns, df.dtypes, strict=False))
     df = df.with_columns(
@@ -762,27 +774,30 @@ def _try_to_get_bbox_else_none(
     path, file_system
 ) -> tuple[tuple[float] | None, str | None]:
     try:
-        return _get_bounds_parquet(path, file_system, pandas_fallback=True)
+        with UPath(path).open("rb") as file:
+            bbox, crs = _get_bounds_parquet_from_open_file(file, file_system)
     except Exception:
         try:
-            return _get_bounds_parquet_from_open_file(path, file_system)
+            bbox, crs = _get_bounds_parquet_from_open_file(path, file_system)
         except Exception:
             return None, None
+    return bbox, _try_to_get_crs(crs)
+
+
+def _try_to_get_crs(crs):
+    try:
+        return pyproj.CRS(crs).to_epsg()
+    except Exception:
+        return None
 
 
 @time_function_call(_PROFILE_DICT)
 def _get_bbox_series_as_4326(paths, file_system):
     func = partial(_try_to_get_bbox_else_none, file_system=file_system)
     with ThreadPoolExecutor() as executor:
-        bbox_and_crs = executor.map(func, paths)
+        bbox_and_crs = list(executor.map(func, paths))
 
-    def try_to_get_crs(crs):
-        try:
-            return pyproj.CRS(crs).to_string()
-        except Exception:
-            return None
-
-    bbox_and_crs = [(bbox, try_to_get_crs(crs)) for bbox, crs in bbox_and_crs]
+    # bbox_and_crs = [(bbox, _try_to_get_crs(crs)) for bbox, crs in bbox_and_crs]
     crss = {crs for (_, crs) in bbox_and_crs}
     if not crss:
         return GeoSeries([None for _ in range(len(paths))], crs=4326, index=paths)
@@ -1309,7 +1324,7 @@ class GeoExplorer:
 
     def __init__(
         self,
-        start_dir: str,
+        start_dir: str | None,
         *,
         favorites: list[str] | None = None,
         port: int = 8050,
@@ -1334,10 +1349,24 @@ class GeoExplorer:
         nan_label: str = "Missing",
         max_read_size_per_callback: int = 1e9,
         sum_partition_sizes: bool = True,
+        build_app: bool = True,
         **kwargs,
     ) -> None:
         """Initialiser."""
-        self.start_dir = start_dir
+        if start_dir is not None and build_app:
+            self.start_dir = start_dir
+            self.file_system = _get_file_system(self.start_dir, file_system)
+            self._file_browser = FileBrowser(
+                start_dir,
+                file_system=file_system,
+                favorites=favorites,
+                sum_partition_sizes=sum_partition_sizes,
+            )
+        else:
+            self.start_dir = None
+            self.file_system = None
+            self._file_browser = None
+
         self.port = port
         self.maxZoom = kwargs.get("maxZoom", 40)
         self.minZoom = kwargs.get("minZoom", 4)
@@ -1357,7 +1386,6 @@ class GeoExplorer:
         self.wms_layers_checked = {
             wms_name: wms_layers_checked.get(wms_name, []) for wms_name in self.wms
         }
-        self.file_system = _get_file_system(self.start_dir, file_system)
         self.nan_color = nan_color
         self.nan_label = nan_label
         self.splitted = splitted
@@ -1373,12 +1401,7 @@ class GeoExplorer:
         self._loaded_data_sizes: dict[str, int] = {}
         self._concatted_data: pl.DataFrame | None = None
         self._selected_features = {}
-        self._file_browser = FileBrowser(
-            start_dir,
-            file_system=file_system,
-            favorites=favorites,
-            sum_partition_sizes=sum_partition_sizes,
-        )
+
         self._current_table_view = None
         self.max_read_size_per_callback = max_read_size_per_callback
         self._force_categorical = False
@@ -1393,18 +1416,18 @@ class GeoExplorer:
             )
         else:
             requests_pathname_prefix = f"/proxy/{self.port}/" if self.port else None
+        if build_app:
+            self.app = Dash(
+                __name__,
+                suppress_callback_exceptions=DEBUG is False,
+                external_stylesheets=[dbc.themes.SOLAR],
+                requests_pathname_prefix=requests_pathname_prefix,
+                serve_locally=True,
+                assets_folder="assets",
+            )
 
-        self.app = Dash(
-            __name__,
-            suppress_callback_exceptions=DEBUG is False,
-            external_stylesheets=[dbc.themes.SOLAR],
-            requests_pathname_prefix=requests_pathname_prefix,
-            serve_locally=True,
-            assets_folder="assets",
-        )
-
-        if is_jupyter():
-            self.app.logger.setLevel(logging.ERROR)
+            if is_jupyter():
+                self.app.logger.setLevel(logging.ERROR)
 
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(logging.INFO)
@@ -1443,7 +1466,6 @@ class GeoExplorer:
                         [
                             dbc.Col(
                                 self._map_constructor(
-                                    html.Div(id="lc"),
                                     **(
                                         {
                                             "maxZoom": self.maxZoom,
@@ -1730,7 +1752,11 @@ class GeoExplorer:
                         div_id="feature-table-container",
                         clear_id="clear-table",
                     ),
-                    *self._file_browser.get_file_browser_components(),
+                    *(
+                        self._file_browser.get_file_browser_components()
+                        if self._file_browser
+                        else []
+                    ),
                     dcc.Store(id="is_splitted", data=False),
                     dcc.Store(id="update-table", data=None),
                     dcc.Input(
@@ -1825,8 +1851,9 @@ class GeoExplorer:
         if not self.selected_files:
             self.center = center if center is not None else DEFAULT_CENTER
             self.zoom = zoom or DEFAULT_ZOOM
-            self.app.layout = get_layout
-            self._register_callbacks()
+            if build_app:
+                self.app.layout = get_layout
+                self._register_callbacks()
             return
 
         self._append_to_bbox_series(
@@ -1836,7 +1863,7 @@ class GeoExplorer:
         temp_center = center if center is not None else DEFAULT_CENTER
         _read_files(
             self,
-            [x for x in self.selected_files if x not in self._loaded_data],
+            [x for x in self._bbox_series.index if x not in self._loaded_data],
             mask=Point(reversed(temp_center)),
         )
 
@@ -1882,6 +1909,9 @@ class GeoExplorer:
         else:
             self.zoom = DEFAULT_ZOOM
 
+        if not build_app:
+            return
+
         self.app.layout = get_layout
 
         # for unique_id in selected_features if selected_features is not None else []:
@@ -1898,7 +1928,7 @@ class GeoExplorer:
         """Run the app."""
         if is_jupyter():
             kwargs["jupyter_server_url"] = str(
-                Path(os.environ["JUPYTERHUB_HTTP_REFERER"])
+                UPath(os.environ["JUPYTERHUB_HTTP_REFERER"])
                 / os.environ["JUPYTERHUB_SERVICE_PREFIX"].strip("/")
             )
             display_url = f"{kwargs['jupyter_server_url']}/proxy/{self.port}/"
@@ -4389,7 +4419,7 @@ class GeoExplorer:
         if isinstance(called, GeoDataFrame):
             called, _ = _geopandas_to_polars(called, path)
             called = called.with_columns(
-                _unique_id=_get_unique_id(list(self._loaded_data).index(path) + 999)
+                _unique_id=_get_unique_id(list(self._loaded_data).index(path))
             ).lazy()
             return called
         if isinstance(called, GeoSeries):
@@ -4401,7 +4431,7 @@ class GeoExplorer:
                 bounds,
                 path,
             ).with_columns(
-                _unique_id=_get_unique_id(list(self._loaded_data).index(path) + 999)
+                _unique_id=_get_unique_id(list(self._loaded_data).index(path))
             )
             return called
         if isinstance(called, pd.DataFrame):
@@ -4487,13 +4517,14 @@ class GeoExplorer:
 
     @time_method_call(_PROFILE_DICT)
     def _map_constructor(
-        self, data: dl.LayersControl, preferCanvas=True, zoomAnimation=False, **kwargs
+        self, preferCanvas=True, zoomAnimation=False, **kwargs
     ) -> dl.Map:
+        data = [html.Div(id="lc")]
         return dl.Map(
             center=self.center,
             bounds=self._bounds,
             zoom=self.zoom,
-            children=self._map_children + [data],
+            children=self._map_children + data,
             preferCanvas=preferCanvas,
             zoomAnimation=zoomAnimation,
             id="map",
@@ -4678,9 +4709,14 @@ class GeoExplorer:
         child_paths = {
             _standardize_path(child_path): x["size"]
             for child_path, x in self.file_system.glob(
-                str(Path(path) / child_pattern), detail=True
+                str(UPath(path) / child_pattern), detail=True
             ).items()
         }
+        if protocol := UPath(path).protocol:
+            child_paths = {
+                f"{protocol}://" + path.replace(f"{protocol}://", ""): size
+                for path, size in child_paths.items()
+            }
         out_paths = {}
         more_bounds = []
         for child_path, size in child_paths.items():
@@ -4759,7 +4795,7 @@ class GeoExplorer:
         else:
             data.pop("selected_files", [])
 
-        if self._file_browser.favorites:
+        if self._file_browser is not None and self._file_browser.favorites:
             data["favorites"] = self._file_browser.favorites
 
         data["file_system"] = data["file_system"].__class__.__name__ + "()"
