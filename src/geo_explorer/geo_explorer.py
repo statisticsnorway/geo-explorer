@@ -4710,8 +4710,8 @@ class GeoExplorer:
         }
         if protocol := UPath(path).protocol:
             child_paths = {
-                protocol + path.replace(protocol, ""): size
-                for path, size in child_path.items()
+                f"{protocol}://" + path.replace(f"{protocol}://", ""): size
+                for path, size in child_paths.items()
             }
         out_paths = {}
         more_bounds = []
