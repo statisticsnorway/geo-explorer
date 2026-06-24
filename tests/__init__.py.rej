@@ -1,0 +1,5 @@
+diff a/tests/__init__.py b/tests/__init__.py	(rejected hunks)
+@@ -1 +1 @@
+-# This file is required by pytest
+\ No newline at end of file
++# This file is required by pytest

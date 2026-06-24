@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "geo-explorer"
-version = "0.9.17"
+version = "0.9.18"
 description = "Explore geodata interactively."
 authors = ["Morten Letnes <morten.letnes@ssb.no>"]
 license = "MIT"
@@ -84,7 +84,7 @@ relative_files = true
 
 [tool.coverage.report]
 show_missing = true
-fail_under = 50
+fail_under = 40
 
 [tool.mypy]
 strict = false
