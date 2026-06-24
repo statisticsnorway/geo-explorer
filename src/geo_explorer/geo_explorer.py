@@ -181,7 +181,7 @@ def read_file(
     mask: Geometry | None = None,
     **kwargs,
 ) -> tuple[pl.LazyFrame, dict[str, pl.DataType]]:
-    # TODO remove default value for mask?
+    # TODO: remove default value for mask and instead read with mask directly for partitioned files?
     if is_raster_file(path):
         import xarray as xr
 
