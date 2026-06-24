@@ -13,6 +13,7 @@ import sys
 import time
 import traceback
 from collections.abc import Callable
+from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from functools import wraps
@@ -773,27 +774,30 @@ def _try_to_get_bbox_else_none(
     path, file_system
 ) -> tuple[tuple[float] | None, str | None]:
     try:
-        return _get_bounds_parquet(path, file_system, pandas_fallback=True)
+        with UPath(path).open("rb") as file:
+            bbox, crs = _get_bounds_parquet_from_open_file(file, file_system)
     except Exception:
         try:
-            return _get_bounds_parquet_from_open_file(path, file_system)
+            bbox, crs = _get_bounds_parquet_from_open_file(path, file_system)
         except Exception:
             return None, None
+    return bbox, _try_to_get_crs(crs)
+
+
+def _try_to_get_crs(crs):
+    try:
+        return pyproj.CRS(crs).to_epsg()
+    except Exception:
+        return None
 
 
 @time_function_call(_PROFILE_DICT)
 def _get_bbox_series_as_4326(paths, file_system):
     func = partial(_try_to_get_bbox_else_none, file_system=file_system)
     with ThreadPoolExecutor() as executor:
-        bbox_and_crs = executor.map(func, paths)
+        bbox_and_crs = list(executor.map(func, paths))
 
-    def try_to_get_crs(crs):
-        try:
-            return pyproj.CRS(crs).to_string()
-        except Exception:
-            return None
-
-    bbox_and_crs = [(bbox, try_to_get_crs(crs)) for bbox, crs in bbox_and_crs]
+    # bbox_and_crs = [(bbox, _try_to_get_crs(crs)) for bbox, crs in bbox_and_crs]
     crss = {crs for (_, crs) in bbox_and_crs}
     if not crss:
         return GeoSeries([None for _ in range(len(paths))], crs=4326, index=paths)
