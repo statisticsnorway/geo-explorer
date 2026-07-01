@@ -393,24 +393,9 @@ class FileBrowser:
                     for x in containing
                 )
 
-        if (recursive or 0) % 2 == 0:
-
-            @time_function_call(_PROFILE_DICT)
-            def _ls(path):
-                paths = file_system.ls(path, detail=True)
-                if isinstance(paths, list):
-                    paths = {x["name"]: x for x in paths}
-                return _maybe_add_protocol(path, paths)
-
-        else:
-
-            @time_function_call(_PROFILE_DICT)
-            def _ls(path):
-                path = str(UPath(path) / "**")
-                return _try_glob(path, file_system)
-
+        recursive = (recursive or 0) % 2 == 1
         try:
-            paths = _ls(path)
+            paths = _ls(path, file_system=file_system, recursive=recursive)
         except Exception as e:
             try:
                 paths = _try_glob(path, file_system)
@@ -523,7 +508,7 @@ def _get_file_list_row(
             x.endswith(file_format)
             or _standardize_path(x) == path
             or x.endswith(".json")
-            for x in file_system.ls(path)
+            for x in _maybe_add_protocol(path, file_system.ls(path))
         )
         for file_format in file_formats
     )
@@ -585,6 +570,18 @@ def _get_file_list_row(
 
 
 @time_function_call(_PROFILE_DICT)
+def _ls(path, file_system, recursive: bool):
+    if recursive:
+        path = str(UPath(path) / "**")
+        return _try_glob(path, file_system)
+    else:
+        paths = file_system.ls(path, detail=True)
+        if isinstance(paths, list):
+            paths = {x["name"]: x for x in paths}
+        return _maybe_add_protocol(path, paths)
+
+
+@time_function_call(_PROFILE_DICT)
 def _try_glob(path, file_system):
     try:
         paths = file_system.glob(path, detail=True, recursive=True)
@@ -597,6 +594,8 @@ def _maybe_add_protocol(path, paths):
     if not (protocol := UPath(path).protocol):
         return paths
 
+    if isinstance(paths, list):
+        return [f"{protocol}://" + path.replace(f"{protocol}://", "") for path in paths]
     return {
         f"{protocol}://" + path.replace(f"{protocol}://", ""): x
         | {"name": f"{protocol}://" + path.replace(f"{protocol}://", "")}

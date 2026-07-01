@@ -83,6 +83,7 @@ except ImportError:
 
 
 from .file_browser import FileBrowser
+from .file_browser import _try_glob
 from .fs import LocalFileSystem
 from .img import GeoTIFFConfig
 from .img import AbstractImageConfig
@@ -4708,8 +4709,8 @@ class GeoExplorer:
         child_pattern = f"**/*{suffix}" if suffix else "**/*.*"
         child_paths = {
             _standardize_path(child_path): x["size"]
-            for child_path, x in self.file_system.glob(
-                str(UPath(path) / child_pattern), detail=True
+            for child_path, x in _try_glob(
+                str(UPath(path) / child_pattern), self.file_system
             ).items()
         }
         if protocol := UPath(path).protocol:
