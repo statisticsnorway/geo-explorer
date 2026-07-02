@@ -230,6 +230,8 @@ def read_file(
                 ]
             ):
                 return None, None
+            if not get_num_rows(path):
+                return None, None
             df = sg.read_geopandas(path, file_system=file_system, mask=mask, **kwargs)
             df, dtypes = _geopandas_to_polars(df, path)
             return df.lazy(), dtypes
@@ -243,6 +245,24 @@ def read_file(
     except Exception:
         table = read_nrows(path, nrow, nth_batch, file_system=None)
     return _pyarrow_to_polars(table, path, file_system)
+
+
+def get_num_rows(file) -> int:
+    try:
+        return pq.read_metadata(file).num_rows
+    except Exception as e:
+        try:
+            return pyarrow.dataset.dataset(file).count_rows()
+        except Exception as e2:
+            if not hasattr(file, "glob"):
+                raise e2 from 2
+
+            def _get_num_rows(path):
+                with path.open("rb") as file:
+                    return pq.read_metadata(file).num_rows
+
+            with ThreadPoolExecutor(25) as executor:
+                return sum(executor.map(_get_num_rows, file.glob("**").files))
 
 
 def run_or_reset(method) -> Callable:
