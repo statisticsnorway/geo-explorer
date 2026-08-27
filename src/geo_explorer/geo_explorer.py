@@ -4327,7 +4327,7 @@ class GeoExplorer:
         df2, alert = self._run_df_function(df2, df, query, path)
         if df2 is None:
             return df, alert
-        if "_unique_id" not in df2:
+        if "_unique_id" not in df2.collect_schema():
             return df, (
                 "Cannot drop internal column '_unique_id' from df. This is added to keep track of data"
             )
