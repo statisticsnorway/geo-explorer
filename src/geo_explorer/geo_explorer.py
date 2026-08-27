@@ -1285,22 +1285,25 @@ class GeoExplorer:
             name="OpenStreetMap",
             checked=True,
         ),
-        "CartoDB Dark Matter": dl.BaseLayer(
+        "Black": dl.BaseLayer(
             dl.TileLayer(
-                url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
-                attribution='&copy; <a href="https://carto.com/">CARTO</a>',
+                url=(
+                    "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' "
+                    "width='256' height='256'%3E%3Crect width='256' height='256' "
+                    "fill='black'/%3E%3C/svg%3E"
+                ),
             ),
-            name="CartoDB Dark Matter",
+            name="Black",
             checked=False,
         ),
-        "Norge i bilder": dl.BaseLayer(
-            dl.TileLayer(
-                url="https://opencache.statkart.no/gatekeeper/gk/gk.open_nib_web_mercator_wmts_v2?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=Nibcache_web_mercator_v2&STYLE=default&FORMAT=image/jpgpng&tileMatrixSet=default028mm&tileMatrix={z}&tileRow={y}&tileCol={x}",
-                attribution="© Geovekst",
-            ),
-            name="Norge i bilder",
-            checked=False,
-        ),
+        # "Norge i bilder": dl.BaseLayer(
+        #     dl.TileLayer(
+        #         url="https://opencache.statkart.no/gatekeeper/gk/gk.open_nib_web_mercator_wmts_v2?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=Nibcache_web_mercator_v2&STYLE=default&FORMAT=image/jpgpng&tileMatrixSet=default028mm&tileMatrix={z}&tileRow={y}&tileCol={x}",
+        #         attribution="© Geovekst",
+        #     ),
+        #     name="Norge i bilder",
+        #     checked=False,
+        # ),
         "Google maps": dl.BaseLayer(
             dl.TileLayer(
                 url="https://mt0.google.com/vt/lyrs=m&hl=en&x={x}&y={y}&z={z}",
@@ -3133,6 +3136,7 @@ class GeoExplorer:
                 "style",
             ),
             State("debounced_bounds", "value"),
+            State("lc", "children"),
             # State("column-dropdown", "value"),
             State("bins", "data"),
         )
@@ -3151,6 +3155,7 @@ class GeoExplorer:
             checked_clicks,
             checked_wms_clicks,
             bounds,
+            current_layers_control,
             # column,
             bins,
         ):
@@ -3301,12 +3306,26 @@ class GeoExplorer:
                 )
                 image_overlays.append(image_overlay)
 
+            if isinstance(current_layers_control, dict):
+                current_base_layer = current_layers_control.get("props", {}).get(
+                    "baseLayer"
+                )
+            else:
+                current_base_layer = None
+            current_base_layer = current_base_layer or "OpenStreetMap"
+            base_layers = [
+                dl.BaseLayer(
+                    layer.children,
+                    name=name,
+                    checked=name == current_base_layer,
+                )
+                for name, layer in self._base_layers.items()
+            ]
+
             return (
                 dl.LayersControl(
-                    list(self._base_layers.values())
-                    + wms_layers
-                    + data
-                    + image_overlays
+                    base_layers + wms_layers + data + image_overlays,
+                    baseLayer=current_base_layer,
                 ),
                 alerts,
                 max_rows_component,
