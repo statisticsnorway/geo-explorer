@@ -431,6 +431,22 @@ class FileBrowser:
         ]
 
         paths.sort(key=lambda x: x["name"])
+
+        if len(paths) > 250:
+            paths = paths[:250]
+            list_truncated = [
+                html.Tr(
+                    "List truncated to 250 entries. Refine your search to see more.",
+                    style={
+                        "paddingLeft": "3px",
+                        "width": "80vh",
+                        "fontSize": "20px",
+                    },
+                )
+            ]
+        else:
+            list_truncated = []
+
         isdir_list = [x["type"] == "directory" for x in paths]
 
         if self.sum_partition_sizes:
@@ -438,7 +454,8 @@ class FileBrowser:
 
         return (
             paths,
-            [
+            list_truncated
+            + [
                 _get_file_list_row(
                     x["name"],
                     x.get("updated", None),
