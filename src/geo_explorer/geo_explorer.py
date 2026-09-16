@@ -746,7 +746,7 @@ def _read_files(explorer, paths: list[str], mask=None, **kwargs) -> None:
         )
     for selected_path in explorer.selected_files:
         for path, (df, dtypes) in zip(paths, more_data, strict=True):
-            if selected_path not in path or df is None:
+            if selected_path not in path or df is None or path in explorer._loaded_data:
                 continue
             if isinstance(df, (Dataset | DataArray)):
                 explorer._loaded_data[path] = df
@@ -2959,7 +2959,9 @@ class GeoExplorer:
                 self.column = None
                 self.color_dict = {}
                 return html.Div(), None, False, None, 1
-            elif column != self.column or triggered in ["force-categorical"]:
+            elif (column != self.column and triggered != "TODO") or triggered in [
+                "force-categorical"
+            ]:
                 self.color_dict = {}
             elif not column and triggered is None:
                 column = self.column
@@ -3490,15 +3492,7 @@ class GeoExplorer:
                 return dash.no_update, dash.no_update, None
             unique_id = feature["properties"]["_unique_id"]
             i = int(float(unique_id))
-            try:
-                path = list(self._loaded_data)[i]
-            except IndexError as e:
-                try:
-                    i -= 999
-                    path = self._run_or_reset(lambda x: list(x._loaded_data)[i])
-                except IndexError as e2:
-                    debug_print(locals())
-                    raise type(e)(f"{e}: {i=}, {self._loaded_data.keys()=}") from e2
+            path = list(self._loaded_data)[i]
             bounds = self._nested_bounds_to_bounds(bounds)
             feature, geometry = self._get_selected_feature(
                 unique_id, path, bounds=bounds
@@ -3724,6 +3718,8 @@ class GeoExplorer:
             try:
                 df = list(self._loaded_data.values())[i]
             except IndexError as e:
+                if DEBUG:
+                    debug_print(locals())
                 raise IndexError(f"{e} for {i=} and {self._loaded_data=}")
             matches = (
                 df.filter(pl.col("_unique_id") == unique_id)
