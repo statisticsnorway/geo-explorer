@@ -58,6 +58,7 @@ from geopandas import GeoDataFrame
 from geopandas import GeoSeries
 from geopandas.array import GeometryArray
 from jenkspy import jenks_breaks
+import polars.selectors as cs
 from sgis import get_common_crs
 from sgis.io.dapla_functions import _get_bounds_parquet
 from sgis.io.dapla_functions import _get_bounds_parquet_from_open_file
@@ -1371,6 +1372,7 @@ class GeoExplorer:
         opacity: float = 0.6,
         nan_color: str = "#969696",
         nan_label: str = "Missing",
+        rounding: int = 3,
         max_read_size_per_callback: int = 1e9,
         sum_partition_sizes: bool = True,
         build_app: bool = True,
@@ -1397,6 +1399,7 @@ class GeoExplorer:
         self._kwargs = kwargs  # save kwargs for the "export" button
         self._bounds = None
         self.column = column
+        self.rounding = rounding
         self.color_dict = {
             key: (color if color.startswith("#") else _named_color_to_hex(color))
             for key, color in (color_dict or {}).items()
@@ -3539,7 +3542,12 @@ class GeoExplorer:
                     for col in intersecting.columns
                     if intersecting[col].is_null().all()
                 ]
-                properties = intersecting.drop(*all_null_cols).to_dicts()
+                intersecting = intersecting.drop(*all_null_cols)
+                float_cols = intersecting.select(cs.float()).columns
+                intersecting = intersecting.with_columns(
+                    pl.col(float_cols).round(self.rounding).cast(pl.String)
+                )
+                properties = intersecting.to_dicts()
             else:
                 properties = [{key: value for key, value in feature.items()}]
             for props in properties:
@@ -3665,6 +3673,10 @@ class GeoExplorer:
                 self._current_table_view = None
                 return None, alert
 
+            float_cols = df.select(cs.float()).columns
+            df = df.with_columns(
+                pl.col(float_cols).round(self.rounding).cast(pl.String)
+            )
             clicked_features = df.to_dicts()
             return clicked_features, None
 
@@ -3994,7 +4006,7 @@ class GeoExplorer:
         columns_union = set()
         for x in data:
             columns_union |= set(x)
-        columns = [{"name": k, "id": k} for k in columns_union]
+        columns = [{"name": k, "id": k} for k in sorted(columns_union)]
         height = min(40, len(data) * 5 + 5)
         return (
             columns,
@@ -4082,6 +4094,9 @@ class GeoExplorer:
             *HIDDEN_ADDED_COLUMNS.difference({"_unique_id"}).union({"split_index"}),
             strict=False,
         ).collect()
+
+        float_cols = row.select(cs.float()).columns
+        row = row.with_columns(pl.col(float_cols).round(self.rounding).cast(pl.String))
 
         if not len(row) and recurse:
             time.sleep(0.1)
